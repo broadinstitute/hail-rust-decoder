@@ -96,7 +96,18 @@ impl EncodedType {
             EncodedType::EBoolean { .. } => Ok(EncodedValue::Boolean(buffer.read_bool()?)),
             EncodedType::EArray { element, .. } => {
                 // Arrays: [i32 length][elements...]
+                // Note: Some arrays seem to have extra padding/mystery bytes before length
+                // We'll read i32 length for now
                 let length = buffer.read_i32()? as usize;
+
+                // Sanity check on length
+                if length > 100000 {
+                    return Err(HailError::InvalidFormat(format!(
+                        "Array length too large: {}",
+                        length
+                    )));
+                }
+
                 let mut elements = Vec::with_capacity(length);
                 for _ in 0..length {
                     elements.push(element.read(buffer)?);
