@@ -4,9 +4,11 @@
 
 pub mod decoder;
 pub mod encoded_type;
+pub mod etype_parser;
 
 pub use decoder::{Decoder, HailDecoder, Value};
-pub use encoded_type::{EncodedType, EncodedValue, EncodedField};
+pub use encoded_type::{EncodedField, EncodedType, EncodedValue};
+pub use etype_parser::ETypeParser;
 
 use crate::Result;
 

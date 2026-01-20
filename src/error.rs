@@ -41,4 +41,7 @@ pub enum HailError {
 
     #[error("Object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
 }
