@@ -3,8 +3,10 @@
 //! This module will implement decoders for all Hail types
 
 pub mod decoder;
+pub mod encoded_type;
 
-pub use decoder::Decoder;
+pub use decoder::{Decoder, HailDecoder, Value};
+pub use encoded_type::{EncodedType, EncodedValue};
 
 use crate::Result;
 
