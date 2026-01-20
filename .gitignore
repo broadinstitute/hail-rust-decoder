@@ -1,5 +1,8 @@
 # Test data directories
 data/
+test_hail_data/*.ht
+test_hail_data/.venv
+test_hail_data/__pycache__
 
 # Rust
 target/

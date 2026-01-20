@@ -1,0 +1,152 @@
+//! Buffer stack builder for constructing the correct Hail buffer chain
+//!
+//! Hail uses a layered buffer architecture. The correct stack depends on the
+//! metadata's `_bufferSpec` field. This module provides builders to construct
+//! the appropriate stack.
+
+use crate::buffer::{BlockingBuffer, InputBuffer, LEB128Buffer, StreamBlockBuffer, ZstdBuffer};
+use crate::Result;
+use std::fs::File;
+use std::path::Path;
+
+/// Builds the standard Hail buffer stack for reading encoded data
+///
+/// The standard stack (as specified by LEB128BufferSpec in metadata):
+/// ```text
+/// LEB128Buffer
+///   └─ BlockingBuffer (optional, for performance)
+///       └─ ZstdBuffer (block-based Zstd decompression)
+///           └─ StreamBlockBuffer (reads length-prefixed blocks)
+///               └─ File
+/// ```
+///
+/// # Example
+/// ```no_run
+/// use hail_decoder::buffer::BufferBuilder;
+///
+/// let mut buffer = BufferBuilder::from_file("data.bin")
+///     .expect("Failed to open file")
+///     .with_leb128()
+///     .build();
+/// ```
+pub struct BufferBuilder<R> {
+    reader: R,
+    use_blocking: bool,
+    block_size: usize,
+}
+
+impl BufferBuilder<File> {
+    /// Create a buffer builder from a file path
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let file = File::open(path)?;
+        Ok(Self::from_reader(file))
+    }
+}
+
+impl<R: std::io::Read + 'static> BufferBuilder<R> {
+    /// Create a buffer builder from any reader
+    pub fn from_reader(reader: R) -> Self {
+        Self {
+            reader,
+            use_blocking: false,
+            block_size: 65536,
+        }
+    }
+
+    /// Enable blocking buffer layer (recommended for large files)
+    pub fn with_blocking(mut self, block_size: usize) -> Self {
+        self.use_blocking = true;
+        self.block_size = block_size;
+        self
+    }
+
+    /// Build the buffer stack with LEB128 encoding
+    ///
+    /// This is the STANDARD configuration for Hail data files when the
+    /// metadata specifies `LEB128BufferSpec`.
+    ///
+    /// Use this unless you have a specific reason not to.
+    pub fn with_leb128(self) -> LEB128BufferStack<R> {
+        LEB128BufferStack {
+            builder: self,
+        }
+    }
+
+    /// Build the buffer stack WITHOUT LEB128 encoding
+    ///
+    /// WARNING: This should only be used for:
+    /// - Testing specific buffer layers
+    /// - Data files that explicitly don't use LEB128BufferSpec
+    ///
+    /// Most Hail data files REQUIRE LEB128 encoding.
+    pub fn without_leb128(self) -> RawBufferStack<R> {
+        RawBufferStack {
+            builder: self,
+        }
+    }
+}
+
+/// Buffer stack with LEB128 integer encoding (STANDARD)
+pub struct LEB128BufferStack<R> {
+    builder: BufferBuilder<R>,
+}
+
+impl<R: std::io::Read + 'static> LEB128BufferStack<R> {
+    /// Build the complete buffer stack
+    ///
+    /// Returns LEB128Buffer wrapping the appropriate inner buffers
+    pub fn build(self) -> Box<dyn InputBuffer> {
+        let stream = StreamBlockBuffer::new(self.builder.reader);
+        let zstd = ZstdBuffer::new(stream);
+
+        if self.builder.use_blocking {
+            let blocking = BlockingBuffer::new(zstd, self.builder.block_size);
+            Box::new(LEB128Buffer::new(blocking))
+        } else {
+            Box::new(LEB128Buffer::new(zstd))
+        }
+    }
+}
+
+/// Buffer stack without LEB128 encoding (LEGACY/TESTING ONLY)
+pub struct RawBufferStack<R> {
+    builder: BufferBuilder<R>,
+}
+
+impl<R: std::io::Read + 'static> RawBufferStack<R> {
+    /// Build the buffer stack without LEB128
+    ///
+    /// Returns ZstdBuffer for direct access to decompressed bytes
+    pub fn build(self) -> ZstdBuffer<StreamBlockBuffer<R>> {
+        let stream = StreamBlockBuffer::new(self.builder.reader);
+        ZstdBuffer::new(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_builder_construction() {
+        let data = vec![0u8; 100];
+        let cursor = Cursor::new(data);
+
+        // Should compile and construct without panicking
+        let _buffer = BufferBuilder::from_reader(cursor)
+            .with_leb128()
+            .build();
+    }
+
+    #[test]
+    fn test_builder_with_blocking() {
+        let data = vec![0u8; 100];
+        let cursor = Cursor::new(data);
+
+        let _buffer = BufferBuilder::from_reader(cursor)
+            .with_blocking(32768)
+            .with_leb128()
+            .build();
+    }
+}

@@ -1,23 +1,49 @@
 ///! Test decoding actual data using parsed metadata
+///!
+///! This is the main integration test that validates:
+///! 1. EType parsing from metadata
+///! 2. Correct buffer stack setup (with LEB128)
+///! 3. Complete row decoding with nested structs
+///! 4. Array decoding
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use flate2::read::GzDecoder;
+use hail_decoder::buffer::{BufferBuilder, InputBuffer};
 use hail_decoder::codec::{EncodedType, EncodedValue, ETypeParser};
+use serde_json::Value;
 use std::fs::File;
 
 #[test]
 fn test_decode_first_11_fields_using_metadata() {
-    // Parse the row structure from metadata
-    // Simplified: just the first 11 fields up to and including exons
-    let etype_str = "+EBaseStruct{interval:EBaseStruct{start:EBaseStruct{contig:+EBinary,position:+EInt32},end:EBaseStruct{contig:+EBinary,position:+EInt32},includesStart:+EBoolean,includesEnd:+EBoolean},gene_id:EBinary,gene_version:EBinary,gencode_symbol:EBinary,chrom:EBinary,strand:EBinary,start:EInt32,stop:EInt32,xstart:EInt64,xstop:EInt64,exons:EArray[EBaseStruct{feature_type:EBinary,start:EInt32,stop:EInt32,xstart:EInt64,xstop:EInt64}]}";
+    // Load the actual EType from metadata file
+    let metadata_path = "data/gene_models_hds/ht/prep_table.ht/rows/metadata.json.gz";
+    let metadata_file = File::open(metadata_path).expect("Failed to open metadata file");
+    let decoder = GzDecoder::new(metadata_file);
+    let metadata: Value = serde_json::from_reader(decoder).expect("Failed to parse metadata JSON");
+
+    let etype_str = metadata["_codecSpec"]["_eType"]
+        .as_str()
+        .expect("Failed to get _eType from metadata");
+
+    eprintln!("EType length: {} characters", etype_str.len());
+    eprintln!("EType: {}", &etype_str[..100.min(etype_str.len())]);
 
     let row_type = ETypeParser::parse(etype_str).expect("Failed to parse EType");
 
+    eprintln!("Successfully parsed EType");
+
     println!("\n=== Decoded row structure ===");
-    println!("Fields: {}", if let EncodedType::EBaseStruct { fields, .. } = &row_type {
-        fields.len()
-    } else {
-        0
-    });
+    if let EncodedType::EBaseStruct { fields, .. } = &row_type {
+        println!("Fields: {}", fields.len());
+        let nullable_count = fields.iter().filter(|f| !f.encoded_type.is_required()).count();
+        println!("Nullable fields: {}", nullable_count);
+        println!("Expected bitmap bytes: {}", (nullable_count + 7) / 8);
+
+        println!("\nField list:");
+        for (i, field) in fields.iter().enumerate() {
+            let req = if field.encoded_type.is_required() { "required" } else { "nullable" };
+            println!("  {}: {} ({})", i, field.name, req);
+        }
+    }
 
     // Open the data file
     let rows_dir = "data/gene_models_hds/ht/prep_table.ht/rows/parts/";
@@ -33,23 +59,30 @@ fn test_decode_first_11_fields_using_metadata() {
         .collect();
 
     let part_file = &entries[0];
-    let file = File::open(part_file.path()).unwrap();
-    let stream = StreamBlockBuffer::new(file);
-    let mut buffer = ZstdBuffer::new(stream);
 
-    println!("\n=== Decoding first row ===");
+    println!("\n=== Setting up buffer with LEB128 encoding ===");
 
-    // Read some bytes to see what we have
-    let first_bytes: Vec<u8> = (0..20).map(|_| buffer.read_u8().unwrap()).collect();
-    println!("First 20 bytes: {:02x?}", first_bytes);
+    // Use BufferBuilder to create the correct stack with LEB128 encoding
+    // This is REQUIRED for proper integer decoding as specified in metadata
+    let mut buffer = BufferBuilder::from_file(part_file.path())
+        .expect("Failed to open data file")
+        .with_leb128()
+        .build();
 
-    // Reopen file to start fresh
-    let file2 = File::open(part_file.path()).unwrap();
-    let stream2 = StreamBlockBuffer::new(file2);
-    let mut buffer2 = ZstdBuffer::new(stream2);
+    println!("=== Decoding first row ===");
 
-    // Decode using the parsed type
-    let result = row_type.read(&mut buffer2).expect("Failed to decode row");
+    // IMPORTANT: Table rows are ALWAYS encoded with a present flag,
+    // even when the EType is marked as +EBaseStruct (required).
+    // This is a Hail quirk - the + describes the logical type, not the physical encoding.
+    println!("Reading row present flag...");
+    let row_present = buffer.read_bool().expect("Failed to read row present flag");
+    println!("Row present: {}", row_present);
+    if !row_present {
+        panic!("Row is null!");
+    }
+
+    // Now decode the row struct (using read_present_value since we already checked the flag)
+    let result = row_type.read_present_value(&mut buffer).expect("Failed to decode row");
 
     // Extract and print key fields
     if let EncodedValue::Struct(fields) = result {

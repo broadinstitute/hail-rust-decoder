@@ -45,9 +45,11 @@ impl<B: InputBuffer> LEB128Buffer<B> {
         let mut result: i64 = 0;
         let mut shift = 0;
         let mut byte;
+        let mut bytes_read = Vec::new();
 
         loop {
             byte = self.inner.read_u8()?;
+            bytes_read.push(byte);
             result |= ((byte & 0x7F) as i64) << shift;
             shift += 7;
 
@@ -67,6 +69,7 @@ impl<B: InputBuffer> LEB128Buffer<B> {
             result |= !0 << shift;
         }
 
+        eprintln!("    SLEB128: bytes={:02x?}, result={}", bytes_read, result);
         Ok(result)
     }
 
@@ -80,6 +83,19 @@ impl<B: InputBuffer> InputBuffer for LEB128Buffer<B> {
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         self.inner.read_exact(buf)
     }
+
+    // Override integer reads to use LEB128 encoding
+    // This is required when metadata specifies LEB128BufferSpec
+    fn read_i32(&mut self) -> Result<i32> {
+        self.read_sleb128().map(|v| v as i32)
+    }
+
+    fn read_i64(&mut self) -> Result<i64> {
+        self.read_sleb128()
+    }
+
+    // Note: read_u8, read_bool, read_f32, read_f64 use default implementations
+    // (read raw bytes via read_exact) because these are not LEB128 encoded in Hail
 }
 
 #[cfg(test)]

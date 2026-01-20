@@ -31,9 +31,13 @@ impl<B: InputBuffer> ZstdBuffer<B> {
             Err(e) => return Err(e),
         };
 
+        eprintln!("ZSTD: Expected decompressed size: {} bytes", decompressed_size);
+
         // Read the Zstd magic number (0xFD2FB528 in little-endian: 28 B5 2F FD)
         let mut magic = [0u8; 4];
         self.inner.read_exact(&mut magic)?;
+
+        eprintln!("ZSTD: Magic bytes: {:02x?}", magic);
 
         if magic != [0x28, 0xB5, 0x2F, 0xFD] {
             return Err(HailError::InvalidFormat(format!(
@@ -105,6 +109,8 @@ impl<B: InputBuffer> ZstdBuffer<B> {
                 Ok(decompressed) => {
                     // Check if we got the expected size
                     if decompressed.len() == decompressed_size {
+                        eprintln!("ZSTD: Decompressed {} bytes successfully", decompressed.len());
+                        eprintln!("ZSTD: Data: {:02x?}", &decompressed[..decompressed.len().min(20)]);
                         self.decompressed = decompressed;
                         self.position = 0;
                         return Ok(true);

@@ -5,13 +5,32 @@
 //! 2. ZstdBuffer - decompresses Zstd data
 //! 3. BlockingBuffer - provides fixed-size buffering
 //! 4. LEB128Buffer - decodes variable-length integers
+//!
+//! # Usage
+//!
+//! **For most use cases**, use the [`BufferBuilder`] to construct the correct stack:
+//!
+//! ```no_run
+//! use hail_decoder::buffer::BufferBuilder;
+//!
+//! // Standard configuration (with LEB128 encoding)
+//! let mut buffer = BufferBuilder::from_file("data.bin")
+//!     .unwrap()
+//!     .with_leb128()
+//!     .build();
+//! ```
+//!
+//! The builder ensures you set up the correct buffer chain as specified by
+//! Hail's metadata `_bufferSpec` field.
 
 pub mod blocking;
+pub mod builder;
 pub mod leb128;
 pub mod stream_block;
 pub mod zstd;
 
 pub use blocking::BlockingBuffer;
+pub use builder::BufferBuilder;
 pub use leb128::LEB128Buffer;
 pub use stream_block::StreamBlockBuffer;
 pub use zstd::ZstdBuffer;
@@ -61,5 +80,36 @@ pub trait InputBuffer {
     /// Read a boolean
     fn read_bool(&mut self) -> Result<bool> {
         Ok(self.read_u8()? != 0)
+    }
+}
+
+// Implement InputBuffer for Box<dyn InputBuffer> to allow dynamic dispatch
+impl InputBuffer for Box<dyn InputBuffer> {
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        (**self).read_exact(buf)
+    }
+
+    fn read_i32(&mut self) -> Result<i32> {
+        (**self).read_i32()
+    }
+
+    fn read_i64(&mut self) -> Result<i64> {
+        (**self).read_i64()
+    }
+
+    fn read_f32(&mut self) -> Result<f32> {
+        (**self).read_f32()
+    }
+
+    fn read_f64(&mut self) -> Result<f64> {
+        (**self).read_f64()
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        (**self).read_u8()
+    }
+
+    fn read_bool(&mut self) -> Result<bool> {
+        (**self).read_bool()
     }
 }

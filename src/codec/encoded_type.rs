@@ -69,9 +69,12 @@ impl EncodedType {
         // For standalone values, check nullable flag if needed
         if !self.is_required() {
             let is_present = buffer.read_bool()?;
+            eprintln!("DEBUG read(): nullable value, present = {}", is_present);
             if !is_present {
                 return Ok(EncodedValue::Null);
             }
+        } else {
+            eprintln!("DEBUG read(): required value, no present check");
         }
 
         // Decode the present value
@@ -85,6 +88,7 @@ impl EncodedType {
             EncodedType::EBinary { .. } => {
                 // Read i32 byte-length prefix (from EBinary.scala line 54: in.readInt())
                 let length = buffer.read_i32()?;
+                eprintln!("    -> Binary length: {}", length);
                 if length < 0 || length > 1_000_000 {
                     return Err(HailError::InvalidFormat(format!(
                         "Invalid binary length: {}",
@@ -94,6 +98,12 @@ impl EncodedType {
                 let length = length as usize;
                 let mut bytes = vec![0u8; length];
                 buffer.read_exact(&mut bytes)?;
+                let preview = String::from_utf8_lossy(&bytes);
+                if preview.len() < 50 {
+                    eprintln!("    -> Binary data: \"{}\"", preview);
+                } else {
+                    eprintln!("    -> Binary data: \"{}...\"", &preview[..50]);
+                }
                 Ok(EncodedValue::Binary(bytes))
             }
             EncodedType::EBaseStruct { fields, .. } => {
@@ -110,16 +120,27 @@ impl EncodedType {
                 let n_nullable = fields.iter().filter(|f| !f.encoded_type.is_required()).count();
                 let n_missing_bytes = (n_nullable + 7) / 8;
 
+                eprintln!("DEBUG: Struct with {} fields, {} nullable, reading {} bitmap bytes",
+                         fields.len(), n_nullable, n_missing_bytes);
+                if !fields.is_empty() {
+                    eprintln!("  First field: {} ({})", fields[0].name,
+                             if fields[0].encoded_type.is_required() { "required" } else { "nullable" });
+                }
+
                 let mut missing_bitmap = vec![0u8; n_missing_bytes];
                 buffer.read_exact(&mut missing_bitmap)?;
+                if n_missing_bytes > 0 {
+                    eprintln!("  Bitmap: {:02x?}", missing_bitmap);
+                }
 
                 // STEP 2: Decode each field
                 let mut field_values = Vec::with_capacity(fields.len());
                 let mut nullable_idx = 0; // Index in the bitmap (only increments for nullable fields)
 
-                for field in fields {
+                for (field_idx, field) in fields.iter().enumerate() {
                     if field.encoded_type.is_required() {
                         // Required field - always present, read it
+                        eprintln!("  Field {} '{}' is required, decoding...", field_idx, field.name);
                         let value = field.encoded_type.read_present_value(buffer)?;
                         field_values.push((field.name.clone(), value));
                     } else {
@@ -130,9 +151,11 @@ impl EncodedType {
                         let is_missing = bit == 1; // 1 = missing, 0 = present
 
                         if is_missing {
+                            eprintln!("  Field {} '{}' (bit {}) is NULL", field_idx, field.name, nullable_idx);
                             field_values.push((field.name.clone(), EncodedValue::Null));
                         } else {
                             // Field is present - read it WITHOUT checking nullable flag
+                            eprintln!("  Field {} '{}' (bit {}) is present, decoding...", field_idx, field.name, nullable_idx);
                             let value = field.encoded_type.read_present_value(buffer)?;
                             field_values.push((field.name.clone(), value));
                         }
@@ -143,11 +166,23 @@ impl EncodedType {
 
                 Ok(EncodedValue::Struct(field_values))
             }
-            EncodedType::EInt32 { .. } => Ok(EncodedValue::Int32(buffer.read_i32()?)),
-            EncodedType::EInt64 { .. } => Ok(EncodedValue::Int64(buffer.read_i64()?)),
+            EncodedType::EInt32 { .. } => {
+                let val = buffer.read_i32()?;
+                eprintln!("    -> Int32: {}", val);
+                Ok(EncodedValue::Int32(val))
+            }
+            EncodedType::EInt64 { .. } => {
+                let val = buffer.read_i64()?;
+                eprintln!("    -> Int64: {}", val);
+                Ok(EncodedValue::Int64(val))
+            }
             EncodedType::EFloat32 { .. } => Ok(EncodedValue::Float32(buffer.read_f32()?)),
             EncodedType::EFloat64 { .. } => Ok(EncodedValue::Float64(buffer.read_f64()?)),
-            EncodedType::EBoolean { .. } => Ok(EncodedValue::Boolean(buffer.read_bool()?)),
+            EncodedType::EBoolean { .. } => {
+                let val = buffer.read_bool()?;
+                eprintln!("    -> Boolean: {}", val);
+                Ok(EncodedValue::Boolean(val))
+            }
             EncodedType::EArray { element, .. } => {
                 // Array encoding format (from Hail's EArray.scala):
                 // [i32 length][missing bitmap (if nullable elements)][elements (only present ones)]
@@ -159,7 +194,9 @@ impl EncodedType {
                 // - Number of bytes = ⌈length / 8⌉
 
                 // STEP 1: Read array length
+                eprintln!("    -> Reading array length...");
                 let length = buffer.read_i32()?;
+                eprintln!("    -> Array length: {}", length);
 
                 // Sanity check on length
                 if length < 0 || length > 100000 {
