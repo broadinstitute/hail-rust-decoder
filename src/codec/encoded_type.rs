@@ -63,9 +63,10 @@ impl EncodedType {
         }
     }
 
-    /// Read a value using this encoding
+    /// Read a standalone value (checks nullable flag if needed)
+    /// Use this for top-level values or values outside of structs
     pub fn read(&self, buffer: &mut dyn InputBuffer) -> Result<EncodedValue> {
-        // If not required, check for null flag
+        // For standalone values, check nullable flag if needed
         if !self.is_required() {
             let is_present = buffer.read_bool()?;
             if !is_present {
@@ -73,20 +74,73 @@ impl EncodedType {
             }
         }
 
+        // Decode the present value
+        self.read_present_value(buffer)
+    }
+
+    /// Read a value that's known to be present (for struct fields after bitmap check)
+    /// This does NOT check for a nullable flag - assumes caller has checked the bitmap
+    pub fn read_present_value(&self, buffer: &mut dyn InputBuffer) -> Result<EncodedValue> {
         match self {
             EncodedType::EBinary { .. } => {
-                // Read byte-length prefix
-                let length = buffer.read_u8()? as usize;
+                // Read i32 byte-length prefix (from EBinary.scala line 54: in.readInt())
+                let length = buffer.read_i32()?;
+                if length < 0 || length > 1_000_000 {
+                    return Err(HailError::InvalidFormat(format!(
+                        "Invalid binary length: {}",
+                        length
+                    )));
+                }
+                let length = length as usize;
                 let mut bytes = vec![0u8; length];
                 buffer.read_exact(&mut bytes)?;
                 Ok(EncodedValue::Binary(bytes))
             }
             EncodedType::EBaseStruct { fields, .. } => {
+                // Struct encoding format (from Hail's EBaseStruct.scala):
+                // [missing bitmap][field data for present fields only]
+                //
+                // Missing bitmap:
+                // - 1 bit per nullable field (1 = missing, 0 = present)
+                // - Packed 8 fields per byte
+                // - Only counts nullable fields (required fields don't get a bit)
+                // - Number of bytes = ⌈n_nullable_fields / 8⌉
+
+                // STEP 1: Count nullable fields and read bitmap
+                let n_nullable = fields.iter().filter(|f| !f.encoded_type.is_required()).count();
+                let n_missing_bytes = (n_nullable + 7) / 8;
+
+                let mut missing_bitmap = vec![0u8; n_missing_bytes];
+                buffer.read_exact(&mut missing_bitmap)?;
+
+                // STEP 2: Decode each field
                 let mut field_values = Vec::with_capacity(fields.len());
+                let mut nullable_idx = 0; // Index in the bitmap (only increments for nullable fields)
+
                 for field in fields {
-                    let value = field.encoded_type.read(buffer)?;
-                    field_values.push((field.name.clone(), value));
+                    if field.encoded_type.is_required() {
+                        // Required field - always present, read it
+                        let value = field.encoded_type.read_present_value(buffer)?;
+                        field_values.push((field.name.clone(), value));
+                    } else {
+                        // Nullable field - check bitmap
+                        let byte_idx = nullable_idx / 8;
+                        let bit_idx = nullable_idx % 8;
+                        let bit = (missing_bitmap[byte_idx] >> bit_idx) & 1;
+                        let is_missing = bit == 1; // 1 = missing, 0 = present
+
+                        if is_missing {
+                            field_values.push((field.name.clone(), EncodedValue::Null));
+                        } else {
+                            // Field is present - read it WITHOUT checking nullable flag
+                            let value = field.encoded_type.read_present_value(buffer)?;
+                            field_values.push((field.name.clone(), value));
+                        }
+
+                        nullable_idx += 1;
+                    }
                 }
+
                 Ok(EncodedValue::Struct(field_values))
             }
             EncodedType::EInt32 { .. } => Ok(EncodedValue::Int32(buffer.read_i32()?)),
@@ -95,23 +149,60 @@ impl EncodedType {
             EncodedType::EFloat64 { .. } => Ok(EncodedValue::Float64(buffer.read_f64()?)),
             EncodedType::EBoolean { .. } => Ok(EncodedValue::Boolean(buffer.read_bool()?)),
             EncodedType::EArray { element, .. } => {
-                // Arrays: [i32 length][elements...]
-                // Note: Some arrays seem to have extra padding/mystery bytes before length
-                // We'll read i32 length for now
-                let length = buffer.read_i32()? as usize;
+                // Array encoding format (from Hail's EArray.scala):
+                // [i32 length][missing bitmap (if nullable elements)][elements (only present ones)]
+                //
+                // Missing bitmap:
+                // - 1 bit per element (1 = missing, 0 = present)
+                // - Packed 8 elements per byte
+                // - Only included if elements are nullable
+                // - Number of bytes = ⌈length / 8⌉
+
+                // STEP 1: Read array length
+                let length = buffer.read_i32()?;
 
                 // Sanity check on length
-                if length > 100000 {
+                if length < 0 || length > 100000 {
                     return Err(HailError::InvalidFormat(format!(
-                        "Array length too large: {}",
+                        "Invalid array length: {}",
                         length
                     )));
                 }
+                let length = length as usize;
 
+                // STEP 2: Read missing bitmap if elements are nullable
+                let missing_bitmap = if !element.is_required() {
+                    let n_missing_bytes = (length + 7) / 8; // ⌈length / 8⌉
+                    let mut bitmap = vec![0u8; n_missing_bytes];
+                    buffer.read_exact(&mut bitmap)?;
+                    Some(bitmap)
+                } else {
+                    None
+                };
+
+                // STEP 3: Read elements (only present ones if nullable)
                 let mut elements = Vec::with_capacity(length);
-                for _ in 0..length {
-                    elements.push(element.read(buffer)?);
+                for i in 0..length {
+                    // Check if element is present
+                    let is_present = if let Some(ref bitmap) = missing_bitmap {
+                        let byte_idx = i / 8;
+                        let bit_idx = i % 8;
+                        let bit = (bitmap[byte_idx] >> bit_idx) & 1;
+                        bit == 0 // 0 = present, 1 = missing
+                    } else {
+                        true // All required elements are present
+                    };
+
+                    if is_present {
+                        // Read the element WITHOUT checking nullable flag
+                        // (the array's missing bitmap already determined presence)
+                        elements.push(element.read_present_value(buffer)?);
+                    } else {
+                        // Element is missing
+                        elements.push(EncodedValue::Null);
+                    }
                 }
+
                 Ok(EncodedValue::Array(elements))
             }
         }

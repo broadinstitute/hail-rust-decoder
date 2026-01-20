@@ -6,7 +6,7 @@ pub mod decoder;
 pub mod encoded_type;
 
 pub use decoder::{Decoder, HailDecoder, Value};
-pub use encoded_type::{EncodedType, EncodedValue};
+pub use encoded_type::{EncodedType, EncodedValue, EncodedField};
 
 use crate::Result;
 
