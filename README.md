@@ -187,3 +187,4 @@ MIT OR Apache-2.0
 ## Acknowledgments
 
 Based on deep analysis of Hail 0.2.134 source code and binary format reverse engineering.
+# hail-rust-decoder
