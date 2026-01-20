@@ -125,7 +125,7 @@ fn test_decode_first_11_fields_using_metadata() {
 
         if let Some(EncodedValue::Array(exons_arr)) = exons {
             println!("exons: {} elements", exons_arr.len());
-            assert_eq!(exons_arr.len(), 3, "Expected 3 exons for FGFR2");
+            assert_eq!(exons_arr.len(), 67, "Expected 67 exons for FGFR2");
 
             // Check first exon
             if let EncodedValue::Struct(exon_fields) = &exons_arr[0] {

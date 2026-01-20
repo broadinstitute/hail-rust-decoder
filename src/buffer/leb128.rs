@@ -45,11 +45,9 @@ impl<B: InputBuffer> LEB128Buffer<B> {
         let mut result: i64 = 0;
         let mut shift = 0;
         let mut byte;
-        let mut bytes_read = Vec::new();
 
         loop {
             byte = self.inner.read_u8()?;
-            bytes_read.push(byte);
             result |= ((byte & 0x7F) as i64) << shift;
             shift += 7;
 
@@ -69,7 +67,6 @@ impl<B: InputBuffer> LEB128Buffer<B> {
             result |= !0 << shift;
         }
 
-        eprintln!("    SLEB128: bytes={:02x?}, result={}", bytes_read, result);
         Ok(result)
     }
 
@@ -86,12 +83,15 @@ impl<B: InputBuffer> InputBuffer for LEB128Buffer<B> {
 
     // Override integer reads to use LEB128 encoding
     // This is required when metadata specifies LEB128BufferSpec
+    // IMPORTANT: Hail uses ULEB128 (unsigned), not SLEB128 for Int32/Int64!
+    // The values are encoded as unsigned but represent signed integers,
+    // so we cast u64 -> i64 -> i32 to preserve the bit pattern
     fn read_i32(&mut self) -> Result<i32> {
-        self.read_sleb128().map(|v| v as i32)
+        self.read_uleb128().map(|v| v as i64 as i32)
     }
 
     fn read_i64(&mut self) -> Result<i64> {
-        self.read_sleb128()
+        self.read_uleb128().map(|v| v as i64)
     }
 
     // Note: read_u8, read_bool, read_f32, read_f64 use default implementations
@@ -132,8 +132,8 @@ mod tests {
     #[test]
     fn test_read_sleb128_positive() {
         let data = vec![
-            1, 0, 0, 0, // block length
-            0x7F, // 127 in SLEB128
+            2, 0, 0, 0, // block length
+            0xFF, 0x00, // 127 in SLEB128 (multi-byte encoding)
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
@@ -146,14 +146,12 @@ mod tests {
     fn test_read_sleb128_negative() {
         let data = vec![
             1, 0, 0, 0, // block length
-            0x7F, // -1 in SLEB128 (0xFF would be for multi-byte)
+            0x7F, // -1 in SLEB128 (bit 6 set, sign extends to -1)
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
         let mut buffer = LEB128Buffer::new(stream);
 
-        // Note: actual encoding of -1 is 0x7F with sign bit
-        let result = buffer.read_sleb128().unwrap();
-        assert!(result > 0); // This test needs adjustment for actual SLEB128 encoding
+        assert_eq!(buffer.read_sleb128().unwrap(), -1);
     }
 }
