@@ -1,0 +1,65 @@
+//! Buffer implementations for reading Hail data
+//!
+//! This module implements the 4-layer buffer stack used by Hail:
+//! 1. StreamBlockBuffer - reads length-prefixed blocks
+//! 2. ZstdBuffer - decompresses Zstd data
+//! 3. BlockingBuffer - provides fixed-size buffering
+//! 4. LEB128Buffer - decodes variable-length integers
+
+pub mod blocking;
+pub mod leb128;
+pub mod stream_block;
+pub mod zstd;
+
+pub use blocking::BlockingBuffer;
+pub use leb128::LEB128Buffer;
+pub use stream_block::StreamBlockBuffer;
+pub use zstd::ZstdBuffer;
+
+use crate::Result;
+
+/// Trait for all input buffers
+pub trait InputBuffer {
+    /// Read exactly `buf.len()` bytes into `buf`
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
+
+    /// Read a single byte
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    /// Read a 32-bit integer (little-endian)
+    fn read_i32(&mut self) -> Result<i32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(i32::from_le_bytes(buf))
+    }
+
+    /// Read a 64-bit integer (little-endian)
+    fn read_i64(&mut self) -> Result<i64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(i64::from_le_bytes(buf))
+    }
+
+    /// Read a 32-bit float (little-endian)
+    fn read_f32(&mut self) -> Result<f32> {
+        let mut buf = [0u8; 4];
+        self.read_exact(&mut buf)?;
+        Ok(f32::from_le_bytes(buf))
+    }
+
+    /// Read a 64-bit float (little-endian)
+    fn read_f64(&mut self) -> Result<f64> {
+        let mut buf = [0u8; 8];
+        self.read_exact(&mut buf)?;
+        Ok(f64::from_le_bytes(buf))
+    }
+
+    /// Read a boolean
+    fn read_bool(&mut self) -> Result<bool> {
+        Ok(self.read_u8()? != 0)
+    }
+}

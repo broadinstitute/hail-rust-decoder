@@ -1,0 +1,21 @@
+# Test data directories
+data/
+
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+
+# Added by cargo
+
+/target
