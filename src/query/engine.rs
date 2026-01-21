@@ -275,7 +275,13 @@ impl QueryEngine {
         }
 
         // Read and decode the row
-        self.row_type.read(&mut buffer)
+        // NOTE: Hail partition files ALWAYS have a row present flag byte before each row,
+        // regardless of whether the row type is marked as required.
+        let row_present = buffer.read_bool()?;
+        if !row_present {
+            return Ok(EncodedValue::Null);
+        }
+        self.row_type.read_present_value(&mut buffer)
     }
 
     /// Scan a partition and filter rows by key ranges
@@ -293,8 +299,23 @@ impl QueryEngine {
         let mut rows = Vec::new();
 
         // Read all rows from the partition
+        // NOTE: Hail partition files ALWAYS have a row present flag byte before each row,
+        // regardless of whether the row type is marked as required.
         loop {
-            match self.row_type.read(&mut buffer) {
+            // Read row present flag first
+            let row_present = match buffer.read_bool() {
+                Ok(present) => present,
+                Err(HailError::UnexpectedEof) => break,
+                Err(e) => return Err(e),
+            };
+
+            if !row_present {
+                // Skip null rows
+                continue;
+            }
+
+            // Decode the row data
+            match self.row_type.read_present_value(&mut buffer) {
                 Ok(row) => {
                     // Check if row matches the range filters
                     if self.row_matches_ranges(&row, ranges) {

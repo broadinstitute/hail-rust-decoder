@@ -20,17 +20,19 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use hail_decoder::HailTableReader;
+//! use hail_decoder::query::{QueryEngine, KeyRange, KeyValue};
 //!
-//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let reader = HailTableReader::open("path/to/table.ht").await?;
-//! let schema = reader.read_schema().await?;
+//! // Open a Hail table
+//! let mut engine = QueryEngine::open("path/to/table.ht")?;
 //!
-//! for row in reader.rows().await? {
-//!     // Process row
-//! }
-//! # Ok(())
-//! # }
+//! // Query with key ranges
+//! let ranges = vec![
+//!     KeyRange::point("chrom".to_string(), KeyValue::String("10".to_string())),
+//! ];
+//!
+//! let result = engine.query(&ranges)?;
+//! println!("Found {} rows", result.rows.len());
+//! # Ok::<(), hail_decoder::HailError>(())
 //! ```
 
 pub mod buffer;
