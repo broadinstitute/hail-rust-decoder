@@ -11,7 +11,7 @@ use hail_decoder::io::{get_file_size, join_path};
 use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
-use hail_decoder::{HailError, Result};
+use hail_decoder::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -78,7 +78,7 @@ fn print_usage(program: &str) {
     eprintln!("  inspect <table.ht>           Show detailed table information");
     eprintln!("  summary <table.ht>           Show comprehensive table summary with statistics");
     eprintln!("  query <table.ht> [options]   Query the table");
-    eprintln!("  convert <table.ht> <out>     Convert to Parquet (not implemented)");
+    eprintln!("  convert <table.ht> <out>     Convert to Parquet format");
     eprintln!();
     eprintln!("Query options:");
     eprintln!("  --key <field=value>          Point lookup (exact match)");
@@ -484,9 +484,69 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
     }
 }
 
-fn convert(_input: &str, _output: &str) -> Result<()> {
-    eprintln!("Conversion not yet implemented");
-    Err(HailError::InvalidFormat("Not implemented".to_string()))
+fn convert(input: &str, output: &str) -> Result<()> {
+    use arrow::record_batch::RecordBatch;
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
+
+    println!("Converting {} to {}", input, output);
+
+    // Open the query engine to read the table
+    let engine = QueryEngine::open_path(input)?;
+    let num_partitions = engine.num_partitions();
+    let row_type = engine.row_type().clone();
+
+    println!("Table has {} partitions", num_partitions);
+    println!("Key fields: {:?}", engine.key_fields());
+
+    // Create the Parquet writer to get the schema
+    let mut writer = ParquetWriter::new(output, &row_type)?;
+    let arrow_schema = writer.schema().clone();
+
+    // Setup progress bar
+    let pb = ProgressBar::new(num_partitions as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    // Parallel scan: each partition produces a RecordBatch
+    let batches: Vec<Result<RecordBatch>> = (0..num_partitions)
+        .into_par_iter()
+        .map(|i| {
+            let rows = engine.scan_partition(i, &[])?;
+            let batch = build_record_batch(&rows, &row_type, arrow_schema.clone())?;
+            pb.inc(1);
+            Ok(batch)
+        })
+        .collect();
+
+    pb.finish_and_clear();
+
+    // Write all batches sequentially (each becomes a row group)
+    let mut total_rows = 0;
+    for batch_result in batches {
+        let batch = batch_result?;
+        total_rows += batch.num_rows();
+        writer.write_batch(&batch)?;
+    }
+
+    // Close the writer
+    writer.close()?;
+
+    // Print summary
+    let output_size = std::fs::metadata(output)
+        .map(|m| format_bytes(m.len()))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    println!();
+    println!("Conversion complete!");
+    println!("  Rows written: {}", total_rows);
+    println!("  Output file: {}", output);
+    println!("  Output size: {}", output_size);
+
+    Ok(())
 }
 
 /// Format bytes into a human-readable string

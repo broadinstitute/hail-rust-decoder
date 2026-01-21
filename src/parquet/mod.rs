@@ -1,26 +1,14 @@
 //! Parquet conversion utilities
+//!
+//! This module provides functionality to convert Hail tables to Parquet format.
+//!
+//! # Modules
+//! - `schema`: Convert Hail types to Arrow schema
+//! - `builder`: Column builders for row-to-columnar conversion
+//! - `writer`: High-level Parquet writer
 
-use crate::Result;
+pub mod builder;
+pub mod schema;
+pub mod writer;
 
-/// Convert Hail table to Parquet
-pub struct ParquetWriter {
-    // TODO: Implement Parquet writing
-}
-
-impl ParquetWriter {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    /// Write rows to Parquet file
-    pub fn write(&mut self, _output_path: &str) -> Result<()> {
-        // TODO: Implement
-        Ok(())
-    }
-}
-
-impl Default for ParquetWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use writer::{build_record_batch, ParquetWriter};

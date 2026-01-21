@@ -127,6 +127,11 @@ impl QueryEngine {
         &self.rvd_spec
     }
 
+    /// Get the row type (schema) for this table
+    pub fn row_type(&self) -> &EncodedType {
+        &self.row_type
+    }
+
     /// Perform a point lookup by key
     ///
     /// Returns the row matching the exact key, or None if not found.
