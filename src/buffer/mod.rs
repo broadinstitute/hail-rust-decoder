@@ -24,16 +24,20 @@
 //! Hail's metadata `_bufferSpec` field.
 
 pub mod block;
+pub mod block_map;
 pub mod blocking;
 pub mod builder;
 pub mod leb128;
+pub mod slice;
 pub mod stream_block;
 pub mod zstd;
 
 pub use block::InputBlockBuffer;
+pub use block_map::BlockMap;
 pub use blocking::BlockingBuffer;
 pub use builder::BufferBuilder;
 pub use leb128::LEB128Buffer;
+pub use slice::SliceBuffer;
 pub use stream_block::StreamBlockBuffer;
 pub use zstd::ZstdBuffer;
 

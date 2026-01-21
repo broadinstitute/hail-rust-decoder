@@ -7,10 +7,10 @@
 //!
 //! Supports both local and cloud storage paths (GCS, S3).
 
-use crate::buffer::{BufferBuilder, InputBuffer};
+use crate::buffer::{BlockMap, BufferBuilder, InputBuffer, LEB128Buffer, SliceBuffer};
 use crate::codec::{EncodedType, EncodedValue, ETypeParser};
 use crate::index::IndexReader;
-use crate::io::join_path;
+use crate::io::{join_path, read_single_block};
 use crate::metadata::{IndexSpec, RVDComponentSpec};
 use crate::query::{filter_partitions, KeyRange, KeyValue};
 use crate::HailError;
@@ -36,6 +36,8 @@ pub struct QueryEngine {
     row_type: EncodedType,
     /// Cached index readers (one per partition)
     index_readers: HashMap<usize, IndexReader>,
+    /// Cached block maps for efficient random access (one per partition)
+    block_maps: HashMap<usize, BlockMap>,
 }
 
 /// Result of a query operation
@@ -101,6 +103,7 @@ impl QueryEngine {
             rvd_spec,
             row_type,
             index_readers: HashMap::new(),
+            block_maps: HashMap::new(),
         })
     }
 
@@ -284,25 +287,64 @@ impl QueryEngine {
         IndexReader::new_from_path(&index_path, index_spec)
     }
 
-    /// Read a row from a partition file at a specific offset
-    fn read_row_at_offset(&self, partition_idx: usize, offset: i64) -> Result<EncodedValue> {
+    /// Get the path to a partition file
+    fn get_partition_path(&self, partition_idx: usize) -> String {
         let part_file = &self.rvd_spec.part_files[partition_idx];
         let parts_path = join_path(&self.rows_path, "parts");
-        let part_path = join_path(&parts_path, part_file);
+        join_path(&parts_path, part_file)
+    }
 
-        // Build the buffer stack (works with both local and cloud paths)
-        let mut buffer = BufferBuilder::from_path(&part_path)?
-            .with_leb128()
-            .build();
-
-        // Skip to the offset
-        // Note: This is a simplification. In practice, we'd need to seek properly
-        // through the compressed blocks. For now, we read and discard bytes.
-        let mut skipped = 0i64;
-        while skipped < offset {
-            buffer.read_u8()?;
-            skipped += 1;
+    /// Get or create a block map for a partition
+    fn get_or_create_block_map(&mut self, partition_idx: usize) -> Result<&BlockMap> {
+        if !self.block_maps.contains_key(&partition_idx) {
+            let part_path = self.get_partition_path(partition_idx);
+            let block_map = BlockMap::build_from_path(&part_path)?;
+            self.block_maps.insert(partition_idx, block_map);
         }
+        Ok(self.block_maps.get(&partition_idx).unwrap())
+    }
+
+    /// Read a row from a partition file at a specific offset using the block map
+    ///
+    /// This is the efficient implementation that:
+    /// 1. Uses the block map to find which compressed block contains the offset
+    /// 2. Reads only that single block using a range request (for cloud storage)
+    /// 3. Decompresses just the one block
+    /// 4. Reads the row from the correct position within the decompressed block
+    fn read_row_at_offset(&mut self, partition_idx: usize, offset: i64) -> Result<EncodedValue> {
+        let part_path = self.get_partition_path(partition_idx);
+
+        // Get or create the block map for this partition
+        let block_map = self.get_or_create_block_map(partition_idx)?;
+
+        // Find the block containing our offset
+        let block_entry = block_map.find_block(offset as u64).ok_or_else(|| {
+            HailError::Index(format!(
+                "Offset {} is out of bounds for partition {}",
+                offset, partition_idx
+            ))
+        })?;
+
+        // Calculate the offset within the decompressed block
+        let local_offset = (offset as u64 - block_entry.decompressed_offset) as usize;
+
+        // Read just this one block from the file
+        let block_data = read_single_block(&part_path, block_entry.file_offset)?;
+
+        // The block data format is: [4-byte decompressed_size][zstd_compressed_data]
+        if block_data.len() < 4 {
+            return Err(HailError::InvalidFormat(
+                "Block too small for decompressed size header".to_string(),
+            ));
+        }
+
+        // Decompress the block
+        let decompressed = zstd::decode_all(&block_data[4..]).map_err(|_| HailError::Zstd)?;
+
+        // Create a buffer for reading from the decompressed data at the local offset
+        // We need LEB128Buffer on top of SliceBuffer because Hail uses LEB128 encoding
+        let slice_buffer = SliceBuffer::new(&decompressed[local_offset..]);
+        let mut buffer = LEB128Buffer::new(slice_buffer);
 
         // Read and decode the row
         // NOTE: Hail partition files ALWAYS have a row present flag byte before each row,
@@ -474,7 +516,7 @@ mod tests {
         ]);
 
         let result = engine.lookup(&key);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "Lookup failed: {:?}", result.err());
 
         // The lookup should find the row (offset 0 from index)
         // Note: The actual row decoding may need refinement

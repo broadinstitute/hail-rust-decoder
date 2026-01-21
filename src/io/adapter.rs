@@ -245,6 +245,112 @@ pub fn is_cloud_path(path: &str) -> bool {
     path.starts_with("gs://") || path.starts_with("s3://") || path.starts_with("http://") || path.starts_with("https://")
 }
 
+/// Read a specific byte range from a file (local or cloud)
+///
+/// This is the key function for efficient random access. For cloud storage,
+/// it uses HTTP Range requests to fetch only the needed bytes.
+///
+/// # Arguments
+/// * `path` - Path to the file (local or cloud URL)
+/// * `offset` - Start offset in bytes
+/// * `length` - Number of bytes to read
+///
+/// # Returns
+/// A vector containing the requested bytes
+pub fn range_read(path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+    if is_cloud_path(path) {
+        range_read_cloud(path, offset, length)
+    } else {
+        range_read_local(path, offset, length)
+    }
+}
+
+/// Read a byte range from a local file
+fn range_read_local(path: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+    use std::fs::File;
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+
+    let mut buf = vec![0u8; length];
+    let bytes_read = file.read(&mut buf)?;
+    buf.truncate(bytes_read);
+
+    Ok(buf)
+}
+
+/// Read a byte range from a cloud storage URL
+fn range_read_cloud(url_str: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
+    let url = Url::parse(url_str)
+        .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
+
+    let (store, path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+        "gs" => {
+            let bucket = url.host_str()
+                .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
+            let path = url.path().trim_start_matches('/');
+            let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
+            (Arc::new(gcs), ObjPath::from(path))
+        }
+        "s3" => {
+            let bucket = url.host_str()
+                .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
+            let path = url.path().trim_start_matches('/');
+            let s3 = object_store::aws::AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
+            (Arc::new(s3), ObjPath::from(path))
+        }
+        "http" | "https" => {
+            let http = object_store::http::HttpBuilder::new()
+                .with_url(url_str)
+                .build()
+                .map_err(|e| HailError::InvalidFormat(format!("Failed to create HTTP client: {}", e)))?;
+            (Arc::new(http), ObjPath::from(""))
+        }
+        scheme => {
+            return Err(HailError::InvalidFormat(format!("Unsupported URL scheme: {}", scheme)));
+        }
+    };
+
+    let range = offset as usize..(offset as usize + length);
+    let bytes = IO_RUNTIME.block_on(async {
+        store.get_range(&path, range).await
+    }).map_err(|e| HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+    Ok(bytes.to_vec())
+}
+
+/// Read a single compressed block from a partition file
+///
+/// This reads the block at the given file offset, including the 4-byte
+/// length header and the block data.
+///
+/// # Arguments
+/// * `path` - Path to the partition file (local or cloud)
+/// * `file_offset` - Offset into the file where the block starts
+///
+/// # Returns
+/// A tuple of (block_data, compressed_length) where block_data includes
+/// the decompressed size prefix (first 4 bytes)
+pub fn read_single_block(path: &str, file_offset: u64) -> Result<Vec<u8>> {
+    // Read the 4-byte block length header first
+    let header = range_read(path, file_offset, 4)?;
+    if header.len() < 4 {
+        return Err(HailError::UnexpectedEof);
+    }
+    let block_len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+
+    // Now read the actual block data
+    let block_data = range_read(path, file_offset + 4, block_len)?;
+
+    Ok(block_data)
+}
+
 /// Get the size of a file (local or cloud)
 ///
 /// # Arguments
