@@ -11,7 +11,8 @@ use hail_decoder::io::{get_file_size, join_path};
 use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
-use hail_decoder::Result;
+use hail_decoder::validation::{SchemaGenerator, SchemaValidator};
+use hail_decoder::{HailError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,6 +56,12 @@ fn main() -> Result<()> {
             }
             convert(&args[2], &args[3])?;
         }
+        "validate" => {
+            run_validate(&args[0], &args[2..])?;
+        }
+        "generate-schema" => {
+            run_generate_schema(&args[0], &args[2..])?;
+        }
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
         }
@@ -78,6 +85,8 @@ fn print_usage(program: &str) {
     eprintln!("  inspect <table.ht>           Show detailed table information");
     eprintln!("  summary <table.ht>           Show comprehensive table summary with statistics");
     eprintln!("  query <table.ht> [options]   Query the table");
+    eprintln!("  validate <table.ht> <schema.json> [options]  Validate table against JSON schema");
+    eprintln!("  generate-schema <table.ht> [output.json]    Generate JSON schema from table");
     eprintln!("  convert <table.ht> <out>     Convert to Parquet format");
     eprintln!();
     eprintln!("Query options:");
@@ -90,6 +99,11 @@ fn print_usage(program: &str) {
     eprintln!("  --limit <n>                  Limit number of results");
     eprintln!("  --json                       Output as JSON");
     eprintln!();
+    eprintln!("Validate options:");
+    eprintln!("  --limit <n>                  Validate first N rows (sequential)");
+    eprintln!("  --sample <n>                 Validate N randomly sampled rows across partitions");
+    eprintln!("  --fail-fast                  Stop on first validation error");
+    eprintln!();
     eprintln!("Nested fields:");
     eprintln!("  Use dot notation for nested struct fields (e.g., locus.contig)");
     eprintln!();
@@ -98,6 +112,8 @@ fn print_usage(program: &str) {
     eprintln!("  {} query gene_models.ht --key gene_id=ENSG00000141510", program);
     eprintln!("  {} query gene_models.ht --where chrom=chr1 --limit 10", program);
     eprintln!("  {} query variants.ht --where locus.contig=chr1 --where \"locus.position>=100000\" --limit 10", program);
+    eprintln!("  {} validate gene_models.ht schema.json --limit 1000", program);
+    eprintln!("  {} generate-schema gene_models.ht schema.json", program);
 }
 
 fn show_info(table_path: &str) -> Result<()> {
@@ -731,6 +747,150 @@ fn run_summary(table_path: &str) -> Result<()> {
             min_display,
             max_display
         );
+    }
+
+    Ok(())
+}
+
+/// Run the validate command
+fn run_validate(program: &str, args: &[String]) -> Result<()> {
+    if args.len() < 2 {
+        eprintln!("Usage: {} validate <table.ht> <schema.json> [options]", program);
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --limit <n>     Validate first N rows (sequential)");
+        eprintln!("  --sample <n>    Validate N randomly sampled rows");
+        eprintln!("  --fail-fast     Stop on first validation error");
+        std::process::exit(1);
+    }
+
+    let table_path = &args[0];
+    let schema_path = &args[1];
+    let mut limit: Option<usize> = None;
+    let mut sample: Option<usize> = None;
+    let mut fail_fast = false;
+
+    // Parse optional arguments
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--limit" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --limit requires a number");
+                    std::process::exit(1);
+                }
+                limit = args[i].parse().ok();
+                if limit.is_none() {
+                    eprintln!("Error: Invalid --limit value");
+                    std::process::exit(1);
+                }
+            }
+            "--sample" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --sample requires a number");
+                    std::process::exit(1);
+                }
+                sample = args[i].parse().ok();
+                if sample.is_none() {
+                    eprintln!("Error: Invalid --sample value");
+                    std::process::exit(1);
+                }
+            }
+            "--fail-fast" => {
+                fail_fast = true;
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    // Validate that --limit and --sample aren't both specified
+    if limit.is_some() && sample.is_some() {
+        eprintln!("Error: Cannot use both --limit and --sample. Choose one.");
+        std::process::exit(1);
+    }
+
+    println!("Validating table: {}", table_path);
+    println!("Using schema: {}", schema_path);
+    if let Some(l) = limit {
+        println!("Row limit: {} (sequential)", l);
+    }
+    if let Some(s) = sample {
+        println!("Sample size: {} (random)", s);
+    }
+    if fail_fast {
+        println!("Mode: fail-fast");
+    }
+    println!();
+
+    // Load the JSON schema
+    let validator = SchemaValidator::from_file(schema_path)?;
+
+    // Open the table
+    let engine = QueryEngine::open_path(table_path)?;
+
+    println!("Table has {} partitions", engine.num_partitions());
+    println!();
+
+    // Run validation
+    println!("Running validation...");
+    let report = if let Some(sample_size) = sample {
+        validator.validate_sample(&engine, sample_size, fail_fast)?
+    } else {
+        validator.validate(&engine, limit, fail_fast)?
+    };
+
+    // Print results
+    println!();
+    println!("{}", report);
+
+    // Exit with error code if validation failed
+    if report.invalid_count > 0 {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Run the generate-schema command
+fn run_generate_schema(program: &str, args: &[String]) -> Result<()> {
+    if args.is_empty() {
+        eprintln!("Usage: {} generate-schema <table.ht> [output.json]", program);
+        eprintln!();
+        eprintln!("If output.json is not specified, the schema is printed to stdout.");
+        std::process::exit(1);
+    }
+
+    let table_path = &args[0];
+    let output_path = args.get(1);
+
+    println!("Generating JSON schema for: {}", table_path);
+
+    // Open the table
+    let engine = QueryEngine::open_path(table_path)?;
+
+    // Get the table name from path for title
+    let title = std::path::Path::new(table_path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.trim_end_matches(".ht"));
+
+    // Generate the schema
+    let schema = SchemaGenerator::from_engine(&engine, title)?;
+
+    if let Some(path) = output_path {
+        // Write to file
+        SchemaGenerator::write_to_file(&schema, path)?;
+        println!("Schema written to: {}", path);
+    } else {
+        // Print to stdout
+        println!();
+        println!("{}", serde_json::to_string_pretty(&schema)?);
     }
 
     Ok(())

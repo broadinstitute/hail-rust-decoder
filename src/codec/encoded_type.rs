@@ -5,6 +5,7 @@
 
 use crate::buffer::InputBuffer;
 use crate::error::{HailError, Result};
+use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 
 /// Encoded type representation
 #[derive(Debug, Clone, PartialEq)]
@@ -295,6 +296,41 @@ impl EncodedValue {
         match self {
             EncodedValue::Int64(v) => Some(*v),
             _ => None,
+        }
+    }
+}
+
+impl Serialize for EncodedValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            EncodedValue::Null => serializer.serialize_none(),
+            EncodedValue::Binary(bytes) => {
+                // Convert to UTF-8 string (lossy) for JSON compatibility
+                let s = String::from_utf8_lossy(bytes);
+                serializer.serialize_str(&s)
+            }
+            EncodedValue::Struct(fields) => {
+                let mut map = serializer.serialize_map(Some(fields.len()))?;
+                for (name, value) in fields {
+                    map.serialize_entry(name, value)?;
+                }
+                map.end()
+            }
+            EncodedValue::Int32(v) => serializer.serialize_i32(*v),
+            EncodedValue::Int64(v) => serializer.serialize_i64(*v),
+            EncodedValue::Float32(v) => serializer.serialize_f32(*v),
+            EncodedValue::Float64(v) => serializer.serialize_f64(*v),
+            EncodedValue::Boolean(v) => serializer.serialize_bool(*v),
+            EncodedValue::Array(elements) => {
+                let mut seq = serializer.serialize_seq(Some(elements.len()))?;
+                for elem in elements {
+                    seq.serialize_element(elem)?;
+                }
+                seq.end()
+            }
         }
     }
 }

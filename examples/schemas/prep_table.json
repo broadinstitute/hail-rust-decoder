@@ -1,0 +1,92 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Genome Variant Annotations Prep Table",
+  "description": "Schema for genome_variant_annotations_hds prep_table.ht",
+  "type": "object",
+  "required": ["xpos", "ref", "alt", "ancestry_group"],
+  "properties": {
+    "xpos": {
+      "type": "integer",
+      "description": "Encoded genomic position (chromosome * 1e9 + position)",
+      "minimum": 1000000000
+    },
+    "ref": {
+      "type": "string",
+      "description": "Reference allele",
+      "pattern": "^[ACGTNacgtn]+$",
+      "minLength": 1
+    },
+    "alt": {
+      "type": "string",
+      "description": "Alternate allele",
+      "pattern": "^[ACGTNacgtn*]+$",
+      "minLength": 1
+    },
+    "ancestry_group": {
+      "type": "string",
+      "description": "Population ancestry group",
+      "enum": ["afr", "amr", "asj", "eas", "eur", "fin", "mid", "nfe", "oth", "sas", "meta"]
+    },
+    "locus": {
+      "type": "object",
+      "description": "Genomic locus (GRCh38)",
+      "required": ["contig", "position"],
+      "properties": {
+        "contig": {
+          "type": "string",
+          "description": "Chromosome name",
+          "enum": [
+            "chr1", "chr2", "chr3", "chr4", "chr5", "chr6", "chr7", "chr8", "chr9", "chr10",
+            "chr11", "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19", "chr20",
+            "chr21", "chr22", "chrX", "chrY", "chrM"
+          ]
+        },
+        "position": {
+          "type": "integer",
+          "description": "1-based genomic position",
+          "minimum": 1
+        }
+      }
+    },
+    "allele_count": {
+      "type": ["integer", "null"],
+      "description": "Number of alleles observed",
+      "minimum": 0
+    },
+    "allele_frequency": {
+      "type": ["number", "null"],
+      "description": "Allele frequency in the population",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "allele_number": {
+      "type": ["integer", "null"],
+      "description": "Total number of alleles genotyped",
+      "minimum": 0
+    },
+    "homozygote_count": {
+      "type": ["integer", "null"],
+      "description": "Number of homozygotes for the alternate allele",
+      "minimum": 0
+    },
+    "hgvsp": {
+      "type": ["string", "null"],
+      "description": "HGVS protein notation"
+    },
+    "most_severe_csq_variant": {
+      "type": ["string", "null"],
+      "description": "Most severe consequence for the variant"
+    },
+    "most_severe_csq_gene": {
+      "type": ["string", "null"],
+      "description": "Gene with most severe consequence"
+    },
+    "filters": {
+      "type": ["array", "null"],
+      "description": "Applied quality filters",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

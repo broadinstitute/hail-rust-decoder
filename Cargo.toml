@@ -41,6 +41,12 @@ thiserror = "1.0"
 # Parallelism
 rayon = "1.10"
 
+# JSON Schema validation
+jsonschema = "0.27"
+
+# Random sampling
+rand = "0.8"
+
 # Progress bars
 indicatif = "0.17"
 
