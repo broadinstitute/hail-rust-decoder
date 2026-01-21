@@ -7,4 +7,4 @@
 
 pub mod adapter;
 
-pub use adapter::{get_reader, join_path, BoxedReader, CloudReader};
+pub use adapter::{get_file_size, get_reader, is_cloud_path, join_path, BoxedReader, CloudReader};

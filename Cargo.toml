@@ -41,6 +41,9 @@ thiserror = "1.0"
 # Parallelism
 rayon = "1.10"
 
+# Progress bars
+indicatif = "0.17"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"

@@ -4,25 +4,29 @@ use crate::metadata::Interval;
 use crate::query::types::{KeyRange, KeyValue, QueryBound};
 use serde_json::Value;
 
-/// Extract a KeyValue from a JSON object by field name
-fn extract_key_value(json: &Value, field: &str) -> Option<KeyValue> {
-    json.get(field).and_then(KeyValue::from_json)
+/// Extract a KeyValue from a JSON object by field path (supports nested access)
+fn extract_key_value(json: &Value, field_path: &[String]) -> Option<KeyValue> {
+    let mut current = json;
+    for field in field_path {
+        current = current.get(field)?;
+    }
+    KeyValue::from_json(current)
 }
 
-/// Check if a query range overlaps with a partition interval for a specific field
+/// Check if a query range overlaps with a partition interval for a specific field path
 fn range_overlaps(
     interval: &Interval,
-    field: &str,
+    field_path: &[String],
     query_start: &QueryBound,
     query_end: &QueryBound,
 ) -> bool {
     // Extract the field values from the interval start and end
-    let interval_start = match extract_key_value(&interval.start, field) {
+    let interval_start = match extract_key_value(&interval.start, field_path) {
         Some(v) => v,
         None => return true, // If we can't extract, assume overlap (conservative)
     };
 
-    let interval_end = match extract_key_value(&interval.end, field) {
+    let interval_end = match extract_key_value(&interval.end, field_path) {
         Some(v) => v,
         None => return true, // If we can't extract, assume overlap (conservative)
     };
@@ -78,7 +82,7 @@ pub fn filter_partitions(range_bounds: &[Interval], ranges: &[KeyRange]) -> Vec<
         .filter(|(_, interval)| {
             // A partition matches if ALL query ranges overlap with it
             ranges.iter().all(|range| {
-                range_overlaps(interval, &range.field, &range.start, &range.end)
+                range_overlaps(interval, &range.field_path, &range.start, &range.end)
             })
         })
         .map(|(idx, _)| idx)
@@ -181,5 +185,74 @@ mod tests {
 
         let result = filter_partitions(&intervals, &ranges);
         assert_eq!(result, vec![1]);
+    }
+
+    fn create_locus_interval(
+        start_contig: &str,
+        start_pos: i32,
+        end_contig: &str,
+        end_pos: i32,
+    ) -> Interval {
+        Interval {
+            start: json!({
+                "locus": {
+                    "contig": start_contig,
+                    "position": start_pos,
+                },
+                "alleles": ["A", "G"],
+            }),
+            end: json!({
+                "locus": {
+                    "contig": end_contig,
+                    "position": end_pos,
+                },
+                "alleles": ["T", "C"],
+            }),
+            include_start: true,
+            include_end: true,
+        }
+    }
+
+    #[test]
+    fn test_filter_partitions_nested_locus_contig() {
+        let intervals = vec![
+            create_locus_interval("chr1", 100000, "chr1", 200000),
+            create_locus_interval("chr2", 300000, "chr2", 400000),
+            create_locus_interval("chr3", 500000, "chr3", 600000),
+        ];
+
+        // Query for locus.contig = "chr2" using nested field path
+        let ranges = vec![KeyRange::point_nested(
+            vec!["locus".to_string(), "contig".to_string()],
+            KeyValue::String("chr2".to_string()),
+        )];
+
+        let result = filter_partitions(&intervals, &ranges);
+        assert_eq!(result, vec![1]);
+    }
+
+    #[test]
+    fn test_filter_partitions_nested_locus_position_range() {
+        let intervals = vec![
+            create_locus_interval("chr1", 100000, "chr1", 200000),
+            create_locus_interval("chr1", 200001, "chr1", 300000),
+            create_locus_interval("chr1", 300001, "chr1", 400000),
+        ];
+
+        // Query for locus.position >= 150000 AND locus.position <= 250000
+        let ranges = vec![
+            KeyRange::gte_nested(
+                vec!["locus".to_string(), "position".to_string()],
+                KeyValue::Int32(150000),
+            ),
+            KeyRange::lte_nested(
+                vec!["locus".to_string(), "position".to_string()],
+                KeyValue::Int32(250000),
+            ),
+        ];
+
+        let result = filter_partitions(&intervals, &ranges);
+        // Should match partitions 0 and 1 (100000-200000 and 200001-300000)
+        assert_eq!(result, vec![0, 1]);
     }
 }

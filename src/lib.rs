@@ -44,6 +44,7 @@ pub mod metadata;
 pub mod parquet;
 pub mod query;
 pub mod schema;
+pub mod summary;
 
 pub use error::{HailError, Result};
 

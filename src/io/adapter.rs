@@ -245,6 +245,62 @@ pub fn is_cloud_path(path: &str) -> bool {
     path.starts_with("gs://") || path.starts_with("s3://") || path.starts_with("http://") || path.starts_with("https://")
 }
 
+/// Get the size of a file (local or cloud)
+///
+/// # Arguments
+/// * `path` - Path to the file (local or cloud URL)
+///
+/// # Returns
+/// The size of the file in bytes
+pub fn get_file_size(path: &str) -> Result<u64> {
+    if is_cloud_path(path) {
+        let url = Url::parse(path)
+            .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
+
+        let (store, obj_path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+            "gs" => {
+                let bucket = url.host_str()
+                    .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
+                let path = url.path().trim_start_matches('/');
+                let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
+                    .with_bucket_name(bucket)
+                    .build()
+                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
+                (Arc::new(gcs), ObjPath::from(path))
+            }
+            "s3" => {
+                let bucket = url.host_str()
+                    .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
+                let path = url.path().trim_start_matches('/');
+                let s3 = object_store::aws::AmazonS3Builder::new()
+                    .with_bucket_name(bucket)
+                    .build()
+                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
+                (Arc::new(s3), ObjPath::from(path))
+            }
+            "http" | "https" => {
+                let http = object_store::http::HttpBuilder::new()
+                    .with_url(path)
+                    .build()
+                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create HTTP client: {}", e)))?;
+                (Arc::new(http), ObjPath::from(""))
+            }
+            scheme => {
+                return Err(HailError::InvalidFormat(format!("Unsupported URL scheme: {}", scheme)));
+            }
+        };
+
+        let meta = IO_RUNTIME.block_on(async {
+            store.head(&obj_path).await
+        }).map_err(|e| HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        Ok(meta.size as u64)
+    } else {
+        let metadata = std::fs::metadata(path)?;
+        Ok(metadata.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

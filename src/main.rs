@@ -4,11 +4,17 @@
 //! - info: Show basic table metadata
 //! - inspect: Show detailed table information including keys and index status
 //! - query: Query a table with optional key filters
+//! - summary: Show comprehensive table summary with statistics
 
 use hail_decoder::codec::EncodedValue;
+use hail_decoder::io::{get_file_size, join_path};
 use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
+use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
 use hail_decoder::{HailError, Result};
+use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -31,6 +37,13 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
             inspect_table(&args[2])?;
+        }
+        "summary" => {
+            if args.len() < 3 {
+                eprintln!("Usage: {} summary <table.ht>", args[0]);
+                std::process::exit(1);
+            }
+            run_summary(&args[2])?;
         }
         "query" => {
             run_query(&args[0], &args[2..])?;
@@ -63,6 +76,7 @@ fn print_usage(program: &str) {
     eprintln!("Commands:");
     eprintln!("  info <table.ht>              Show basic table metadata");
     eprintln!("  inspect <table.ht>           Show detailed table information");
+    eprintln!("  summary <table.ht>           Show comprehensive table summary with statistics");
     eprintln!("  query <table.ht> [options]   Query the table");
     eprintln!("  convert <table.ht> <out>     Convert to Parquet (not implemented)");
     eprintln!();
@@ -76,10 +90,14 @@ fn print_usage(program: &str) {
     eprintln!("  --limit <n>                  Limit number of results");
     eprintln!("  --json                       Output as JSON");
     eprintln!();
+    eprintln!("Nested fields:");
+    eprintln!("  Use dot notation for nested struct fields (e.g., locus.contig)");
+    eprintln!();
     eprintln!("Examples:");
     eprintln!("  {} inspect gene_models.ht", program);
     eprintln!("  {} query gene_models.ht --key gene_id=ENSG00000141510", program);
     eprintln!("  {} query gene_models.ht --where chrom=chr1 --limit 10", program);
+    eprintln!("  {} query variants.ht --where locus.contig=chr1 --where \"locus.position>=100000\" --limit 10", program);
 }
 
 fn show_info(table_path: &str) -> Result<()> {
@@ -255,7 +273,7 @@ fn run_query(program: &str, args: &[String]) -> Result<()> {
         if where_filters.is_empty() {
             println!("Warning: No filters specified. This may scan all partitions.");
         } else {
-            println!("Filter conditions: {:?}", where_filters.iter().map(|r| &r.field).collect::<Vec<_>>());
+            println!("Filter conditions: {:?}", where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
         }
 
         let result = engine.query(&where_filters)?;
@@ -294,50 +312,47 @@ fn parse_equality(s: &str) -> Option<(String, String)> {
     }
 }
 
+/// Parse a field string into a field path (supports dot notation)
+fn parse_field_path(field: &str) -> Vec<String> {
+    field.split('.').map(|s| s.to_string()).collect()
+}
+
 fn parse_where_condition(s: &str) -> Option<KeyRange> {
     // Try different operators
     if let Some(pos) = s.find(">=") {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 2..]);
-        return Some(KeyRange::gte(field, value));
+        return Some(KeyRange::gte_nested(field_path, value));
     }
     if let Some(pos) = s.find("<=") {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 2..]);
-        return Some(KeyRange::lte(field, value));
+        return Some(KeyRange::lte_nested(field_path, value));
     }
     if let Some(pos) = s.find("gte") {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 3..]);
-        return Some(KeyRange::gte(field, value));
+        return Some(KeyRange::gte_nested(field_path, value));
     }
     if let Some(pos) = s.find("lte") {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 3..]);
-        return Some(KeyRange::lte(field, value));
+        return Some(KeyRange::lte_nested(field_path, value));
     }
     if let Some(pos) = s.find('>') {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange {
-            field,
-            start: hail_decoder::query::QueryBound::Excluded(value),
-            end: hail_decoder::query::QueryBound::Unbounded,
-        });
+        return Some(KeyRange::gt_nested(field_path, value));
     }
     if let Some(pos) = s.find('<') {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange {
-            field,
-            start: hail_decoder::query::QueryBound::Unbounded,
-            end: hail_decoder::query::QueryBound::Excluded(value),
-        });
+        return Some(KeyRange::lt_nested(field_path, value));
     }
     if let Some(pos) = s.find('=') {
-        let field = s[..pos].to_string();
+        let field_path = parse_field_path(&s[..pos]);
         let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange::point(field, value));
+        return Some(KeyRange::point_nested(field_path, value));
     }
 
     None
@@ -472,4 +487,191 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 fn convert(_input: &str, _output: &str) -> Result<()> {
     eprintln!("Conversion not yet implemented");
     Err(HailError::InvalidFormat("Not implemented".to_string()))
+}
+
+/// Format bytes into a human-readable string
+fn format_bytes(bytes: u64) -> String {
+    const UNIT: u64 = 1024;
+    if bytes < UNIT {
+        return format!("{} B", bytes);
+    }
+    if bytes < UNIT.pow(2) {
+        return format!("{:.2} KiB", bytes as f64 / UNIT as f64);
+    }
+    if bytes < UNIT.pow(3) {
+        return format!("{:.2} MiB", bytes as f64 / UNIT.pow(2) as f64);
+    }
+    format!("{:.2} GiB", bytes as f64 / UNIT.pow(3) as f64)
+}
+
+/// Run the summary command
+fn run_summary(table_path: &str) -> Result<()> {
+    let engine = QueryEngine::open_path(table_path)?;
+    let rvd = engine.rvd_spec().clone();
+    let part_count = engine.num_partitions();
+
+    // Print header
+    println!("Hail Table Summary");
+    println!("==================");
+    println!();
+
+    // Basic info
+    let name = std::path::Path::new(table_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    println!("Name: {}", name);
+    println!("Path: {}", table_path);
+    println!("Partitions: {}", part_count);
+    println!();
+
+    // Key fields
+    println!("Key Fields:");
+    for (i, key) in rvd.key.iter().enumerate() {
+        println!("  {}. {}", i + 1, key);
+    }
+    println!();
+
+    // Calculate partition sizes (parallel)
+    println!("Calculating partition sizes (parallel)...");
+    let pb = ProgressBar::new(part_count as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    let parts_dir = join_path(&join_path(table_path, "rows"), "parts");
+
+    let sizes: Vec<u64> = rvd.part_files
+        .par_iter()
+        .map(|part| {
+            let path = join_path(&parts_dir, part);
+            let size = get_file_size(&path).unwrap_or(0);
+            pb.inc(1);
+            size
+        })
+        .collect();
+
+    pb.finish_and_clear();
+
+    let total_size: u64 = sizes.iter().sum();
+    let mean_size = if part_count > 0 {
+        total_size as f64 / part_count as f64
+    } else {
+        0.0
+    };
+
+    // Calculate standard deviation
+    let variance = if part_count > 1 {
+        let mean = mean_size;
+        sizes.iter().map(|&s| {
+            let diff = s as f64 - mean;
+            diff * diff
+        }).sum::<f64>() / (part_count - 1) as f64
+    } else {
+        0.0
+    };
+    let std_dev = variance.sqrt();
+
+    println!("Size Statistics:");
+    println!("  Total Size: {}", format_bytes(total_size));
+    println!("  Mean Partition Size: {}", format_bytes(mean_size as u64));
+    println!("  Std Dev: {}", format_bytes(std_dev as u64));
+    println!();
+
+    // Schema
+    println!("Schema:");
+    println!("----------------------------------------");
+    println!("{}", format_schema_clean(&rvd.codec_spec.v_type));
+    println!("----------------------------------------");
+    println!();
+
+    // Data scan for statistics (parallel)
+    println!("Scanning data for field statistics (parallel)...");
+    let pb = ProgressBar::new(part_count as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+
+    let total_rows = AtomicUsize::new(0);
+
+    // Parallel scan using rayon - each thread gets its own StatsAccumulator
+    let stats = (0..part_count)
+        .into_par_iter()
+        .fold(
+            || StatsAccumulator::new(),
+            |mut acc, i| {
+                match engine.scan_partition(i, &[]) {
+                    Ok(rows) => {
+                        total_rows.fetch_add(rows.len(), Ordering::Relaxed);
+                        for row in &rows {
+                            acc.process_row(row);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to scan partition {}: {}", i, e);
+                    }
+                }
+                pb.inc(1);
+                acc
+            },
+        )
+        .reduce(
+            || StatsAccumulator::new(),
+            |mut a, b| {
+                a.merge(b);
+                a
+            },
+        );
+
+    pb.finish_with_message("Scan complete");
+    let total_rows = total_rows.load(Ordering::Relaxed);
+
+    println!();
+    println!("Row Count: {}", total_rows);
+    println!();
+
+    // Print field statistics
+    println!("Field Statistics:");
+    println!("{:<50} | {:>10} | {:>10} | {:>20} | {:>20}",
+        "Field", "Count", "Nulls", "Min", "Max");
+    println!("{}", "-".repeat(120));
+
+    for key in stats.sorted_fields() {
+        let s = &stats.stats[key];
+
+        // Truncate field name if too long
+        let field_display = if key.len() > 48 {
+            format!("...{}", &key[key.len() - 45..])
+        } else {
+            key.clone()
+        };
+
+        // Truncate min/max if too long
+        let min_display = match &s.min {
+            Some(m) if m.len() > 18 => format!("{}...", &m[..15]),
+            Some(m) => m.clone(),
+            None => String::new(),
+        };
+        let max_display = match &s.max {
+            Some(m) if m.len() > 18 => format!("{}...", &m[..15]),
+            Some(m) => m.clone(),
+            None => String::new(),
+        };
+
+        println!("{:<50} | {:>10} | {:>10} | {:>20} | {:>20}",
+            field_display,
+            s.count,
+            s.null_count,
+            min_display,
+            max_display
+        );
+    }
+
+    Ok(())
 }

@@ -315,7 +315,14 @@ impl QueryEngine {
     }
 
     /// Scan a partition and filter rows by key ranges
-    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
+    ///
+    /// # Arguments
+    /// * `partition_idx` - The index of the partition to scan
+    /// * `ranges` - Key range constraints for filtering rows
+    ///
+    /// # Returns
+    /// A vector of decoded rows that match the filter criteria
+    pub fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
         let part_file = &self.rvd_spec.part_files[partition_idx];
         let parts_path = join_path(&self.rows_path, "parts");
         let part_path = join_path(&parts_path, part_file);
@@ -361,23 +368,45 @@ impl QueryEngine {
 
     /// Check if a row matches all the key range filters
     fn row_matches_ranges(&self, row: &EncodedValue, ranges: &[KeyRange]) -> bool {
-        if let EncodedValue::Struct(fields) = row {
-            for range in ranges {
-                // Find the field in the row
-                let field_value = fields.iter()
-                    .find(|(name, _)| name == &range.field)
-                    .map(|(_, v)| v);
+        for range in ranges {
+            // Extract the value using the field path (supports nested access)
+            let field_value = self.extract_field_by_path(row, &range.field_path);
 
-                if let Some(value) = field_value {
-                    if let Some(key_value) = self.encoded_to_key_value(value) {
-                        if !self.value_in_range(&key_value, range) {
-                            return false;
-                        }
+            if let Some(value) = field_value {
+                if let Some(key_value) = self.encoded_to_key_value(value) {
+                    if !self.value_in_range(&key_value, range) {
+                        return false;
                     }
                 }
             }
         }
         true
+    }
+
+    /// Extract a field from an EncodedValue by following a field path
+    fn extract_field_by_path<'a>(
+        &self,
+        value: &'a EncodedValue,
+        path: &[String],
+    ) -> Option<&'a EncodedValue> {
+        if path.is_empty() {
+            return Some(value);
+        }
+
+        let mut current = value;
+        for field_name in path {
+            match current {
+                EncodedValue::Struct(fields) => {
+                    // Find the field by name
+                    current = fields
+                        .iter()
+                        .find(|(name, _)| name == field_name)
+                        .map(|(_, v)| v)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(current)
     }
 
     /// Check if a value is within a key range

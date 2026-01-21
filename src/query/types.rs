@@ -108,19 +108,29 @@ pub enum QueryBound {
     Unbounded,
 }
 
-/// A key range query for a single field
+/// A key range query for a single field (supports nested struct access)
 #[derive(Debug, Clone)]
 pub struct KeyRange {
-    pub field: String,
+    /// Field path (e.g., ["locus", "contig"] for locus.contig)
+    pub field_path: Vec<String>,
     pub start: QueryBound,
     pub end: QueryBound,
 }
 
 impl KeyRange {
-    /// Create a point query (exact match)
+    /// Create a point query (exact match) for a simple field
     pub fn point(field: String, value: KeyValue) -> Self {
         KeyRange {
-            field,
+            field_path: vec![field],
+            start: QueryBound::Included(value.clone()),
+            end: QueryBound::Included(value),
+        }
+    }
+
+    /// Create a point query (exact match) for a nested field path
+    pub fn point_nested(field_path: Vec<String>, value: KeyValue) -> Self {
+        KeyRange {
+            field_path,
             start: QueryBound::Included(value.clone()),
             end: QueryBound::Included(value),
         }
@@ -129,7 +139,7 @@ impl KeyRange {
     /// Create a range query with inclusive bounds
     pub fn inclusive(field: String, start: KeyValue, end: KeyValue) -> Self {
         KeyRange {
-            field,
+            field_path: vec![field],
             start: QueryBound::Included(start),
             end: QueryBound::Included(end),
         }
@@ -138,28 +148,79 @@ impl KeyRange {
     /// Create a range query with exclusive bounds
     pub fn exclusive(field: String, start: KeyValue, end: KeyValue) -> Self {
         KeyRange {
-            field,
+            field_path: vec![field],
             start: QueryBound::Excluded(start),
             end: QueryBound::Excluded(end),
         }
     }
 
-    /// Create a greater-than-or-equal query
+    /// Create a greater-than-or-equal query for a simple field
     pub fn gte(field: String, value: KeyValue) -> Self {
         KeyRange {
-            field,
+            field_path: vec![field],
             start: QueryBound::Included(value),
             end: QueryBound::Unbounded,
         }
     }
 
-    /// Create a less-than-or-equal query
+    /// Create a greater-than-or-equal query for a nested field path
+    pub fn gte_nested(field_path: Vec<String>, value: KeyValue) -> Self {
+        KeyRange {
+            field_path,
+            start: QueryBound::Included(value),
+            end: QueryBound::Unbounded,
+        }
+    }
+
+    /// Create a less-than-or-equal query for a simple field
     pub fn lte(field: String, value: KeyValue) -> Self {
         KeyRange {
-            field,
+            field_path: vec![field],
             start: QueryBound::Unbounded,
             end: QueryBound::Included(value),
         }
+    }
+
+    /// Create a less-than-or-equal query for a nested field path
+    pub fn lte_nested(field_path: Vec<String>, value: KeyValue) -> Self {
+        KeyRange {
+            field_path,
+            start: QueryBound::Unbounded,
+            end: QueryBound::Included(value),
+        }
+    }
+
+    /// Create greater-than query for a nested field path
+    pub fn gt_nested(field_path: Vec<String>, value: KeyValue) -> Self {
+        KeyRange {
+            field_path,
+            start: QueryBound::Excluded(value),
+            end: QueryBound::Unbounded,
+        }
+    }
+
+    /// Create less-than query for a nested field path
+    pub fn lt_nested(field_path: Vec<String>, value: KeyValue) -> Self {
+        KeyRange {
+            field_path,
+            start: QueryBound::Unbounded,
+            end: QueryBound::Excluded(value),
+        }
+    }
+
+    /// Get the root (top-level) field name
+    pub fn root_field(&self) -> &str {
+        &self.field_path[0]
+    }
+
+    /// Check if this range applies to a nested field
+    pub fn is_nested(&self) -> bool {
+        self.field_path.len() > 1
+    }
+
+    /// Get the field path as a dot-separated string (for display)
+    pub fn field_path_str(&self) -> String {
+        self.field_path.join(".")
     }
 }
 
@@ -201,13 +262,25 @@ mod tests {
     #[test]
     fn test_key_range_constructors() {
         let point = KeyRange::point("field".to_string(), KeyValue::Int32(42));
-        assert_eq!(point.field, "field");
+        assert_eq!(point.root_field(), "field");
+        assert!(!point.is_nested());
 
         let range = KeyRange::inclusive(
             "field".to_string(),
             KeyValue::Int32(10),
             KeyValue::Int32(20),
         );
-        assert_eq!(range.field, "field");
+        assert_eq!(range.root_field(), "field");
+    }
+
+    #[test]
+    fn test_nested_key_range() {
+        let nested = KeyRange::point_nested(
+            vec!["locus".to_string(), "contig".to_string()],
+            KeyValue::String("chr1".to_string()),
+        );
+        assert_eq!(nested.root_field(), "locus");
+        assert!(nested.is_nested());
+        assert_eq!(nested.field_path_str(), "locus.contig");
     }
 }
