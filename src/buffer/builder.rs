@@ -36,10 +36,44 @@ pub struct BufferBuilder<R> {
 }
 
 impl BufferBuilder<File> {
-    /// Create a buffer builder from a file path
+    /// Create a buffer builder from a local file path
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         Ok(Self::from_reader(file))
+    }
+}
+
+impl BufferBuilder<crate::io::BoxedReader> {
+    /// Create a buffer builder from a path string (local or cloud URL)
+    ///
+    /// This method auto-detects whether the path is a local file or a cloud URL
+    /// and creates the appropriate reader.
+    ///
+    /// # Supported URL schemes
+    /// - `gs://bucket/path` - Google Cloud Storage
+    /// - `s3://bucket/path` - Amazon S3
+    /// - `http://` or `https://` - HTTP(S) URLs
+    /// - Local file path - Regular file system access
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::buffer::BufferBuilder;
+    ///
+    /// // Local file
+    /// let buffer = BufferBuilder::from_path("data/table.ht/rows/parts/part-0")
+    ///     .expect("Failed to open file")
+    ///     .with_leb128()
+    ///     .build();
+    ///
+    /// // Cloud storage
+    /// let buffer = BufferBuilder::from_path("gs://my-bucket/data/table.ht/rows/parts/part-0")
+    ///     .expect("Failed to open cloud file")
+    ///     .with_leb128()
+    ///     .build();
+    /// ```
+    pub fn from_path(path: &str) -> Result<Self> {
+        let reader = crate::io::get_reader(path)?;
+        Ok(Self::from_reader(reader))
     }
 }
 

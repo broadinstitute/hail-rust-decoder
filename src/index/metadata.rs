@@ -49,11 +49,28 @@ impl IndexMetadata {
         Self::from_json(&json_data)
     }
 
-    /// Load index metadata from a file path
+    /// Load index metadata from a local file path
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut file = File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
+
+        // Try gzipped first, fall back to plain JSON
+        Self::from_gzipped_json(&data)
+            .or_else(|_| Self::from_json(&data))
+    }
+
+    /// Load index metadata from a path string (local or cloud URL)
+    ///
+    /// # Supported URL schemes
+    /// - `gs://bucket/path` - Google Cloud Storage
+    /// - `s3://bucket/path` - Amazon S3
+    /// - `http://` or `https://` - HTTP(S) URLs
+    /// - Local file path - Regular file system access
+    pub fn from_path(path: &str) -> Result<Self> {
+        let mut reader = crate::io::get_reader(path)?;
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
 
         // Try gzipped first, fall back to plain JSON
         Self::from_gzipped_json(&data)

@@ -3,17 +3,18 @@
 use crate::buffer::{InputBuffer, LEB128Buffer};
 use crate::codec::{EncodedType, ETypeParser};
 use crate::index::{IndexMetadata, IndexNode, InternalNode, LeafNode};
+use crate::io::join_path;
 use crate::metadata::IndexSpec;
 use crate::HailError;
 use crate::Result;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Index reader for Hail B-tree indexes
 pub struct IndexReader {
-    _index_dir: PathBuf,
+    _index_dir: String,
     metadata: IndexMetadata,
     _leaf_type: EncodedType,
     _internal_type: EncodedType,
@@ -21,7 +22,7 @@ pub struct IndexReader {
 }
 
 impl IndexReader {
-    /// Create a new index reader from an index directory and spec
+    /// Create a new index reader from a local index directory and spec
     ///
     /// # Arguments
     /// * `index_dir` - Path to the index directory (e.g., `.../index/part-0-xxx.idx`)
@@ -29,11 +30,27 @@ impl IndexReader {
     ///
     /// This loads all index nodes into memory for fast lookups.
     pub fn new<P: AsRef<Path>>(index_dir: P, spec: &IndexSpec) -> Result<Self> {
-        let index_dir = index_dir.as_ref().to_path_buf();
+        let index_dir_str = index_dir.as_ref().to_string_lossy().to_string();
+        Self::new_from_path(&index_dir_str, spec)
+    }
 
+    /// Create a new index reader from a path string (local or cloud URL)
+    ///
+    /// # Arguments
+    /// * `index_dir` - Path to the index directory (e.g., `gs://bucket/table.ht/index/part-0-xxx.idx`)
+    /// * `spec` - Index specification from the table metadata
+    ///
+    /// # Supported URL schemes
+    /// - `gs://bucket/path` - Google Cloud Storage
+    /// - `s3://bucket/path` - Amazon S3
+    /// - `http://` or `https://` - HTTP(S) URLs
+    /// - Local file path - Regular file system access
+    ///
+    /// This loads all index nodes into memory for fast lookups.
+    pub fn new_from_path(index_dir: &str, spec: &IndexSpec) -> Result<Self> {
         // Read index metadata
-        let metadata_path = index_dir.join("metadata.json.gz");
-        let metadata = IndexMetadata::from_file(metadata_path)?;
+        let metadata_path = join_path(index_dir, "metadata.json.gz");
+        let metadata = IndexMetadata::from_path(&metadata_path)?;
 
         // Parse the EType for leaf nodes
         let leaf_type = ETypeParser::parse(&spec.leaf_codec.e_type)?;
@@ -42,15 +59,15 @@ impl IndexReader {
         let internal_type = ETypeParser::parse(&spec.internal_node_codec.e_type)?;
 
         // Load all nodes from the index file into cache
-        let node_cache = Self::load_all_nodes(
-            &index_dir,
+        let node_cache = Self::load_all_nodes_from_path(
+            index_dir,
             &metadata,
             &leaf_type,
             &internal_type,
         )?;
 
         Ok(IndexReader {
-            _index_dir: index_dir,
+            _index_dir: index_dir.to_string(),
             metadata,
             _leaf_type: leaf_type,
             _internal_type: internal_type,
@@ -58,7 +75,7 @@ impl IndexReader {
         })
     }
 
-    /// Load all nodes from the index file into a cache
+    /// Load all nodes from the index file into a cache (local path version)
     ///
     /// Index files are typically small, so we load them entirely into memory.
     ///
@@ -70,6 +87,7 @@ impl IndexReader {
     ///
     /// We must read the file block-by-block, track physical offsets, and map them
     /// to memory offsets in our decompressed buffer.
+    #[allow(dead_code)]
     fn load_all_nodes(
         index_dir: &Path,
         metadata: &IndexMetadata,
@@ -78,6 +96,34 @@ impl IndexReader {
     ) -> Result<HashMap<u64, IndexNode>> {
         let index_file_path = index_dir.join(&metadata.index_path);
         let mut file = File::open(&index_file_path)?;
+        Self::load_all_nodes_from_reader(&mut file, metadata, leaf_type, internal_type)
+    }
+
+    /// Load all nodes from the index file into a cache (cloud path version)
+    fn load_all_nodes_from_path(
+        index_dir: &str,
+        metadata: &IndexMetadata,
+        leaf_type: &EncodedType,
+        internal_type: &EncodedType,
+    ) -> Result<HashMap<u64, IndexNode>> {
+        let index_file_path = join_path(index_dir, &metadata.index_path);
+        let mut reader = crate::io::get_reader(&index_file_path)?;
+
+        // Read the entire file into memory first (index files are small)
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        let mut cursor = std::io::Cursor::new(data);
+
+        Self::load_all_nodes_from_reader(&mut cursor, metadata, leaf_type, internal_type)
+    }
+
+    /// Load all nodes from any reader that implements Read + Seek
+    fn load_all_nodes_from_reader<R: Read + Seek>(
+        reader: &mut R,
+        metadata: &IndexMetadata,
+        leaf_type: &EncodedType,
+        internal_type: &EncodedType,
+    ) -> Result<HashMap<u64, IndexNode>> {
 
         // Map physical file offset -> offset in decompressed_data
         let mut block_map: HashMap<u64, usize> = HashMap::new();
@@ -85,11 +131,11 @@ impl IndexReader {
 
         // Read blocks until EOF
         loop {
-            let phys_offset = file.seek(SeekFrom::Current(0))?;
+            let phys_offset = reader.seek(SeekFrom::Current(0))?;
 
             // Read 4-byte block length
             let mut len_buf = [0u8; 4];
-            match file.read_exact(&mut len_buf) {
+            match reader.read_exact(&mut len_buf) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // EOF
                 Err(e) => return Err(e.into()),
@@ -98,7 +144,7 @@ impl IndexReader {
 
             // Read compressed block data
             let mut compressed = vec![0u8; block_len];
-            file.read_exact(&mut compressed)?;
+            reader.read_exact(&mut compressed)?;
 
             // Decompress (format: [4-byte decompressed len][zstd data])
             if block_len < 4 {

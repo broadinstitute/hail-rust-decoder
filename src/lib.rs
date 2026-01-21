@@ -39,6 +39,7 @@ pub mod buffer;
 pub mod codec;
 pub mod error;
 pub mod index;
+pub mod io;
 pub mod metadata;
 pub mod parquet;
 pub mod query;

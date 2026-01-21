@@ -9,7 +9,6 @@ use hail_decoder::codec::EncodedValue;
 use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::{HailError, Result};
-use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -84,9 +83,12 @@ fn print_usage(program: &str) {
 }
 
 fn show_info(table_path: &str) -> Result<()> {
-    let metadata_path = PathBuf::from(table_path).join("metadata.json.gz");
+    let metadata_path = hail_decoder::io::join_path(table_path, "metadata.json.gz");
 
-    let data = std::fs::read(&metadata_path)?;
+    let mut reader = hail_decoder::io::get_reader(&metadata_path)?;
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut data)?;
+
     let metadata = hail_decoder::schema::Metadata::from_gzipped_json(&data)?;
 
     println!("Hail Table Information");
@@ -102,9 +104,9 @@ fn show_info(table_path: &str) -> Result<()> {
 
 fn inspect_table(table_path: &str) -> Result<()> {
     // Load RVD metadata for detailed info
-    let rows_metadata_path = PathBuf::from(table_path).join("rows/metadata.json.gz");
+    let rows_metadata_path = hail_decoder::io::join_path(table_path, "rows/metadata.json.gz");
 
-    let rvd_spec = RVDComponentSpec::from_file(&rows_metadata_path)?;
+    let rvd_spec = RVDComponentSpec::from_path(&rows_metadata_path)?;
 
     println!("Hail Table Inspection");
     println!("=====================");
@@ -226,8 +228,8 @@ fn run_query(program: &str, args: &[String]) -> Result<()> {
         i += 1;
     }
 
-    // Open the table
-    let mut engine = QueryEngine::open(table_path)?;
+    // Open the table (supports both local and cloud paths)
+    let mut engine = QueryEngine::open_path(table_path)?;
 
     println!("Querying table: {}", table_path);
     println!("Key fields: {:?}", engine.key_fields());

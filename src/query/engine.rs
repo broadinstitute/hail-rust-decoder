@@ -4,24 +4,31 @@
 //! - Partition pruning based on key ranges
 //! - B-tree index lookups for efficient point queries
 //! - Row decoding from partition files
+//!
+//! Supports both local and cloud storage paths (GCS, S3).
 
 use crate::buffer::{BufferBuilder, InputBuffer};
 use crate::codec::{EncodedType, EncodedValue, ETypeParser};
 use crate::index::IndexReader;
+use crate::io::join_path;
 use crate::metadata::{IndexSpec, RVDComponentSpec};
 use crate::query::{filter_partitions, KeyRange, KeyValue};
 use crate::HailError;
 use crate::Result;
 use std::collections::HashMap;
-use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// High-level query engine for Hail tables
+///
+/// Supports both local and cloud storage paths:
+/// - Local: `path/to/table.ht`
+/// - GCS: `gs://bucket/path/to/table.ht`
+/// - S3: `s3://bucket/path/to/table.ht`
 pub struct QueryEngine {
-    /// Base path to the table (e.g., "path/to/table.ht")
-    table_path: PathBuf,
+    /// Base path to the table (e.g., "path/to/table.ht" or "gs://bucket/table.ht")
+    table_path: String,
     /// Path to the rows directory
-    rows_path: PathBuf,
+    rows_path: String,
     /// RVD metadata for rows
     rvd_spec: RVDComponentSpec,
     /// Parsed row type for decoding
@@ -42,7 +49,7 @@ pub struct QueryResult {
 }
 
 impl QueryEngine {
-    /// Open a Hail table for querying
+    /// Open a Hail table for querying from a local path
     ///
     /// # Arguments
     /// * `table_path` - Path to the table directory (e.g., "path/to/table.ht")
@@ -54,12 +61,35 @@ impl QueryEngine {
     /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
     /// ```
     pub fn open<P: AsRef<Path>>(table_path: P) -> Result<Self> {
-        let table_path = table_path.as_ref().to_path_buf();
-        let rows_path = table_path.join("rows");
+        let path_str = table_path.as_ref().to_string_lossy().to_string();
+        Self::open_path(&path_str)
+    }
+
+    /// Open a Hail table for querying from a path string (local or cloud URL)
+    ///
+    /// # Arguments
+    /// * `table_path` - Path to the table directory
+    ///   - Local: `path/to/table.ht`
+    ///   - GCS: `gs://bucket/path/to/table.ht`
+    ///   - S3: `s3://bucket/path/to/table.ht`
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::QueryEngine;
+    ///
+    /// // Local file
+    /// let engine = QueryEngine::open_path("data/my_table.ht").unwrap();
+    ///
+    /// // Google Cloud Storage
+    /// let engine = QueryEngine::open_path("gs://my-bucket/data/my_table.ht").unwrap();
+    /// ```
+    pub fn open_path(table_path: &str) -> Result<Self> {
+        let table_path = table_path.trim_end_matches('/').to_string();
+        let rows_path = join_path(&table_path, "rows");
 
         // Load RVD metadata
-        let metadata_path = rows_path.join("metadata.json.gz");
-        let rvd_spec = RVDComponentSpec::from_file(&metadata_path)?;
+        let metadata_path = join_path(&rows_path, "metadata.json.gz");
+        let rvd_spec = RVDComponentSpec::from_path(&metadata_path)?;
 
         // Parse the row type from the codec spec
         let row_type = ETypeParser::parse(&rvd_spec.codec_spec.e_type)?;
@@ -246,22 +276,21 @@ impl QueryEngine {
         // Index directory is named like the partition file but with .idx extension
         // e.g., part-0-xxx -> part-0-xxx.idx
         let index_dir_name = format!("{}.idx", part_file);
-        let index_path = self.table_path
-            .join(&index_spec.rel_path.trim_start_matches("../"))
-            .join(&index_dir_name);
+        let index_rel_path = index_spec.rel_path.trim_start_matches("../");
+        let index_base = join_path(&self.table_path, index_rel_path);
+        let index_path = join_path(&index_base, &index_dir_name);
 
-        IndexReader::new(&index_path, index_spec)
+        IndexReader::new_from_path(&index_path, index_spec)
     }
 
     /// Read a row from a partition file at a specific offset
     fn read_row_at_offset(&self, partition_idx: usize, offset: i64) -> Result<EncodedValue> {
         let part_file = &self.rvd_spec.part_files[partition_idx];
-        let part_path = self.rows_path.join("parts").join(part_file);
+        let parts_path = join_path(&self.rows_path, "parts");
+        let part_path = join_path(&parts_path, part_file);
 
-        let file = File::open(&part_path)?;
-
-        // Build the buffer stack
-        let mut buffer = BufferBuilder::from_reader(file)
+        // Build the buffer stack (works with both local and cloud paths)
+        let mut buffer = BufferBuilder::from_path(&part_path)?
             .with_leb128()
             .build();
 
@@ -287,12 +316,11 @@ impl QueryEngine {
     /// Scan a partition and filter rows by key ranges
     fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
         let part_file = &self.rvd_spec.part_files[partition_idx];
-        let part_path = self.rows_path.join("parts").join(part_file);
+        let parts_path = join_path(&self.rows_path, "parts");
+        let part_path = join_path(&parts_path, part_file);
 
-        let file = File::open(&part_path)?;
-
-        // Build the buffer stack
-        let mut buffer = BufferBuilder::from_reader(file)
+        // Build the buffer stack (works with both local and cloud paths)
+        let mut buffer = BufferBuilder::from_path(&part_path)?
             .with_leb128()
             .build();
 
