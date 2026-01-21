@@ -40,6 +40,7 @@ thiserror = "1.0"
 
 # Parallelism
 rayon = "1.10"
+crossbeam-channel = "0.5"
 
 # JSON Schema validation
 jsonschema = "0.27"

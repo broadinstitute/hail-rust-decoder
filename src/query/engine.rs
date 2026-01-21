@@ -12,9 +12,10 @@ use crate::codec::{EncodedType, EncodedValue, ETypeParser};
 use crate::index::IndexReader;
 use crate::io::{join_path, read_single_block};
 use crate::metadata::{IndexSpec, RVDComponentSpec};
-use crate::query::{filter_partitions, KeyRange, KeyValue};
+use crate::query::{filter_partitions, KeyRange, KeyValue, PartitionStream};
 use crate::HailError;
 use crate::Result;
+use crossbeam_channel;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -361,6 +362,34 @@ impl QueryEngine {
         self.row_type.read_present_value(&mut buffer)
     }
 
+    /// Create a streaming iterator for a single partition
+    ///
+    /// # Arguments
+    /// * `partition_idx` - The index of the partition to scan
+    /// * `ranges` - Key range constraints for filtering rows
+    ///
+    /// # Returns
+    /// A `PartitionStream` iterator that yields rows lazily
+    pub fn scan_partition_iter(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+    ) -> Result<PartitionStream> {
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+        let parts_path = join_path(&self.rows_path, "parts");
+        let part_path = join_path(&parts_path, part_file);
+
+        let buffer = BufferBuilder::from_path(&part_path)?
+            .with_leb128()
+            .build();
+
+        Ok(PartitionStream::new(
+            buffer,
+            self.row_type.clone(),
+            ranges.to_vec(),
+        ))
+    }
+
     /// Scan a partition and filter rows by key ranges
     ///
     /// # Arguments
@@ -370,128 +399,78 @@ impl QueryEngine {
     /// # Returns
     /// A vector of decoded rows that match the filter criteria
     pub fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
-        let part_file = &self.rvd_spec.part_files[partition_idx];
-        let parts_path = join_path(&self.rows_path, "parts");
-        let part_path = join_path(&parts_path, part_file);
-
-        // Build the buffer stack (works with both local and cloud paths)
-        let mut buffer = BufferBuilder::from_path(&part_path)?
-            .with_leb128()
-            .build();
-
-        let mut rows = Vec::new();
-
-        // Read all rows from the partition
-        // NOTE: Hail partition files ALWAYS have a row present flag byte before each row,
-        // regardless of whether the row type is marked as required.
-        loop {
-            // Read row present flag first
-            let row_present = match buffer.read_bool() {
-                Ok(present) => present,
-                Err(HailError::UnexpectedEof) => break,
-                Err(e) => return Err(e),
-            };
-
-            if !row_present {
-                // Skip null rows
-                continue;
-            }
-
-            // Decode the row data
-            match self.row_type.read_present_value(&mut buffer) {
-                Ok(row) => {
-                    // Check if row matches the range filters
-                    if self.row_matches_ranges(&row, ranges) {
-                        rows.push(row);
-                    }
-                }
-                Err(HailError::UnexpectedEof) => break,
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(rows)
+        self.scan_partition_iter(partition_idx, ranges)?.collect()
     }
 
-    /// Check if a row matches all the key range filters
-    fn row_matches_ranges(&self, row: &EncodedValue, ranges: &[KeyRange]) -> bool {
-        for range in ranges {
-            // Extract the value using the field path (supports nested access)
-            let field_value = self.extract_field_by_path(row, &range.field_path);
-
-            if let Some(value) = field_value {
-                if let Some(key_value) = self.encoded_to_key_value(value) {
-                    if !self.value_in_range(&key_value, range) {
-                        return false;
-                    }
-                }
-            }
-        }
-        true
-    }
-
-    /// Extract a field from an EncodedValue by following a field path
-    fn extract_field_by_path<'a>(
+    /// Query with streaming output
+    ///
+    /// Returns an iterator that yields rows as they are read, instead of
+    /// collecting all results into memory first. This is more memory-efficient
+    /// for large result sets and allows processing to start immediately.
+    ///
+    /// # Arguments
+    /// * `ranges` - Key range constraints for the query
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::{QueryEngine, KeyRange, KeyValue};
+    ///
+    /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
+    ///
+    /// // Stream results with a limit
+    /// for row in engine.query_iter(&[]).unwrap().take(100) {
+    ///     let row = row.unwrap();
+    ///     println!("{:?}", row);
+    /// }
+    /// ```
+    pub fn query_iter(
         &self,
-        value: &'a EncodedValue,
-        path: &[String],
-    ) -> Option<&'a EncodedValue> {
-        if path.is_empty() {
-            return Some(value);
-        }
+        ranges: &[KeyRange],
+    ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
+        let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
 
-        let mut current = value;
-        for field_name in path {
-            match current {
-                EncodedValue::Struct(fields) => {
-                    // Find the field by name
-                    current = fields
-                        .iter()
-                        .find(|(name, _)| name == field_name)
-                        .map(|(_, v)| v)?;
-                }
-                _ => return None,
-            }
-        }
-        Some(current)
+        // Use a bounded channel for backpressure
+        let (tx, rx) = crossbeam_channel::bounded(100);
+
+        // Capture state for the thread
+        let rows_path = self.rows_path.clone();
+        let part_files = self.rvd_spec.part_files.clone();
+        let row_type = self.row_type.clone();
+        let ranges = ranges.to_vec();
+
+        std::thread::spawn(move || {
+            // Process partitions in parallel using rayon
+            matching_partitions
+                .into_par_iter()
+                .for_each_with(tx, |sender, idx| {
+                    let part_file = &part_files[idx];
+                    let parts_path = join_path(&rows_path, "parts");
+                    let part_path = join_path(&parts_path, part_file);
+
+                    let buffer_res = BufferBuilder::from_path(&part_path)
+                        .map(|b| b.with_leb128().build());
+
+                    match buffer_res {
+                        Ok(buffer) => {
+                            let stream =
+                                PartitionStream::new(buffer, row_type.clone(), ranges.clone());
+                            for row in stream {
+                                if sender.send(row).is_err() {
+                                    // Consumer dropped, stop processing
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = sender.send(Err(e));
+                        }
+                    }
+                });
+        });
+
+        Ok(rx.into_iter())
     }
 
-    /// Check if a value is within a key range
-    fn value_in_range(&self, value: &KeyValue, range: &KeyRange) -> bool {
-        use crate::query::QueryBound;
-
-        // Check start bound
-        match &range.start {
-            QueryBound::Included(start) => {
-                if value < start {
-                    return false;
-                }
-            }
-            QueryBound::Excluded(start) => {
-                if value <= start {
-                    return false;
-                }
-            }
-            QueryBound::Unbounded => {}
-        }
-
-        // Check end bound
-        match &range.end {
-            QueryBound::Included(end) => {
-                if value > end {
-                    return false;
-                }
-            }
-            QueryBound::Excluded(end) => {
-                if value >= end {
-                    return false;
-                }
-            }
-            QueryBound::Unbounded => {}
-        }
-
-        true
-    }
 }
 
 #[cfg(test)]

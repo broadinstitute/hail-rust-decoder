@@ -12,7 +12,7 @@ use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
 use hail_decoder::validation::{SchemaGenerator, SchemaValidator};
-use hail_decoder::{HailError, Result};
+use hail_decoder::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -289,31 +289,38 @@ fn run_query(program: &str, args: &[String]) -> Result<()> {
         if where_filters.is_empty() {
             println!("Warning: No filters specified. This may scan all partitions.");
         } else {
-            println!("Filter conditions: {:?}", where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+            println!(
+                "Filter conditions: {:?}",
+                where_filters
+                    .iter()
+                    .map(|r| r.field_path_str())
+                    .collect::<Vec<_>>()
+            );
         }
 
-        let result = engine.query(&where_filters)?;
+        println!("\nStreaming results...");
 
-        println!("\nQuery Statistics:");
-        println!("  Partitions scanned: {}", result.partitions_scanned);
-        println!("  Partitions pruned: {}", result.partitions_pruned);
-        println!("  Rows found: {}", result.rows.len());
+        // Use streaming query for memory-efficient iteration
+        let iterator = engine.query_iter(&where_filters)?;
 
-        let rows_to_show = if let Some(n) = limit {
-            result.rows.iter().take(n).collect::<Vec<_>>()
+        // Apply limit if specified
+        let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = limit {
+            Box::new(iterator.take(n))
         } else {
-            result.rows.iter().collect::<Vec<_>>()
+            Box::new(iterator)
         };
 
-        if !rows_to_show.is_empty() {
-            println!("\nResults:");
-            for (i, row) in rows_to_show.iter().enumerate() {
-                if !json_output {
-                    println!("\n--- Row {} ---", i + 1);
-                }
-                print_row(row, json_output)?;
+        let mut count = 0;
+        for row_result in iterator {
+            let row = row_result?;
+            count += 1;
+            if !json_output {
+                println!("\n--- Row {} ---", count);
             }
+            print_row(&row, json_output)?;
         }
+
+        println!("\nRows returned: {}", count);
     }
 
     Ok(())

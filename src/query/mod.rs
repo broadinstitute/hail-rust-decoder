@@ -8,8 +8,10 @@
 
 mod engine;
 mod pruning;
+mod stream;
 mod types;
 
 pub use engine::*;
 pub use pruning::*;
+pub use stream::*;
 pub use types::*;
