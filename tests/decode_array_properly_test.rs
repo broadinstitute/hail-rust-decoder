@@ -1,6 +1,6 @@
 ///! Test decoding arrays with proper format understanding
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use hail_decoder::codec::EncodedType;
 use std::fs::File;
 
@@ -21,35 +21,36 @@ fn test_array_header_exploration() {
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     let string_type = EncodedType::EBinary { required: true };
 
     // Skip to array position (offset 0x0052)
-    zstd.read_bool().unwrap();
+    buffer.read_bool().unwrap();
     let mut skip = [0u8; 5];
-    zstd.read_exact(&mut skip).unwrap();
-    string_type.read(&mut zstd).unwrap();
-    zstd.read_i32().unwrap();
-    string_type.read(&mut zstd).unwrap();
-    zstd.read_i32().unwrap();
-    zstd.read_bool().unwrap();
-    zstd.read_bool().unwrap();
-    string_type.read(&mut zstd).unwrap();
-    string_type.read(&mut zstd).unwrap();
-    string_type.read(&mut zstd).unwrap();
-    string_type.read(&mut zstd).unwrap();
-    string_type.read(&mut zstd).unwrap();
-    zstd.read_i32().unwrap();
-    zstd.read_i32().unwrap();
-    zstd.read_i64().unwrap();
-    zstd.read_i64().unwrap();
+    buffer.read_exact(&mut skip).unwrap();
+    string_type.read(&mut buffer).unwrap();
+    buffer.read_i32().unwrap();
+    string_type.read(&mut buffer).unwrap();
+    buffer.read_i32().unwrap();
+    buffer.read_bool().unwrap();
+    buffer.read_bool().unwrap();
+    string_type.read(&mut buffer).unwrap();
+    string_type.read(&mut buffer).unwrap();
+    string_type.read(&mut buffer).unwrap();
+    string_type.read(&mut buffer).unwrap();
+    string_type.read(&mut buffer).unwrap();
+    buffer.read_i32().unwrap();
+    buffer.read_i32().unwrap();
+    buffer.read_i64().unwrap();
+    buffer.read_i64().unwrap();
 
     println!("\n=== Array Header Analysis ===");
 
     // Read potential header bytes
     let mut header = [0u8; 10];
-    zstd.read_exact(&mut header).unwrap();
+    buffer.read_exact(&mut header).unwrap();
     println!("First 10 bytes: {:02x?}", header);
 
     // Try different interpretations
@@ -70,34 +71,35 @@ fn test_array_header_exploration() {
     // We've already read 10, so rewind
     let file2 = File::open(part_file.path()).unwrap();
     let stream2 = StreamBlockBuffer::new(file2);
-    let mut zstd2 = ZstdBuffer::new(stream2);
+    let zstd2 = ZstdBuffer::new(stream2);
+    let mut buffer2 = BlockingBuffer::with_default_size(zstd2);
 
     // Skip to array again
-    zstd2.read_bool().unwrap();
+    buffer2.read_bool().unwrap();
     let mut skip2 = [0u8; 5];
-    zstd2.read_exact(&mut skip2).unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    zstd2.read_i32().unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    zstd2.read_i32().unwrap();
-    zstd2.read_bool().unwrap();
-    zstd2.read_bool().unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    string_type.read(&mut zstd2).unwrap();
-    zstd2.read_i32().unwrap();
-    zstd2.read_i32().unwrap();
-    zstd2.read_i64().unwrap();
-    zstd2.read_i64().unwrap();
+    buffer2.read_exact(&mut skip2).unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    buffer2.read_i32().unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    buffer2.read_i32().unwrap();
+    buffer2.read_bool().unwrap();
+    buffer2.read_bool().unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    string_type.read(&mut buffer2).unwrap();
+    buffer2.read_i32().unwrap();
+    buffer2.read_i32().unwrap();
+    buffer2.read_i64().unwrap();
+    buffer2.read_i64().unwrap();
 
     println!("\n=== Theory: Skip 5 bytes, read i32 array length ===");
     let mut mystery_header = [0u8; 5];
-    zstd2.read_exact(&mut mystery_header).unwrap();
+    buffer2.read_exact(&mut mystery_header).unwrap();
     println!("Mystery header: {:02x?}", mystery_header);
 
-    let array_length = zstd2.read_i32().unwrap();
+    let array_length = buffer2.read_i32().unwrap();
     println!("Array length (i32): {}", array_length);
 
     // But wait, that would read [00 03 43 44] = 0x44430300 = 1145324544
@@ -107,32 +109,33 @@ fn test_array_header_exploration() {
     // Rewind again
     let file3 = File::open(part_file.path()).unwrap();
     let stream3 = StreamBlockBuffer::new(file3);
-    let mut zstd3 = ZstdBuffer::new(stream3);
+    let zstd3 = ZstdBuffer::new(stream3);
+    let mut buffer3 = BlockingBuffer::with_default_size(zstd3);
 
-    zstd3.read_bool().unwrap();
+    buffer3.read_bool().unwrap();
     let mut skip3 = [0u8; 5];
-    zstd3.read_exact(&mut skip3).unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    zstd3.read_i32().unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    zstd3.read_i32().unwrap();
-    zstd3.read_bool().unwrap();
-    zstd3.read_bool().unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    string_type.read(&mut zstd3).unwrap();
-    zstd3.read_i32().unwrap();
-    zstd3.read_i32().unwrap();
-    zstd3.read_i64().unwrap();
-    zstd3.read_i64().unwrap();
+    buffer3.read_exact(&mut skip3).unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    buffer3.read_i32().unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    buffer3.read_i32().unwrap();
+    buffer3.read_bool().unwrap();
+    buffer3.read_bool().unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    string_type.read(&mut buffer3).unwrap();
+    buffer3.read_i32().unwrap();
+    buffer3.read_i32().unwrap();
+    buffer3.read_i64().unwrap();
+    buffer3.read_i64().unwrap();
 
     // Read as: [4 bytes something][i32 array length]
-    let prefix = zstd3.read_i32().unwrap();
+    let prefix = buffer3.read_i32().unwrap();
     println!("Prefix i32: {} (0x{:08x})", prefix, prefix);
 
-    let length = zstd3.read_i32().unwrap();
+    let length = buffer3.read_i32().unwrap();
     println!("Array length: {} (0x{:08x})", length, length);
 
     // That reads [00 00 00 00] and [00 03 43 44]

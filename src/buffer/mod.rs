@@ -23,12 +23,14 @@
 //! The builder ensures you set up the correct buffer chain as specified by
 //! Hail's metadata `_bufferSpec` field.
 
+pub mod block;
 pub mod blocking;
 pub mod builder;
 pub mod leb128;
 pub mod stream_block;
 pub mod zstd;
 
+pub use block::InputBlockBuffer;
 pub use blocking::BlockingBuffer;
 pub use builder::BufferBuilder;
 pub use leb128::LEB128Buffer;

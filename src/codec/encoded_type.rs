@@ -122,7 +122,7 @@ impl EncodedType {
                 let mut field_values = Vec::with_capacity(fields.len());
                 let mut nullable_idx = 0; // Index in the bitmap (only increments for nullable fields)
 
-                for (field_idx, field) in fields.iter().enumerate() {
+                for (_field_idx, field) in fields.iter().enumerate() {
                     if field.encoded_type.is_required() {
                         // Required field - always present, read it
                         let value = field.encoded_type.read_present_value(buffer)?;

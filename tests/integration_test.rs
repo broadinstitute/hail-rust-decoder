@@ -2,7 +2,7 @@
 //!
 //! These tests use real Hail table data from the test dataset.
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]
@@ -17,13 +17,15 @@ fn test_read_globals_file() {
     let file = File::open("data/gene_models_hds/ht/prep_table.ht/globals/parts/part-0")
         .expect("Failed to open globals file - make sure test data exists");
 
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Read the first 7 bytes of decompressed data (all available data)
     let mut buf = [0u8; 7];
-    zstd.read_exact(&mut buf)
-        .expect("Failed to read from ZstdBuffer");
+    buffer.read_exact(&mut buf)
+        .expect("Failed to read from buffer");
 
     // The exact bytes depend on the Hail encoding format
     // Expected: [01, 04, 30, 2e, 39, 35, 00] which is "\u{1}\u{4}0.95\0"
@@ -38,7 +40,7 @@ fn test_read_globals_file() {
 
     // Verify that reading more returns EOF
     let mut extra = [0u8; 1];
-    let result = zstd.read_exact(&mut extra);
+    let result = buffer.read_exact(&mut extra);
     assert!(
         matches!(result, Err(hail_decoder::error::HailError::UnexpectedEof)),
         "Expected EOF after reading all data"
@@ -51,8 +53,10 @@ fn test_read_all_globals_data() {
     let file = File::open("data/gene_models_hds/ht/prep_table.ht/globals/parts/part-0")
         .expect("Failed to open globals file");
 
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // According to the actual file:
     // Block 1: 7 bytes decompressed (contains "0.95" string data)
@@ -63,7 +67,7 @@ fn test_read_all_globals_data() {
 
     // Read until we hit EOF
     loop {
-        match zstd.read_exact(&mut temp_buf) {
+        match buffer.read_exact(&mut temp_buf) {
             Ok(()) => all_data.push(temp_buf[0]),
             Err(hail_decoder::error::HailError::UnexpectedEof) => break,
             Err(e) => panic!("Unexpected error: {}", e),
@@ -116,12 +120,14 @@ fn test_read_rows_file() {
     println!("Testing with file: {:?}", part_file.file_name());
 
     let file = File::open(part_file.path()).expect("Failed to open rows file");
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Read first 64 bytes of decompressed data
     let mut buf = [0u8; 64];
-    zstd.read_exact(&mut buf)
+    buffer.read_exact(&mut buf)
         .expect("Failed to read from rows file");
 
     println!("First 64 bytes from rows file (hex): {:02x?}", buf);

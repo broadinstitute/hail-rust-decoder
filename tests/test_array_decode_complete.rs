@@ -1,6 +1,6 @@
 ///! Test complete array decoding with the new implementation
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use hail_decoder::codec::{EncodedType, EncodedValue};
 use hail_decoder::codec::encoded_type::EncodedField;
 use std::fs::File;
@@ -23,7 +23,8 @@ fn test_decode_exons_array() {
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
     let stream = StreamBlockBuffer::new(file);
-    let mut buffer = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     println!("\n=== Testing Complete Array Decoding ===\n");
 

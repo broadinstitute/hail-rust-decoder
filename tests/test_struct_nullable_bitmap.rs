@@ -6,7 +6,7 @@
 ///! 3. Each bit represents whether a field is missing (1) or present (0)
 ///! 4. Only present fields have their data written after the bitmap
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]
@@ -25,8 +25,10 @@ fn test_struct_presence_bitmap() {
 
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut buffer = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     println!("\n=== Testing Struct Presence Bitmap Understanding ===\n");
 
@@ -104,8 +106,10 @@ fn test_array_starts_after_all_primitive_fields() {
 
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut buffer = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     println!("\n=== Finding where array actually starts ===\n");
 
@@ -231,8 +235,10 @@ fn test_array_starts_after_all_primitive_fields() {
 
     // Restart to properly decode
     let file2 = File::open(part_file.path()).unwrap();
+    // Build proper buffer stack
     let stream2 = StreamBlockBuffer::new(file2);
-    let mut buffer2 = ZstdBuffer::new(stream2);
+    let zstd2 = ZstdBuffer::new(stream2);
+    let mut buffer2 = BlockingBuffer::with_default_size(zstd2);
 
     // Skip to just before array (we know the position now)
     buffer2.read_bool().unwrap(); // outer present

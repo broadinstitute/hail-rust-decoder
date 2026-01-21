@@ -1,38 +1,52 @@
 //! Blocking buffer implementation
 //!
-//! Provides fixed-size buffering on top of another buffer
+//! Provides byte-level access on top of block-based buffers.
+//! Converts `InputBlockBuffer` to `InputBuffer`.
 
-use crate::error::Result;
-use crate::buffer::InputBuffer;
+use crate::error::{HailError, Result};
+use crate::buffer::{InputBlockBuffer, InputBuffer};
 
 /// Fixed-size blocking buffer (typically 64KB)
-pub struct BlockingBuffer<B: InputBuffer> {
+///
+/// This buffer bridges block-based I/O (`InputBlockBuffer`) and byte-level I/O (`InputBuffer`).
+/// It reads complete blocks from the underlying buffer and provides them as a byte stream.
+pub struct BlockingBuffer<B: InputBlockBuffer> {
     inner: B,
     buffer: Vec<u8>,
     position: usize,
     filled: usize,
 }
 
-impl<B: InputBuffer> BlockingBuffer<B> {
-    /// Create a new blocking buffer with the given block size
-    pub fn new(inner: B, block_size: usize) -> Self {
+impl<B: InputBlockBuffer> BlockingBuffer<B> {
+    /// Create a new blocking buffer
+    ///
+    /// The block_size parameter is unused with the new architecture but kept
+    /// for API compatibility. The actual buffer size is determined by the
+    /// blocks read from the underlying `InputBlockBuffer`.
+    pub fn new(inner: B, _block_size: usize) -> Self {
         Self {
             inner,
-            buffer: vec![0; block_size],
+            buffer: Vec::new(),
             position: 0,
             filled: 0,
         }
     }
 
-    /// Create with default 64KB block size
+    /// Create with default size (parameter is unused)
     pub fn with_default_size(inner: B) -> Self {
         Self::new(inner, 64 * 1024)
     }
 
     fn refill(&mut self) -> Result<()> {
-        self.inner.read_exact(&mut self.buffer)?;
+        // Read one complete block from the underlying buffer
+        let bytes_read = self.inner.read_block(&mut self.buffer)?;
+
+        if bytes_read == 0 {
+            return Err(HailError::UnexpectedEof);
+        }
+
         self.position = 0;
-        self.filled = self.buffer.len();
+        self.filled = bytes_read;
         Ok(())
     }
 
@@ -41,7 +55,7 @@ impl<B: InputBuffer> BlockingBuffer<B> {
     }
 }
 
-impl<B: InputBuffer> InputBuffer for BlockingBuffer<B> {
+impl<B: InputBlockBuffer> InputBuffer for BlockingBuffer<B> {
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         let mut offset = 0;
 

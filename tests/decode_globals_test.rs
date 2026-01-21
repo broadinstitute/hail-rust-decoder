@@ -1,6 +1,6 @@
 ///! Test decoding the globals data from the test dataset
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use hail_decoder::codec::{Decoder, HailDecoder, Value};
 use hail_decoder::schema::HailType;
 use std::fs::File;
@@ -14,12 +14,14 @@ fn test_decode_globals_raw_bytes() {
     let file = File::open("data/gene_models_hds/ht/prep_table.ht/globals/parts/part-0")
         .expect("Failed to open globals file");
 
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Read all 7 bytes
     let mut bytes = [0u8; 7];
-    zstd.read_exact(&mut bytes).expect("Failed to read");
+    buffer.read_exact(&mut bytes).expect("Failed to read");
 
     println!("Raw bytes: {:02x?}", bytes);
     println!("As chars: {:?}", String::from_utf8_lossy(&bytes));
@@ -44,13 +46,15 @@ fn test_decode_string_from_globals() {
     let file = File::open("data/gene_models_hds/ht/prep_table.ht/globals/parts/part-0")
         .expect("Failed to open globals file");
 
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     let decoder = HailDecoder::new();
 
     // Try to decode as a simple string
-    let value = decoder.decode(&mut zstd, &HailType::String);
+    let value = decoder.decode(&mut buffer, &HailType::String);
 
     match value {
         Ok(Value::String(s)) => {
@@ -82,7 +86,9 @@ fn test_manual_string_decode() {
     data.extend_from_slice(&(string_data.len() as u32).to_le_bytes());
     data.extend_from_slice(&string_data);
 
-    let mut buffer = StreamBlockBuffer::new(&data[..]);
+    // StreamBlockBuffer -> BlockingBuffer to get InputBuffer
+    let stream = StreamBlockBuffer::new(&data[..]);
+    let mut buffer = BlockingBuffer::with_default_size(stream);
     let decoder = HailDecoder::new();
 
     let value = decoder.decode(&mut buffer, &HailType::String).unwrap();

@@ -1,26 +1,15 @@
 //! Hail index reading (B-tree based)
+//!
+//! This module implements B-tree index reading for Hail tables.
+//! Indexes enable:
+//! - Point lookups by key (O(log n))
+//! - Range scans (efficient iteration over key ranges)
+//! - Skip to specific offsets in partition files
 
-use crate::Result;
+mod metadata;
+mod node;
+mod reader;
 
-/// Index reader for Hail tables
-pub struct IndexReader {
-    // TODO: Implement B-tree index reading
-}
-
-impl IndexReader {
-    pub fn new() -> Self {
-        Self {}
-    }
-
-    /// Read index from file
-    pub fn read_index(&mut self, _path: &str) -> Result<()> {
-        // TODO: Implement
-        Ok(())
-    }
-}
-
-impl Default for IndexReader {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub use metadata::*;
+pub use node::*;
+pub use reader::*;

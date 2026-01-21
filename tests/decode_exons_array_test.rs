@@ -1,6 +1,6 @@
 ///! Test decoding the exons array using the proper array decoder
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use hail_decoder::codec::{EncodedType, EncodedValue};
 use hail_decoder::codec::encoded_type::EncodedField;
 use std::fs::File;
@@ -23,7 +23,8 @@ fn test_decode_exons_array_proper() {
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Define types
     let string_type = EncodedType::EBinary { required: true };
@@ -70,38 +71,38 @@ fn test_decode_exons_array_proper() {
     println!("\n=== Decoding FGFR2 Gene with Exons Array ===\n");
 
     // Skip to exons array
-    zstd.read_bool().unwrap(); // outer present
+    buffer.read_bool().unwrap(); // outer present
     let mut skip = [0u8; 5];
-    zstd.read_exact(&mut skip).unwrap(); // mystery bytes
+    buffer.read_exact(&mut skip).unwrap(); // mystery bytes
 
     // Skip interval
-    string_type.read(&mut zstd).unwrap();
-    zstd.read_i32().unwrap();
-    string_type.read(&mut zstd).unwrap();
-    zstd.read_i32().unwrap();
-    zstd.read_bool().unwrap();
-    zstd.read_bool().unwrap();
+    string_type.read(&mut buffer).unwrap();
+    buffer.read_i32().unwrap();
+    string_type.read(&mut buffer).unwrap();
+    buffer.read_i32().unwrap();
+    buffer.read_bool().unwrap();
+    buffer.read_bool().unwrap();
 
     // Skip primitive gene fields
-    let gene_id = string_type.read(&mut zstd).unwrap();
+    let gene_id = string_type.read(&mut buffer).unwrap();
     println!("Gene ID: {}", gene_id.as_string().unwrap());
 
-    string_type.read(&mut zstd).unwrap(); // gene_version
+    string_type.read(&mut buffer).unwrap(); // gene_version
 
-    let symbol = string_type.read(&mut zstd).unwrap();
+    let symbol = string_type.read(&mut buffer).unwrap();
     println!("Gene Symbol: {}", symbol.as_string().unwrap());
 
-    string_type.read(&mut zstd).unwrap(); // chrom
-    string_type.read(&mut zstd).unwrap(); // strand
-    zstd.read_i32().unwrap(); // start
-    zstd.read_i32().unwrap(); // stop
-    zstd.read_i64().unwrap(); // xstart
-    zstd.read_i64().unwrap(); // xstop
+    string_type.read(&mut buffer).unwrap(); // chrom
+    string_type.read(&mut buffer).unwrap(); // strand
+    buffer.read_i32().unwrap(); // start
+    buffer.read_i32().unwrap(); // stop
+    buffer.read_i64().unwrap(); // xstart
+    buffer.read_i64().unwrap(); // xstop
 
     println!("\n=== Now decoding exons array ===");
 
     // Decode the exons array using our proper decoder
-    let exons_result = exons_array_type.read(&mut zstd);
+    let exons_result = exons_array_type.read(&mut buffer);
 
     match exons_result {
         Ok(EncodedValue::Array(exons)) => {

@@ -2,80 +2,45 @@
 //!
 //! Reads data formatted as: [4-byte length][data block]...
 
-use crate::error::{HailError, Result};
-use crate::buffer::InputBuffer;
+use crate::error::Result;
+use crate::buffer::InputBlockBuffer;
 use std::io::Read;
 
 /// Stream block buffer that reads length-prefixed blocks
+///
+/// This buffer reads blocks from a stream where each block is prefixed
+/// with a 4-byte little-endian length. It implements `InputBlockBuffer`
+/// to provide complete blocks to the next layer in the buffer stack.
 pub struct StreamBlockBuffer<R: Read> {
     reader: R,
-    current_block: Vec<u8>,
-    position: usize,
 }
 
 impl<R: Read> StreamBlockBuffer<R> {
     /// Create a new stream block buffer
     pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            current_block: Vec::new(),
-            position: 0,
-        }
+        Self { reader }
     }
+}
 
-    /// Read the next block from the stream
-    fn read_next_block(&mut self) -> Result<bool> {
+impl<R: Read> InputBlockBuffer for StreamBlockBuffer<R> {
+    fn read_block(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
         // Read 4-byte block length (little-endian)
         let mut len_buf = [0u8; 4];
         match self.reader.read_exact(&mut len_buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(false); // End of stream
+                return Ok(0); // EOF
             }
             Err(e) => return Err(e.into()),
         }
 
         let block_len = u32::from_le_bytes(len_buf) as usize;
 
-        // Read the block data
-        self.current_block.resize(block_len, 0);
-        self.reader.read_exact(&mut self.current_block)?;
-        self.position = 0;
+        // Resize buffer and read block data
+        buf.resize(block_len, 0);
+        self.reader.read_exact(buf)?;
 
-        Ok(true)
-    }
-
-    /// Get available bytes in current block
-    fn available(&self) -> usize {
-        self.current_block.len().saturating_sub(self.position)
-    }
-}
-
-impl<R: Read> InputBuffer for StreamBlockBuffer<R> {
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        let mut offset = 0;
-
-        while offset < buf.len() {
-            // If we need more data, read the next block
-            if self.available() == 0 {
-                if !self.read_next_block()? {
-                    return Err(HailError::UnexpectedEof);
-                }
-            }
-
-            // Copy from current block
-            let to_copy = buf.len() - offset;
-            let available = self.available();
-            let copy_len = to_copy.min(available);
-
-            buf[offset..offset + copy_len]
-                .copy_from_slice(&self.current_block[self.position..self.position + copy_len]);
-
-            self.position += copy_len;
-            offset += copy_len;
-        }
-
-        Ok(())
+        Ok(block_len)
     }
 }
 
@@ -92,10 +57,11 @@ mod tests {
         ];
 
         let mut buffer = StreamBlockBuffer::new(&data[..]);
-        let mut result = [0u8; 5];
-        buffer.read_exact(&mut result).unwrap();
+        let mut block = Vec::new();
+        let len = buffer.read_block(&mut block).unwrap();
 
-        assert_eq!(result, [1, 2, 3, 4, 5]);
+        assert_eq!(len, 5);
+        assert_eq!(block, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -108,9 +74,35 @@ mod tests {
         ];
 
         let mut buffer = StreamBlockBuffer::new(&data[..]);
-        let mut result = [0u8; 5];
-        buffer.read_exact(&mut result).unwrap();
 
-        assert_eq!(result, [1, 2, 3, 4, 5]);
+        // Read first block
+        let mut block = Vec::new();
+        let len = buffer.read_block(&mut block).unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(block, vec![1, 2, 3]);
+
+        // Read second block
+        let len = buffer.read_block(&mut block).unwrap();
+        assert_eq!(len, 2);
+        assert_eq!(block, vec![4, 5]);
+    }
+
+    #[test]
+    fn test_read_eof() {
+        let data = vec![
+            2, 0, 0, 0, // length = 2
+            1, 2, // data
+        ];
+
+        let mut buffer = StreamBlockBuffer::new(&data[..]);
+
+        // Read the block
+        let mut block = Vec::new();
+        let len = buffer.read_block(&mut block).unwrap();
+        assert_eq!(len, 2);
+
+        // Try to read past EOF
+        let len = buffer.read_block(&mut block).unwrap();
+        assert_eq!(len, 0); // EOF
     }
 }

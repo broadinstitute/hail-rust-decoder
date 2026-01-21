@@ -101,7 +101,7 @@ impl<B: InputBuffer> InputBuffer for LEB128Buffer<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::stream_block::StreamBlockBuffer;
+    use crate::buffer::{BlockingBuffer, StreamBlockBuffer};
 
     #[test]
     fn test_read_uleb128_single_byte() {
@@ -111,7 +111,8 @@ mod tests {
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
-        let mut buffer = LEB128Buffer::new(stream);
+        let blocking = BlockingBuffer::with_default_size(stream);
+        let mut buffer = LEB128Buffer::new(blocking);
 
         assert_eq!(buffer.read_uleb128().unwrap(), 127);
     }
@@ -124,7 +125,8 @@ mod tests {
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
-        let mut buffer = LEB128Buffer::new(stream);
+        let blocking = BlockingBuffer::with_default_size(stream);
+        let mut buffer = LEB128Buffer::new(blocking);
 
         assert_eq!(buffer.read_uleb128().unwrap(), 128);
     }
@@ -137,7 +139,8 @@ mod tests {
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
-        let mut buffer = LEB128Buffer::new(stream);
+        let blocking = BlockingBuffer::with_default_size(stream);
+        let mut buffer = LEB128Buffer::new(blocking);
 
         assert_eq!(buffer.read_sleb128().unwrap(), 127);
     }
@@ -150,7 +153,8 @@ mod tests {
         ];
 
         let stream = StreamBlockBuffer::new(&data[..]);
-        let mut buffer = LEB128Buffer::new(stream);
+        let blocking = BlockingBuffer::with_default_size(stream);
+        let mut buffer = LEB128Buffer::new(blocking);
 
         assert_eq!(buffer.read_sleb128().unwrap(), -1);
     }

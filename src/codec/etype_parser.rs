@@ -29,7 +29,7 @@ impl ETypeParser {
         self.input.chars().nth(self.pos)
     }
 
-    fn peek_char(&self, offset: usize) -> Option<char> {
+    fn _peek_char(&self, offset: usize) -> Option<char> {
         self.input.chars().nth(self.pos + offset)
     }
 

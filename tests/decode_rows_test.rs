@@ -2,7 +2,7 @@
 ///!
 ///! The test data contains 3 genes. Let's decode the first one to understand the format.
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]
@@ -25,11 +25,12 @@ fn test_examine_row_bytes() {
 
     let file = File::open(part_file.path()).unwrap();
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Read first 200 bytes to analyze structure
     let mut bytes = vec![0u8; 200];
-    zstd.read_exact(&mut bytes).unwrap();
+    buffer.read_exact(&mut bytes).unwrap();
 
     println!("\nFirst 200 bytes:");
     for (i, chunk) in bytes.chunks(16).enumerate() {
@@ -90,26 +91,27 @@ fn test_manually_decode_first_fields() {
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
     let stream = StreamBlockBuffer::new(file);
-    let mut zstd = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Try to manually parse the first row
     println!("\nManual decoding attempt:");
 
     // First, there might be a row count or similar header
     // Let's read a few initial integers to see
-    let val1 = zstd.read_i32().unwrap();
+    let val1 = buffer.read_i32().unwrap();
     println!("First i32: {} (0x{:08x})", val1, val1);
 
-    let val2 = zstd.read_i32().unwrap();
+    let val2 = buffer.read_i32().unwrap();
     println!("Second i32: {} (0x{:08x})", val2, val2);
 
     // Try reading as a string (length-prefixed)
-    let len = zstd.read_i32().unwrap();
+    let len = buffer.read_i32().unwrap();
     println!("Third value as length: {} (0x{:08x})", len, len);
 
     if len > 0 && len < 100 {
         let mut str_bytes = vec![0u8; len as usize];
-        zstd.read_exact(&mut str_bytes).unwrap();
+        buffer.read_exact(&mut str_bytes).unwrap();
         println!("String value: {:?}", String::from_utf8_lossy(&str_bytes));
     }
 }

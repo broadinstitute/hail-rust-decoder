@@ -1,0 +1,202 @@
+//! Metadata structures for Hail tables
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+use crate::Result;
+
+/// Top-level table metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableMetadata {
+    #[serde(rename = "fileVersion")]
+    pub file_version: u32,
+
+    #[serde(rename = "hailVersion")]
+    pub hail_version: String,
+
+    #[serde(rename = "references_rel_path")]
+    pub references_rel_path: String,
+
+    #[serde(flatten)]
+    pub extra: Value,
+}
+
+/// Row component specification with partitioning and index info
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RVDComponentSpec {
+    pub name: String,
+
+    #[serde(rename = "_key")]
+    pub key: Vec<String>,
+
+    #[serde(rename = "_codecSpec")]
+    pub codec_spec: CodecSpec,
+
+    #[serde(rename = "_indexSpec")]
+    pub index_spec: Option<IndexSpec>,
+
+    #[serde(rename = "_partFiles")]
+    pub part_files: Vec<String>,
+
+    #[serde(rename = "_jRangeBounds")]
+    pub range_bounds: Vec<Interval>,
+
+    #[serde(rename = "_attrs")]
+    pub attrs: Value,
+}
+
+/// Index specification for B-tree indexes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexSpec {
+    pub name: String,
+
+    #[serde(rename = "_relPath")]
+    pub rel_path: String,
+
+    #[serde(rename = "_leafCodec")]
+    pub leaf_codec: CodecSpec,
+
+    #[serde(rename = "_internalNodeCodec")]
+    pub internal_node_codec: CodecSpec,
+
+    #[serde(rename = "_keyType")]
+    pub key_type: String,
+
+    #[serde(rename = "_annotationType")]
+    pub annotation_type: String,
+}
+
+/// Codec specification with encoding type and buffer spec
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodecSpec {
+    pub name: String,
+
+    #[serde(rename = "_eType")]
+    pub e_type: String,
+
+    #[serde(rename = "_vType")]
+    pub v_type: String,
+
+    #[serde(rename = "_bufferSpec")]
+    pub buffer_spec: BufferSpec,
+}
+
+/// Buffer specification describing the layered buffer stack
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "name")]
+pub enum BufferSpec {
+    #[serde(rename = "StreamBlockBufferSpec")]
+    StreamBlock,
+
+    #[serde(rename = "ZstdBlockBufferSpec")]
+    ZstdBlock {
+        #[serde(rename = "blockSize")]
+        block_size: usize,
+        child: Box<BufferSpec>,
+    },
+
+    #[serde(rename = "BlockingBufferSpec")]
+    Blocking {
+        #[serde(rename = "blockSize")]
+        block_size: usize,
+        child: Box<BufferSpec>,
+    },
+
+    #[serde(rename = "LEB128BufferSpec")]
+    LEB128 {
+        child: Box<BufferSpec>,
+    },
+}
+
+/// Partition boundary interval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Interval {
+    pub start: Value,
+    pub end: Value,
+
+    #[serde(rename = "includeStart")]
+    pub include_start: bool,
+
+    #[serde(rename = "includeEnd")]
+    pub include_end: bool,
+}
+
+impl TableMetadata {
+    /// Parse metadata from JSON bytes
+    pub fn from_json(data: &[u8]) -> Result<Self> {
+        Ok(serde_json::from_slice(data)?)
+    }
+
+    /// Parse metadata from gzipped JSON
+    pub fn from_gzipped_json(data: &[u8]) -> Result<Self> {
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut json_data = Vec::new();
+        decoder.read_to_end(&mut json_data)?;
+        Self::from_json(&json_data)
+    }
+
+    /// Load metadata from a file path
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+
+        // Try gzipped first, fall back to plain JSON
+        Self::from_gzipped_json(&data)
+            .or_else(|_| Self::from_json(&data))
+    }
+}
+
+impl RVDComponentSpec {
+    /// Parse RVD component specification from JSON bytes
+    pub fn from_json(data: &[u8]) -> Result<Self> {
+        Ok(serde_json::from_slice(data)?)
+    }
+
+    /// Parse RVD component specification from gzipped JSON
+    pub fn from_gzipped_json(data: &[u8]) -> Result<Self> {
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut json_data = Vec::new();
+        decoder.read_to_end(&mut json_data)?;
+        Self::from_json(&json_data)
+    }
+
+    /// Load RVD component specification from a file path
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+
+        // Try gzipped first, fall back to plain JSON
+        Self::from_gzipped_json(&data)
+            .or_else(|_| Self::from_json(&data))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_gene_models_rows_metadata() {
+        let metadata = RVDComponentSpec::from_file(
+            "data/gene_models_hds/ht/prep_table.ht/rows/metadata.json.gz"
+        ).expect("Failed to parse metadata");
+
+        // Check key fields
+        assert_eq!(metadata.key, vec!["gene_id", "chrom", "start"]);
+
+        // Check index spec exists
+        assert!(metadata.index_spec.is_some());
+        let index_spec = metadata.index_spec.unwrap();
+        assert_eq!(index_spec.rel_path, "../index");
+
+        // Check partition bounds
+        assert_eq!(metadata.range_bounds.len(), 1);
+
+        // Check part files
+        assert_eq!(metadata.part_files.len(), 1);
+    }
+}

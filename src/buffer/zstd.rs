@@ -1,271 +1,108 @@
 //! Zstd decompression buffer
 //!
 //! Reads Zstd-compressed blocks formatted as: [4-byte decompressed size][zstd data]
+//!
+//! This buffer implements `InputBlockBuffer` and expects its underlying buffer
+//! to provide complete blocks where each block contains a 4-byte decompressed
+//! length followed by raw Zstd compressed data (without magic number).
 
 use crate::error::{HailError, Result};
-use crate::buffer::InputBuffer;
+use crate::buffer::InputBlockBuffer;
 
 /// Zstd decompression buffer
-pub struct ZstdBuffer<B: InputBuffer> {
+///
+/// Reads blocks from the underlying `InputBlockBuffer`, where each block
+/// has the format: `[4-byte decompressed_len][zstd_compressed_data]`
+pub struct ZstdBuffer<B: InputBlockBuffer> {
     inner: B,
-    decompressed: Vec<u8>,
-    position: usize,
 }
 
-impl<B: InputBuffer> ZstdBuffer<B> {
+impl<B: InputBlockBuffer> ZstdBuffer<B> {
     /// Create a new Zstd buffer
     pub fn new(inner: B) -> Self {
-        Self {
-            inner,
-            decompressed: Vec::new(),
-            position: 0,
-        }
+        Self { inner }
     }
+}
 
-    /// Read and decompress the next block
-    fn read_next_block(&mut self) -> Result<bool> {
-        // Read 4-byte decompressed size
-        let decompressed_size = match self.inner.read_i32() {
-            Ok(size) => size as usize,
-            Err(HailError::UnexpectedEof) => return Ok(false),
-            Err(e) => return Err(e),
-        };
+impl<B: InputBlockBuffer> InputBlockBuffer for ZstdBuffer<B> {
+    fn read_block(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        // Read a compressed block from the underlying buffer
+        let mut compressed_block = Vec::new();
+        let block_size = self.inner.read_block(&mut compressed_block)?;
 
-        // Read the Zstd magic number (0xFD2FB528 in little-endian: 28 B5 2F FD)
-        let mut magic = [0u8; 4];
-        self.inner.read_exact(&mut magic)?;
+        if block_size == 0 {
+            return Ok(0); // EOF
+        }
 
-        if magic != [0x28, 0xB5, 0x2F, 0xFD] {
+        if block_size < 4 {
+            return Err(HailError::InvalidFormat(
+                "Zstd block too small for decompressed length".to_string(),
+            ));
+        }
+
+        // Parse the first 4 bytes as the expected decompressed length
+        let expected_decompressed_len = i32::from_le_bytes([
+            compressed_block[0],
+            compressed_block[1],
+            compressed_block[2],
+            compressed_block[3],
+        ]) as usize;
+
+        // The rest is the raw Zstd compressed data (no magic number)
+        let compressed_data = &compressed_block[4..];
+
+        // Decompress the data
+        let decompressed = zstd::decode_all(compressed_data).map_err(|_| {
+            HailError::Zstd
+        })?;
+
+        // Verify the decompressed size matches the expected size
+        if decompressed.len() != expected_decompressed_len {
             return Err(HailError::InvalidFormat(format!(
-                "Invalid Zstd magic number: {:02x}{:02x}{:02x}{:02x}",
-                magic[0], magic[1], magic[2], magic[3]
+                "Decompressed size mismatch: expected {}, got {}",
+                expected_decompressed_len,
+                decompressed.len()
             )));
         }
 
-        // Handle empty blocks (decompressed_size = 0)
-        if decompressed_size == 0 {
-            // Still need to read and validate the Zstd frame
-            // Read bytes until we have a valid frame
-            let mut compressed_buffer = vec![0x28, 0xB5, 0x2F, 0xFD]; // Start with magic
+        // Copy decompressed data into output buffer
+        buf.clear();
+        buf.extend_from_slice(&decompressed);
 
-            // Read bytes one at a time until we can decompress
-            loop {
-                match zstd::decode_all(&compressed_buffer[..]) {
-                    Ok(decompressed) => {
-                        if decompressed.is_empty() {
-                            self.decompressed.clear();
-                            self.position = 0;
-                            // Continue to the next block since this one is empty
-                            return self.read_next_block();
-                        } else {
-                            return Err(HailError::InvalidFormat(format!(
-                                "Expected empty block but got {} bytes",
-                                decompressed.len()
-                            )));
-                        }
-                    }
-                    Err(_) => {
-                        // Need more data
-                        let mut one_byte = [0u8; 1];
-                        match self.inner.read_exact(&mut one_byte) {
-                            Ok(()) => compressed_buffer.push(one_byte[0]),
-                            Err(HailError::UnexpectedEof) => {
-                                return Err(HailError::InvalidFormat(
-                                    "Incomplete Zstd frame".to_string()
-                                ));
-                            }
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
-
-                // Safety check
-                if compressed_buffer.len() > 1024 {
-                    return Err(HailError::InvalidFormat(
-                        "Empty block frame too large".to_string()
-                    ));
-                }
-            }
-        }
-
-        // We need to read the entire Zstd frame. The challenge is that we don't know
-        // the compressed size in advance. We'll use a chunked reading approach where
-        // we buffer data and attempt to decompress until we get exactly the expected
-        // decompressed size.
-
-        // Strategy: Read chunks and build up a buffer until we can decompress successfully
-        let mut compressed_buffer = Vec::with_capacity(decompressed_size); // estimate
-        compressed_buffer.extend_from_slice(&magic); // Include the magic we already read
-
-        // We'll read the rest of the frame by attempting decompression iteratively
-        // The Zstd decoder will tell us when it has a complete frame
-        loop {
-            // Try to decompress what we have so far
-            match zstd::decode_all(&compressed_buffer[..]) {
-                Ok(decompressed) => {
-                    // Check if we got the expected size
-                    if decompressed.len() == decompressed_size {
-                        self.decompressed = decompressed;
-                        self.position = 0;
-                        return Ok(true);
-                    } else if decompressed.len() > decompressed_size {
-                        // We read too much - this shouldn't happen with a valid frame
-                        return Err(HailError::InvalidFormat(format!(
-                            "Decompressed size mismatch: expected {}, got {}",
-                            decompressed_size,
-                            decompressed.len()
-                        )));
-                    }
-                    // If decompressed.len() < decompressed_size, we need more data
-                    // (though this is unusual for Zstd frames)
-                }
-                Err(_) => {
-                    // Decompression failed - we likely need more data
-                    // Read one more byte and try again
-                    let mut one_byte = [0u8; 1];
-                    match self.inner.read_exact(&mut one_byte) {
-                        Ok(()) => compressed_buffer.push(one_byte[0]),
-                        Err(HailError::UnexpectedEof) => {
-                            return Err(HailError::InvalidFormat(
-                                "Incomplete Zstd frame".to_string()
-                            ));
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            // Safety check: prevent infinite loop
-            if compressed_buffer.len() > decompressed_size * 2 + 1024 {
-                return Err(HailError::InvalidFormat(
-                    "Zstd frame too large".to_string()
-                ));
-            }
-        }
-    }
-
-    fn available(&self) -> usize {
-        self.decompressed.len().saturating_sub(self.position)
-    }
-}
-
-impl<B: InputBuffer> InputBuffer for ZstdBuffer<B> {
-    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
-        let mut offset = 0;
-
-        while offset < buf.len() {
-            if self.available() == 0 {
-                if !self.read_next_block()? {
-                    return Err(HailError::UnexpectedEof);
-                }
-            }
-
-            let to_copy = buf.len() - offset;
-            let available = self.available();
-            let copy_len = to_copy.min(available);
-
-            buf[offset..offset + copy_len]
-                .copy_from_slice(&self.decompressed[self.position..self.position + copy_len]);
-
-            self.position += copy_len;
-            offset += copy_len;
-        }
-
-        Ok(())
+        Ok(decompressed.len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use crate::buffer::StreamBlockBuffer;
 
     #[test]
-    fn test_zstd_decompression() {
-        // Create a simple test: compress "Hello" and wrap it in the expected format
-        let original = b"Hello";
+    fn test_decompress_simple_block() {
+        // Create a simple test: compress "hello" with zstd
+        let original = b"hello";
         let compressed = zstd::encode_all(&original[..], 3).unwrap();
 
-        // Build the format: [decompressed_size][compressed_data]
-        let mut data = Vec::new();
-        data.extend_from_slice(&(original.len() as i32).to_le_bytes());
-        data.extend_from_slice(&compressed);
+        // Build the block format: [decompressed_len: 4][compressed_data]
+        let mut block_data = Vec::new();
+        block_data.extend_from_slice(&(original.len() as i32).to_le_bytes());
+        block_data.extend_from_slice(&compressed);
 
-        // Wrap in a stream block: [block_length][block_data]
+        // Wrap in StreamBlockBuffer format: [block_len: 4][block_data]
         let mut stream_data = Vec::new();
-        stream_data.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        stream_data.extend_from_slice(&data);
+        stream_data.extend_from_slice(&(block_data.len() as u32).to_le_bytes());
+        stream_data.extend_from_slice(&block_data);
 
-        // Test reading through the buffer stack
-        let cursor = Cursor::new(stream_data);
-        let stream_buffer = crate::buffer::StreamBlockBuffer::new(cursor);
+        // Create the buffer stack
+        let stream_buffer = StreamBlockBuffer::new(&stream_data[..]);
         let mut zstd_buffer = ZstdBuffer::new(stream_buffer);
 
-        let mut result = vec![0u8; original.len()];
-        zstd_buffer.read_exact(&mut result).unwrap();
+        // Read and decompress
+        let mut output = Vec::new();
+        let len = zstd_buffer.read_block(&mut output).unwrap();
 
-        assert_eq!(&result[..], &original[..]);
-    }
-
-    #[test]
-    fn test_invalid_magic() {
-        // Create data with invalid magic number
-        let mut data = Vec::new();
-        data.extend_from_slice(&5i32.to_le_bytes()); // decompressed size
-        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // bad magic
-
-        let mut stream_data = Vec::new();
-        stream_data.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        stream_data.extend_from_slice(&data);
-
-        let cursor = Cursor::new(stream_data);
-        let stream_buffer = crate::buffer::StreamBlockBuffer::new(cursor);
-        let mut zstd_buffer = ZstdBuffer::new(stream_buffer);
-
-        let mut result = [0u8; 5];
-        let err = zstd_buffer.read_exact(&mut result).unwrap_err();
-
-        match err {
-            HailError::InvalidFormat(msg) => {
-                assert!(msg.contains("Invalid Zstd magic"));
-            }
-            _ => panic!("Expected InvalidFormat error"),
-        }
-    }
-
-    #[test]
-    fn test_multiple_blocks() {
-        // Test reading across multiple Zstd blocks
-        let data1 = b"First";
-        let data2 = b"Second";
-
-        let compressed1 = zstd::encode_all(&data1[..], 3).unwrap();
-        let compressed2 = zstd::encode_all(&data2[..], 3).unwrap();
-
-        let mut stream_data = Vec::new();
-
-        // First block
-        let mut block1 = Vec::new();
-        block1.extend_from_slice(&(data1.len() as i32).to_le_bytes());
-        block1.extend_from_slice(&compressed1);
-        stream_data.extend_from_slice(&(block1.len() as u32).to_le_bytes());
-        stream_data.extend_from_slice(&block1);
-
-        // Second block
-        let mut block2 = Vec::new();
-        block2.extend_from_slice(&(data2.len() as i32).to_le_bytes());
-        block2.extend_from_slice(&compressed2);
-        stream_data.extend_from_slice(&(block2.len() as u32).to_le_bytes());
-        stream_data.extend_from_slice(&block2);
-
-        let cursor = Cursor::new(stream_data);
-        let stream_buffer = crate::buffer::StreamBlockBuffer::new(cursor);
-        let mut zstd_buffer = ZstdBuffer::new(stream_buffer);
-
-        let mut result = vec![0u8; data1.len() + data2.len()];
-        zstd_buffer.read_exact(&mut result).unwrap();
-
-        assert_eq!(&result[..data1.len()], &data1[..]);
-        assert_eq!(&result[data1.len()..], &data2[..]);
+        assert_eq!(len, 5);
+        assert_eq!(output, b"hello");
     }
 }

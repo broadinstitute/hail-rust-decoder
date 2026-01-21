@@ -6,7 +6,7 @@
 ///! 3. Try interpreting with 5-byte bitmap (old schema hypothesis)
 ///! 4. See which interpretation makes sense
 
-use hail_decoder::buffer::{InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]
@@ -29,8 +29,10 @@ fn verify_actual_bitmap_size() {
 
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer
     let stream = StreamBlockBuffer::new(file);
-    let mut buffer = ZstdBuffer::new(stream);
+    let zstd = ZstdBuffer::new(stream);
+    let mut buffer = BlockingBuffer::with_default_size(zstd);
 
     // Read first 20 bytes
     let mut first_bytes = [0u8; 20];
@@ -73,8 +75,10 @@ fn verify_actual_bitmap_size() {
 
             // Try to read the string
             let file2 = File::open(part_file.path()).unwrap();
+            // Build proper buffer stack
             let stream2 = StreamBlockBuffer::new(file2);
-            let mut buffer2 = ZstdBuffer::new(stream2);
+            let zstd2 = ZstdBuffer::new(stream2);
+            let mut buffer2 = BlockingBuffer::with_default_size(zstd2);
 
             // Skip bitmap
             let mut skip = [0u8; 4];
@@ -172,8 +176,10 @@ fn verify_actual_bitmap_size() {
 
                     // Try to decode the full sequence
                     let file3 = File::open(part_file.path()).unwrap();
+                    // Build proper buffer stack
                     let stream3 = StreamBlockBuffer::new(file3);
-                    let mut buffer3 = ZstdBuffer::new(stream3);
+                    let zstd3 = ZstdBuffer::new(stream3);
+                    let mut buffer3 = BlockingBuffer::with_default_size(zstd3);
 
                     // Read and skip: present flag (1) + row bitmap (4) + interval bitmap (1) = 6 bytes
                     let mut skip = [0u8; 6];

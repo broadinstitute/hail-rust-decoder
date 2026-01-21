@@ -117,7 +117,7 @@ impl Decoder for HailDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::stream_block::StreamBlockBuffer;
+    use crate::buffer::{BlockingBuffer, StreamBlockBuffer};
 
     #[test]
     fn test_decode_int32() {
@@ -127,7 +127,8 @@ mod tests {
             42, 0, 0, 0, // value = 42
         ];
 
-        let mut buffer = StreamBlockBuffer::new(&data[..]);
+        let stream = StreamBlockBuffer::new(&data[..]);
+        let mut buffer = BlockingBuffer::with_default_size(stream);
         let decoder = HailDecoder::new();
 
         let value = decoder.decode(&mut buffer, &HailType::Int32).unwrap();
@@ -141,7 +142,8 @@ mod tests {
             0, // not present
         ];
 
-        let mut buffer = StreamBlockBuffer::new(&data[..]);
+        let stream = StreamBlockBuffer::new(&data[..]);
+        let mut buffer = BlockingBuffer::with_default_size(stream);
         let decoder = HailDecoder::new();
 
         let value = decoder.decode(&mut buffer, &HailType::Int32).unwrap();

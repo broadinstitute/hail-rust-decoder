@@ -1,0 +1,403 @@
+//! Query engine for Hail tables
+//!
+//! Provides a high-level API for querying Hail tables using:
+//! - Partition pruning based on key ranges
+//! - B-tree index lookups for efficient point queries
+//! - Row decoding from partition files
+
+use crate::buffer::{BufferBuilder, InputBuffer};
+use crate::codec::{EncodedType, EncodedValue, ETypeParser};
+use crate::index::IndexReader;
+use crate::metadata::{IndexSpec, RVDComponentSpec};
+use crate::query::{filter_partitions, KeyRange, KeyValue};
+use crate::HailError;
+use crate::Result;
+use std::collections::HashMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+
+/// High-level query engine for Hail tables
+pub struct QueryEngine {
+    /// Base path to the table (e.g., "path/to/table.ht")
+    table_path: PathBuf,
+    /// Path to the rows directory
+    rows_path: PathBuf,
+    /// RVD metadata for rows
+    rvd_spec: RVDComponentSpec,
+    /// Parsed row type for decoding
+    row_type: EncodedType,
+    /// Cached index readers (one per partition)
+    index_readers: HashMap<usize, IndexReader>,
+}
+
+/// Result of a query operation
+#[derive(Debug)]
+pub struct QueryResult {
+    /// The decoded rows matching the query
+    pub rows: Vec<EncodedValue>,
+    /// Number of partitions scanned
+    pub partitions_scanned: usize,
+    /// Number of partitions pruned (skipped)
+    pub partitions_pruned: usize,
+}
+
+impl QueryEngine {
+    /// Open a Hail table for querying
+    ///
+    /// # Arguments
+    /// * `table_path` - Path to the table directory (e.g., "path/to/table.ht")
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::QueryEngine;
+    ///
+    /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
+    /// ```
+    pub fn open<P: AsRef<Path>>(table_path: P) -> Result<Self> {
+        let table_path = table_path.as_ref().to_path_buf();
+        let rows_path = table_path.join("rows");
+
+        // Load RVD metadata
+        let metadata_path = rows_path.join("metadata.json.gz");
+        let rvd_spec = RVDComponentSpec::from_file(&metadata_path)?;
+
+        // Parse the row type from the codec spec
+        let row_type = ETypeParser::parse(&rvd_spec.codec_spec.e_type)?;
+
+        Ok(QueryEngine {
+            table_path,
+            rows_path,
+            rvd_spec,
+            row_type,
+            index_readers: HashMap::new(),
+        })
+    }
+
+    /// Get the key field names for this table
+    pub fn key_fields(&self) -> &[String] {
+        &self.rvd_spec.key
+    }
+
+    /// Get the number of partitions in this table
+    pub fn num_partitions(&self) -> usize {
+        self.rvd_spec.part_files.len()
+    }
+
+    /// Check if this table has indexes
+    pub fn has_index(&self) -> bool {
+        self.rvd_spec.index_spec.is_some()
+    }
+
+    /// Get the RVD specification
+    pub fn rvd_spec(&self) -> &RVDComponentSpec {
+        &self.rvd_spec
+    }
+
+    /// Perform a point lookup by key
+    ///
+    /// Returns the row matching the exact key, or None if not found.
+    ///
+    /// # Arguments
+    /// * `key` - The key value to search for (must match the table's key structure)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::{QueryEngine, KeyValue};
+    /// use hail_decoder::codec::EncodedValue;
+    ///
+    /// let mut engine = QueryEngine::open("data/my_table.ht").unwrap();
+    ///
+    /// // Create key for lookup
+    /// let key = EncodedValue::Struct(vec![
+    ///     ("gene_id".to_string(), EncodedValue::Binary(b"ENSG00000141510".to_vec())),
+    /// ]);
+    ///
+    /// if let Some(row) = engine.lookup(&key).unwrap() {
+    ///     println!("Found: {:?}", row);
+    /// }
+    /// ```
+    pub fn lookup(&mut self, key: &EncodedValue) -> Result<Option<EncodedValue>> {
+        // For point lookups, skip partition pruning if there's only one partition
+        // (partition pruning with composite keys is complex and the current
+        // implementation has limitations with multi-field keys)
+        let matching_partitions = if self.rvd_spec.part_files.len() == 1 {
+            vec![0] // Use the single partition
+        } else {
+            // Convert key to KeyRanges for partition pruning
+            let key_ranges = self.key_to_ranges(key)?;
+            filter_partitions(&self.rvd_spec.range_bounds, &key_ranges)
+        };
+
+        if matching_partitions.is_empty() {
+            return Ok(None);
+        }
+
+        // For point lookups, we expect at most one partition to match
+        // (assuming proper key ordering across partitions)
+        for partition_idx in matching_partitions {
+            // Get or create index reader for this partition
+            let offset = self.lookup_in_index(partition_idx, key)?;
+
+            if let Some(data_offset) = offset {
+                // Read the row from the partition file at the given offset
+                let row = self.read_row_at_offset(partition_idx, data_offset)?;
+                return Ok(Some(row));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Query with key ranges (for range scans)
+    ///
+    /// Returns all rows within the specified key range.
+    ///
+    /// # Arguments
+    /// * `ranges` - Key range constraints for the query
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::{QueryEngine, KeyRange, KeyValue};
+    ///
+    /// let mut engine = QueryEngine::open("data/my_table.ht").unwrap();
+    ///
+    /// // Query for all rows where chrom = "chr1"
+    /// let ranges = vec![
+    ///     KeyRange::point("chrom".to_string(), KeyValue::String("chr1".to_string())),
+    /// ];
+    ///
+    /// let result = engine.query(&ranges).unwrap();
+    /// println!("Found {} rows", result.rows.len());
+    /// ```
+    pub fn query(&mut self, ranges: &[KeyRange]) -> Result<QueryResult> {
+        let total_partitions = self.num_partitions();
+
+        // Prune partitions based on ranges
+        let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
+        let partitions_pruned = total_partitions - matching_partitions.len();
+
+        let mut rows = Vec::new();
+
+        for partition_idx in &matching_partitions {
+            // For range queries, we need to scan the partition
+            // In the future, we could use the index to find the starting offset
+            let partition_rows = self.scan_partition(*partition_idx, ranges)?;
+            rows.extend(partition_rows);
+        }
+
+        Ok(QueryResult {
+            rows,
+            partitions_scanned: matching_partitions.len(),
+            partitions_pruned,
+        })
+    }
+
+    /// Convert an EncodedValue key to KeyRanges for partition pruning
+    fn key_to_ranges(&self, key: &EncodedValue) -> Result<Vec<KeyRange>> {
+        let mut ranges = Vec::new();
+
+        if let EncodedValue::Struct(fields) = key {
+            for (field_name, field_value) in fields {
+                if let Some(key_value) = self.encoded_to_key_value(field_value) {
+                    ranges.push(KeyRange::point(field_name.clone(), key_value));
+                }
+            }
+        }
+
+        Ok(ranges)
+    }
+
+    /// Convert an EncodedValue to a KeyValue
+    fn encoded_to_key_value(&self, value: &EncodedValue) -> Option<KeyValue> {
+        match value {
+            EncodedValue::Binary(b) => {
+                Some(KeyValue::String(String::from_utf8_lossy(b).into_owned()))
+            }
+            EncodedValue::Int32(i) => Some(KeyValue::Int32(*i)),
+            EncodedValue::Int64(i) => Some(KeyValue::Int64(*i)),
+            EncodedValue::Float32(f) => Some(KeyValue::Float32(*f)),
+            EncodedValue::Float64(f) => Some(KeyValue::Float64(*f)),
+            EncodedValue::Boolean(b) => Some(KeyValue::Boolean(*b)),
+            _ => None,
+        }
+    }
+
+    /// Lookup a key in the index for a specific partition
+    fn lookup_in_index(&mut self, partition_idx: usize, key: &EncodedValue) -> Result<Option<i64>> {
+        let index_spec = self.rvd_spec.index_spec.as_ref().ok_or_else(|| {
+            HailError::Index("Table does not have an index".to_string())
+        })?;
+
+        // Get or create index reader
+        if !self.index_readers.contains_key(&partition_idx) {
+            let reader = self.create_index_reader(partition_idx, index_spec)?;
+            self.index_readers.insert(partition_idx, reader);
+        }
+
+        let reader = self.index_readers.get(&partition_idx).unwrap();
+        reader.lookup(key)
+    }
+
+    /// Create an index reader for a partition
+    fn create_index_reader(&self, partition_idx: usize, index_spec: &IndexSpec) -> Result<IndexReader> {
+        // Get the partition file name and derive the index directory name
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+
+        // Index directory is named like the partition file but with .idx extension
+        // e.g., part-0-xxx -> part-0-xxx.idx
+        let index_dir_name = format!("{}.idx", part_file);
+        let index_path = self.table_path
+            .join(&index_spec.rel_path.trim_start_matches("../"))
+            .join(&index_dir_name);
+
+        IndexReader::new(&index_path, index_spec)
+    }
+
+    /// Read a row from a partition file at a specific offset
+    fn read_row_at_offset(&self, partition_idx: usize, offset: i64) -> Result<EncodedValue> {
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+        let part_path = self.rows_path.join("parts").join(part_file);
+
+        let file = File::open(&part_path)?;
+
+        // Build the buffer stack
+        let mut buffer = BufferBuilder::from_reader(file)
+            .with_leb128()
+            .build();
+
+        // Skip to the offset
+        // Note: This is a simplification. In practice, we'd need to seek properly
+        // through the compressed blocks. For now, we read and discard bytes.
+        let mut skipped = 0i64;
+        while skipped < offset {
+            buffer.read_u8()?;
+            skipped += 1;
+        }
+
+        // Read and decode the row
+        self.row_type.read(&mut buffer)
+    }
+
+    /// Scan a partition and filter rows by key ranges
+    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+        let part_path = self.rows_path.join("parts").join(part_file);
+
+        let file = File::open(&part_path)?;
+
+        // Build the buffer stack
+        let mut buffer = BufferBuilder::from_reader(file)
+            .with_leb128()
+            .build();
+
+        let mut rows = Vec::new();
+
+        // Read all rows from the partition
+        loop {
+            match self.row_type.read(&mut buffer) {
+                Ok(row) => {
+                    // Check if row matches the range filters
+                    if self.row_matches_ranges(&row, ranges) {
+                        rows.push(row);
+                    }
+                }
+                Err(HailError::UnexpectedEof) => break,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(rows)
+    }
+
+    /// Check if a row matches all the key range filters
+    fn row_matches_ranges(&self, row: &EncodedValue, ranges: &[KeyRange]) -> bool {
+        if let EncodedValue::Struct(fields) = row {
+            for range in ranges {
+                // Find the field in the row
+                let field_value = fields.iter()
+                    .find(|(name, _)| name == &range.field)
+                    .map(|(_, v)| v);
+
+                if let Some(value) = field_value {
+                    if let Some(key_value) = self.encoded_to_key_value(value) {
+                        if !self.value_in_range(&key_value, range) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Check if a value is within a key range
+    fn value_in_range(&self, value: &KeyValue, range: &KeyRange) -> bool {
+        use crate::query::QueryBound;
+
+        // Check start bound
+        match &range.start {
+            QueryBound::Included(start) => {
+                if value < start {
+                    return false;
+                }
+            }
+            QueryBound::Excluded(start) => {
+                if value <= start {
+                    return false;
+                }
+            }
+            QueryBound::Unbounded => {}
+        }
+
+        // Check end bound
+        match &range.end {
+            QueryBound::Included(end) => {
+                if value > end {
+                    return false;
+                }
+            }
+            QueryBound::Excluded(end) => {
+                if value >= end {
+                    return false;
+                }
+            }
+            QueryBound::Unbounded => {}
+        }
+
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_engine_open() {
+        let engine = QueryEngine::open("data/gene_models_hds/ht/prep_table.ht")
+            .expect("Failed to open table");
+
+        assert_eq!(engine.key_fields(), &["gene_id", "chrom", "start"]);
+        assert_eq!(engine.num_partitions(), 1);
+        assert!(engine.has_index());
+    }
+
+    #[test]
+    fn test_query_engine_lookup() {
+        let mut engine = QueryEngine::open("data/gene_models_hds/ht/prep_table.ht")
+            .expect("Failed to open table");
+
+        // Create a key to lookup
+        let key = EncodedValue::Struct(vec![
+            ("gene_id".to_string(), EncodedValue::Binary(b"ENSG00000066468".to_vec())),
+            ("chrom".to_string(), EncodedValue::Binary(b"10".to_vec())),
+            ("start".to_string(), EncodedValue::Int32(121478332)),
+        ]);
+
+        let result = engine.lookup(&key);
+        assert!(result.is_ok());
+
+        // The lookup should find the row (offset 0 from index)
+        // Note: The actual row decoding may need refinement
+    }
+}

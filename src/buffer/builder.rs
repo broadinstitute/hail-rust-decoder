@@ -94,17 +94,13 @@ pub struct LEB128BufferStack<R> {
 impl<R: std::io::Read + 'static> LEB128BufferStack<R> {
     /// Build the complete buffer stack
     ///
-    /// Returns LEB128Buffer wrapping the appropriate inner buffers
+    /// Returns LEB128Buffer wrapping the appropriate inner buffers.
+    /// The stack is: LEB128Buffer -> BlockingBuffer -> ZstdBuffer -> StreamBlockBuffer
     pub fn build(self) -> Box<dyn InputBuffer> {
         let stream = StreamBlockBuffer::new(self.builder.reader);
         let zstd = ZstdBuffer::new(stream);
-
-        if self.builder.use_blocking {
-            let blocking = BlockingBuffer::new(zstd, self.builder.block_size);
-            Box::new(LEB128Buffer::new(blocking))
-        } else {
-            Box::new(LEB128Buffer::new(zstd))
-        }
+        let blocking = BlockingBuffer::new(zstd, self.builder.block_size);
+        Box::new(LEB128Buffer::new(blocking))
     }
 }
 
@@ -116,10 +112,12 @@ pub struct RawBufferStack<R> {
 impl<R: std::io::Read + 'static> RawBufferStack<R> {
     /// Build the buffer stack without LEB128
     ///
-    /// Returns ZstdBuffer for direct access to decompressed bytes
-    pub fn build(self) -> ZstdBuffer<StreamBlockBuffer<R>> {
+    /// Returns a blocking buffer that provides byte-level access to decompressed data.
+    /// The stack is: BlockingBuffer -> ZstdBuffer -> StreamBlockBuffer
+    pub fn build(self) -> Box<dyn InputBuffer> {
         let stream = StreamBlockBuffer::new(self.builder.reader);
-        ZstdBuffer::new(stream)
+        let zstd = ZstdBuffer::new(stream);
+        Box::new(BlockingBuffer::new(zstd, self.builder.block_size))
     }
 }
 

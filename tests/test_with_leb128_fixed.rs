@@ -2,7 +2,7 @@
 ///!
 ///! This test uses the actual LEB128Buffer (now fixed to override integer reads)
 
-use hail_decoder::buffer::{InputBuffer, LEB128Buffer, StreamBlockBuffer, ZstdBuffer};
+use hail_decoder::buffer::{BlockingBuffer, InputBuffer, LEB128Buffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]
@@ -23,10 +23,11 @@ fn test_decode_with_proper_leb128() {
 
     let part_file = &entries[0];
     let file = File::open(part_file.path()).unwrap();
+    // Build proper buffer stack: StreamBlockBuffer -> ZstdBuffer -> BlockingBuffer -> LEB128Buffer
     let stream = StreamBlockBuffer::new(file);
     let zstd = ZstdBuffer::new(stream);
-    // Note: Skipping BlockingBuffer for now - it might need special initialization
-    let mut buffer = LEB128Buffer::new(zstd);
+    let blocking = BlockingBuffer::with_default_size(zstd);
+    let mut buffer = LEB128Buffer::new(blocking);
 
     // Now read with proper LEB128 decoding
     println!("Reading first row with LEB128 decoding:");
