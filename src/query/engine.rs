@@ -15,6 +15,7 @@ use crate::metadata::{IndexSpec, RVDComponentSpec};
 use crate::query::{filter_partitions, KeyRange, KeyValue};
 use crate::HailError;
 use crate::Result;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -206,14 +207,14 @@ impl QueryEngine {
         let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
         let partitions_pruned = total_partitions - matching_partitions.len();
 
-        let mut rows = Vec::new();
+        // Scan partitions in parallel using rayon
+        let results: Result<Vec<Vec<EncodedValue>>> = matching_partitions
+            .par_iter()
+            .map(|&partition_idx| self.scan_partition(partition_idx, ranges))
+            .collect();
 
-        for partition_idx in &matching_partitions {
-            // For range queries, we need to scan the partition
-            // In the future, we could use the index to find the starting offset
-            let partition_rows = self.scan_partition(*partition_idx, ranges)?;
-            rows.extend(partition_rows);
-        }
+        // Flatten results from all partitions
+        let rows: Vec<EncodedValue> = results?.into_iter().flatten().collect();
 
         Ok(QueryResult {
             rows,
