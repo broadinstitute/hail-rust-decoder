@@ -55,6 +55,17 @@ indicatif = "0.17"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# HTTP Server
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["query"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+async-stream = "0.3"
+tokio-stream = "0.1"
+
+[[bin]]
+name = "hail-server"
+path = "src/bin/hail-server.rs"
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"

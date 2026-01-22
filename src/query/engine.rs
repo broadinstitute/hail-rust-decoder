@@ -19,6 +19,7 @@ use crossbeam_channel;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::{debug, info, warn};
 
 /// High-level query engine for Hail tables
 ///
@@ -428,6 +429,10 @@ impl QueryEngine {
         ranges: &[KeyRange],
     ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
         let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
+        info!(
+            "query_iter: {} partitions matched filter",
+            matching_partitions.len()
+        );
 
         // Use a bounded channel for backpressure
         let (tx, rx) = crossbeam_channel::bounded(100);
@@ -438,11 +443,19 @@ impl QueryEngine {
         let row_type = self.row_type.clone();
         let ranges = ranges.to_vec();
 
+        let num_partitions = matching_partitions.len();
+
         std::thread::spawn(move || {
+            info!(
+                "Background query thread started. Processing {} partitions.",
+                num_partitions
+            );
+
             // Process partitions in parallel using rayon
             matching_partitions
                 .into_par_iter()
                 .for_each_with(tx, |sender, idx| {
+                    debug!("Processing partition index {}", idx);
                     let part_file = &part_files[idx];
                     let parts_path = join_path(&rows_path, "parts");
                     let part_path = join_path(&parts_path, part_file);
@@ -452,20 +465,28 @@ impl QueryEngine {
 
                     match buffer_res {
                         Ok(buffer) => {
+                            debug!("Partition {} opened successfully", idx);
                             let stream =
                                 PartitionStream::new(buffer, row_type.clone(), ranges.clone());
+
+                            let mut row_count = 0;
                             for row in stream {
                                 if sender.send(row).is_err() {
-                                    // Consumer dropped, stop processing
+                                    debug!("Partition {} sender dropped", idx);
                                     break;
                                 }
+                                row_count += 1;
                             }
+                            debug!("Partition {} finished, yielded {} rows", idx, row_count);
                         }
                         Err(e) => {
+                            warn!("Failed to open partition {}: {}", idx, e);
                             let _ = sender.send(Err(e));
                         }
                     }
                 });
+
+            info!("Background query thread finished");
         });
 
         Ok(rx.into_iter())

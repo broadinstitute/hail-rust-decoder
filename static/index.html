@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hail Decoder - Streaming Query</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        h1 {
+            margin: 0 0 20px 0;
+            color: #2c3e50;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .query-form {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #555;
+        }
+        input[type="text"], input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: 'Monaco', 'Menlo', monospace;
+        }
+        input[type="text"]:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+        }
+        .where-clauses {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .where-clause {
+            display: flex;
+            gap: 8px;
+        }
+        .where-clause input {
+            flex: 1;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .btn-primary {
+            background: #3498db;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+        .btn-primary:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: #ecf0f1;
+            color: #333;
+        }
+        .btn-secondary:hover {
+            background: #ddd;
+        }
+        .btn-danger {
+            background: #e74c3c;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .status-bar {
+            background: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .status {
+            font-weight: 600;
+        }
+        .status.streaming {
+            color: #27ae60;
+        }
+        .status.stopped {
+            color: #e74c3c;
+        }
+        .status.idle {
+            color: #7f8c8d;
+        }
+        .count {
+            font-size: 18px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+        .results-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .results-header {
+            padding: 15px 20px;
+            background: #2c3e50;
+            color: white;
+            font-weight: 600;
+        }
+        .results-table-wrapper {
+            max-height: 600px;
+            overflow: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        th {
+            position: sticky;
+            top: 0;
+            background: #34495e;
+            color: white;
+            padding: 10px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            padding: 8px 10px;
+            border-bottom: 1px solid #eee;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+        tr.new-row {
+            animation: highlight 1s ease-out;
+        }
+        @keyframes highlight {
+            from { background: #d5f5e3; }
+            to { background: transparent; }
+        }
+        .row-number {
+            color: #95a5a6;
+            font-size: 11px;
+            width: 50px;
+        }
+        .json-preview {
+            max-width: 500px;
+        }
+        .expandable {
+            cursor: pointer;
+            color: #3498db;
+        }
+        .expandable:hover {
+            text-decoration: underline;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow: auto;
+            width: 90%;
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .modal-header h3 {
+            margin: 0;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            overflow: auto;
+            font-size: 12px;
+        }
+        .hint {
+            font-size: 12px;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Hail Decoder - Streaming Query</h1>
+
+        <div class="query-form">
+            <div class="form-group">
+                <label for="tablePath">Table Path</label>
+                <input type="text" id="tablePath"
+                    value="gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht"
+                    placeholder="gs://bucket/path/to/table.ht">
+            </div>
+
+            <div class="form-group">
+                <label>WHERE Clauses</label>
+                <div class="where-clauses" id="whereClauses">
+                    <div class="where-clause">
+                        <input type="text" value="locus.contig=chr1" placeholder="field=value or field>=value">
+                        <button class="btn btn-secondary btn-small" onclick="removeWhereClause(this)">Remove</button>
+                    </div>
+                    <div class="where-clause">
+                        <input type="text" value="locus.position>=55039447" placeholder="field=value or field>=value">
+                        <button class="btn btn-secondary btn-small" onclick="removeWhereClause(this)">Remove</button>
+                    </div>
+                    <div class="where-clause">
+                        <input type="text" value="locus.position<=55064852" placeholder="field=value or field>=value">
+                        <button class="btn btn-secondary btn-small" onclick="removeWhereClause(this)">Remove</button>
+                    </div>
+                </div>
+                <button class="btn btn-secondary btn-small" style="margin-top: 8px" onclick="addWhereClause()">+ Add Clause</button>
+                <div class="hint">Supported operators: =, >, <, >=, <=. Use dot notation for nested fields (e.g., locus.contig)</div>
+            </div>
+
+            <div class="actions">
+                <button class="btn btn-primary" id="startBtn" onclick="startQuery()">Start Streaming</button>
+                <button class="btn btn-danger" id="stopBtn" onclick="stopQuery()" disabled>Stop</button>
+                <button class="btn btn-secondary" onclick="clearResults()">Clear Results</button>
+            </div>
+        </div>
+
+        <div class="status-bar">
+            <span class="status idle" id="status">Ready</span>
+            <div style="display: flex; gap: 20px; align-items: center;">
+                <span class="count" id="count">0 rows</span>
+                <span class="timer" id="timer" style="font-family: monospace; color: #7f8c8d;">0.00s</span>
+            </div>
+        </div>
+
+        <div class="results-container">
+            <div class="results-header">Results</div>
+            <div class="results-table-wrapper">
+                <table>
+                    <thead id="tableHead">
+                        <tr>
+                            <th class="row-number">#</th>
+                            <th>Data</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="modal" onclick="closeModal(event)">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h3>Row Details</h3>
+                <button class="btn btn-secondary btn-small" onclick="closeModal()">Close</button>
+            </div>
+            <pre id="modalContent"></pre>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let rowCount = 0;
+        let columns = null;
+        let startTime = null;
+        let timerInterval = null;
+
+        function addWhereClause() {
+            const container = document.getElementById('whereClauses');
+            const div = document.createElement('div');
+            div.className = 'where-clause';
+            div.innerHTML = `
+                <input type="text" placeholder="field=value or field>=value">
+                <button class="btn btn-secondary btn-small" onclick="removeWhereClause(this)">Remove</button>
+            `;
+            container.appendChild(div);
+        }
+
+        function removeWhereClause(btn) {
+            btn.parentElement.remove();
+        }
+
+        function getWhereClauses() {
+            const inputs = document.querySelectorAll('#whereClauses input');
+            return Array.from(inputs)
+                .map(input => input.value.trim())
+                .filter(v => v.length > 0);
+        }
+
+        function buildQueryUrl() {
+            const tablePath = document.getElementById('tablePath').value.trim();
+            const whereClauses = getWhereClauses();
+
+            let url = `/api/query?table=${encodeURIComponent(tablePath)}`;
+
+            for (const clause of whereClauses) {
+                url += `&where=${encodeURIComponent(clause)}`;
+            }
+
+            return url;
+        }
+
+        function startTimer() {
+            startTime = Date.now();
+            updateTimer();
+            timerInterval = setInterval(updateTimer, 100);
+        }
+
+        function stopTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+            updateTimer(); // Final update
+        }
+
+        function updateTimer() {
+            if (startTime) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                document.getElementById('timer').textContent = elapsed.toFixed(2) + 's';
+            }
+        }
+
+        function startQuery() {
+            if (eventSource) {
+                stopQuery();
+            }
+
+            clearResults();
+            startTimer();
+
+            const url = buildQueryUrl();
+            console.log('Starting query:', url);
+
+            eventSource = new EventSource(url);
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('status').textContent = 'Streaming...';
+            document.getElementById('status').className = 'status streaming';
+
+            eventSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    addRow(data);
+                } catch (e) {
+                    console.error('Failed to parse:', event.data, e);
+                }
+            };
+
+            eventSource.addEventListener('done', function(event) {
+                console.log('Stream complete');
+                stopTimer();
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+                const elapsed = startTime ? ((Date.now() - startTime) / 1000).toFixed(2) : '?';
+                document.getElementById('status').textContent = `Complete - ${rowCount} rows in ${elapsed}s`;
+                document.getElementById('status').className = 'status streaming';
+            });
+
+            eventSource.onerror = function(event) {
+                console.error('EventSource error:', event);
+                stopQuery();
+                document.getElementById('status').textContent = 'Error';
+                document.getElementById('status').className = 'status stopped';
+            };
+        }
+
+        function stopQuery() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+
+            stopTimer();
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('status').textContent = 'Stopped';
+            document.getElementById('status').className = 'status stopped';
+        }
+
+        function clearResults() {
+            rowCount = 0;
+            columns = null;
+            startTime = null;
+            document.getElementById('tableBody').innerHTML = '';
+            document.getElementById('tableHead').innerHTML = '<tr><th class="row-number">#</th><th>Data</th></tr>';
+            document.getElementById('count').textContent = '0 rows';
+            document.getElementById('timer').textContent = '0.00s';
+        }
+
+        function addRow(data) {
+            rowCount++;
+            document.getElementById('count').textContent = `${rowCount} rows`;
+
+            // Only render first 100 rows to avoid overwhelming the UI
+            if (rowCount > 100) {
+                return;
+            }
+
+            // Update columns on first row
+            if (!columns && typeof data === 'object' && data !== null) {
+                columns = Object.keys(data);
+                updateTableHeader();
+            }
+
+            const tbody = document.getElementById('tableBody');
+            const tr = document.createElement('tr');
+            tr.className = 'new-row';
+
+            // Row number
+            const tdNum = document.createElement('td');
+            tdNum.className = 'row-number';
+            tdNum.textContent = rowCount;
+            tr.appendChild(tdNum);
+
+            if (columns) {
+                // Render each column
+                for (const col of columns) {
+                    const td = document.createElement('td');
+                    const value = data[col];
+                    td.textContent = formatValue(value);
+                    td.title = JSON.stringify(value, null, 2);
+                    tr.appendChild(td);
+                }
+            } else {
+                // Fallback: show JSON
+                const td = document.createElement('td');
+                td.textContent = JSON.stringify(data);
+                tr.appendChild(td);
+            }
+
+            // Click to show details
+            tr.style.cursor = 'pointer';
+            tr.onclick = () => showModal(data);
+
+            tbody.appendChild(tr);
+
+            // Auto-scroll to bottom
+            const wrapper = document.querySelector('.results-table-wrapper');
+            wrapper.scrollTop = wrapper.scrollHeight;
+        }
+
+        function updateTableHeader() {
+            const thead = document.getElementById('tableHead');
+            let html = '<tr><th class="row-number">#</th>';
+            for (const col of columns) {
+                html += `<th>${escapeHtml(col)}</th>`;
+            }
+            html += '</tr>';
+            thead.innerHTML = html;
+        }
+
+        function formatValue(value) {
+            if (value === null || value === undefined) {
+                return 'null';
+            }
+            if (typeof value === 'object') {
+                if (Array.isArray(value)) {
+                    if (value.length <= 3) {
+                        return JSON.stringify(value);
+                    }
+                    return `[${value.length} items]`;
+                }
+                const keys = Object.keys(value);
+                if (keys.length <= 2) {
+                    return JSON.stringify(value);
+                }
+                return `{${keys.length} fields}`;
+            }
+            return String(value);
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showModal(data) {
+            document.getElementById('modalContent').textContent = JSON.stringify(data, null, 2);
+            document.getElementById('modal').classList.add('active');
+        }
+
+        function closeModal(event) {
+            if (!event || event.target === document.getElementById('modal')) {
+                document.getElementById('modal').classList.remove('active');
+            }
+        }
+
+        // Close modal on Escape
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeModal();
+            }
+        });
+    </script>
+</body>
+</html>

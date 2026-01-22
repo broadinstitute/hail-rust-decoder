@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tracing::trace;
 use url::Url;
 
 /// Default chunk size for cloud reads (8MB)
@@ -68,14 +69,19 @@ impl CloudReader {
             return Ok(());
         }
 
+        trace!("CloudReader: fetching range {}..{}", start, end);
+
         // Fetch the range from cloud storage
         let range = start as usize..end as usize;
         let store = self.store.clone();
         let path = self.path.clone();
 
+        let start_time = std::time::Instant::now();
         let bytes = IO_RUNTIME.block_on(async {
             store.get_range(&path, range).await
         }).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+        trace!("CloudReader: fetch completed in {:?}", start_time.elapsed());
 
         self.buffer = bytes.to_vec();
         self.buffer_start = start;
