@@ -5,7 +5,7 @@
 //! including Parquet conversion, JSON export, and HTTP streaming.
 
 use crate::codec::EncodedValue;
-use crate::Result;
+use crate::{HailError, Result};
 use noodles::vcf::variant::record::samples::series::value::genotype::Phasing;
 use noodles::vcf::variant::record::samples::series::value::Genotype as GenotypeRecord;
 use noodles::vcf::variant::record::samples::Sample as SampleRecord;
@@ -15,6 +15,7 @@ use noodles::vcf::variant::record::Ids as IdsRecord;
 use noodles::vcf::variant::record_buf::info::field::Value as InfoValueBuf;
 use noodles::vcf::variant::record_buf::samples::sample::value::Value as SampleValueBuf;
 use noodles::vcf::variant::RecordBuf;
+use noodles::vcf::Record;
 use noodles::vcf::Header;
 
 /// Convert a VCF record to a Hail row (EncodedValue)
@@ -115,6 +116,189 @@ pub fn record_to_row(header: &Header, record: &RecordBuf) -> Result<EncodedValue
     }
 
     Ok(EncodedValue::Struct(fields))
+}
+
+/// Convert a lazy VCF Record (from indexed query) to a Hail row
+///
+/// This handles the `Record` type returned by indexed query iterators.
+/// The structure matches `record_to_row` but handles lazy/borrowed data.
+pub fn record_to_row_lazy(header: &Header, record: &Record) -> Result<EncodedValue> {
+    let mut fields = Vec::with_capacity(7);
+
+    // 1. locus: Struct { contig: String, position: Int32 }
+    // Record::reference_sequence_name() returns &str directly (no Result)
+    let contig = record.reference_sequence_name().to_string();
+
+    // Record::variant_start() returns Option<io::Result<Position>>
+    let position = record
+        .variant_start()
+        .transpose()
+        .map_err(|e| HailError::InvalidFormat(e.to_string()))?
+        .map(|pos| usize::from(pos) as i32)
+        .unwrap_or(0);
+
+    fields.push((
+        "locus".to_string(),
+        EncodedValue::Struct(vec![
+            (
+                "contig".to_string(),
+                EncodedValue::Binary(contig.into_bytes()),
+            ),
+            ("position".to_string(), EncodedValue::Int32(position)),
+        ]),
+    ));
+
+    // 2. alleles: Array[String]
+    // Record::reference_bases() returns &str directly
+    let mut alleles_vec = Vec::new();
+    let ref_bases = record.reference_bases();
+    alleles_vec.push(EncodedValue::Binary(ref_bases.as_bytes().to_vec()));
+
+    // Record::alternate_bases() returns AlternateBases<'_>
+    let alt_bases = record.alternate_bases();
+    for alt_result in alt_bases.iter() {
+        if let Ok(alt) = alt_result {
+            alleles_vec.push(EncodedValue::Binary(alt.as_bytes().to_vec()));
+        }
+    }
+    fields.push(("alleles".to_string(), EncodedValue::Array(alleles_vec)));
+
+    // 3. rsid: String (nullable)
+    // Record::ids() returns Ids<'_>
+    let ids = record.ids();
+    let rsid = if ids.is_empty() {
+        EncodedValue::Null
+    } else {
+        let id_str: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        if id_str.is_empty() {
+            EncodedValue::Null
+        } else {
+            EncodedValue::Binary(id_str.join(";").into_bytes())
+        }
+    };
+    fields.push(("rsid".to_string(), rsid));
+
+    // 4. qual: Float64 (nullable)
+    // Record::quality_score() returns Option<io::Result<f32>>
+    let qual = match record.quality_score() {
+        Some(Ok(q)) => EncodedValue::Float64(f64::from(q)),
+        Some(Err(_)) | None => EncodedValue::Null,
+    };
+    fields.push(("qual".to_string(), qual));
+
+    // 5. filters: Array[String] (nullable)
+    // Record::filters() returns Filters<'_>
+    let filters = record.filters();
+    let is_pass = filters.is_pass(header).unwrap_or(false);
+    let filter_val = if is_pass {
+        EncodedValue::Array(vec![])
+    } else {
+        let filter_list: Vec<EncodedValue> = filters
+            .iter(header)
+            .filter_map(|f_result| f_result.ok())
+            .map(|f| EncodedValue::Binary(f.to_string().into_bytes()))
+            .collect();
+        if filter_list.is_empty() {
+            EncodedValue::Null
+        } else {
+            EncodedValue::Array(filter_list)
+        }
+    };
+    fields.push(("filters".to_string(), filter_val));
+
+    // 6. info: Struct - using lazy accessor
+    let info = convert_info_lazy(header, record)?;
+    fields.push(("info".to_string(), info));
+
+    // Skip genotypes for indexed queries (performance optimization)
+    // Most indexed queries are for variant lookup, not sample data
+
+    Ok(EncodedValue::Struct(fields))
+}
+
+/// Convert INFO fields from a lazy Record to EncodedValue struct
+fn convert_info_lazy(header: &Header, record: &Record) -> Result<EncodedValue> {
+    let mut fields = Vec::new();
+    let info = record.info();
+
+    // Iterate over header info definitions
+    for (key, _) in header.infos() {
+        let key_str = key.to_string();
+        let val = match info.get(header, &key_str) {
+            Some(Ok(Some(value))) => convert_info_value_lazy(&value),
+            Some(Ok(None)) => EncodedValue::Boolean(true), // Flag present
+            Some(Err(_)) | None => EncodedValue::Null,
+        };
+        fields.push((key_str, val));
+    }
+
+    Ok(EncodedValue::Struct(fields))
+}
+
+/// Convert a lazy INFO value to EncodedValue
+fn convert_info_value_lazy(
+    value: &noodles::vcf::variant::record::info::field::Value<'_>,
+) -> EncodedValue {
+    use noodles::vcf::variant::record::info::field::Value;
+
+    match value {
+        Value::Integer(i) => EncodedValue::Int32(*i),
+        Value::Float(f) => EncodedValue::Float64(*f as f64),
+        Value::Flag => EncodedValue::Boolean(true),
+        Value::Character(c) => EncodedValue::Binary(c.to_string().into_bytes()),
+        Value::String(s) => EncodedValue::Binary(s.to_string().into_bytes()),
+        Value::Array(arr) => convert_info_array_lazy(arr),
+    }
+}
+
+/// Convert a lazy INFO array to EncodedValue
+fn convert_info_array_lazy(
+    arr: &noodles::vcf::variant::record::info::field::value::Array<'_>,
+) -> EncodedValue {
+    use noodles::vcf::variant::record::info::field::value::Array;
+
+    match arr {
+        Array::Integer(values) => {
+            let elements: Vec<EncodedValue> = values
+                .iter()
+                .map(|v| match v {
+                    Ok(Some(i)) => EncodedValue::Int32(i),
+                    Ok(None) | Err(_) => EncodedValue::Null,
+                })
+                .collect();
+            EncodedValue::Array(elements)
+        }
+        Array::Float(values) => {
+            let elements: Vec<EncodedValue> = values
+                .iter()
+                .map(|v| match v {
+                    Ok(Some(f)) => EncodedValue::Float64(f as f64),
+                    Ok(None) | Err(_) => EncodedValue::Null,
+                })
+                .collect();
+            EncodedValue::Array(elements)
+        }
+        Array::Character(values) => {
+            let elements: Vec<EncodedValue> = values
+                .iter()
+                .map(|v| match v {
+                    Ok(Some(c)) => EncodedValue::Binary(c.to_string().into_bytes()),
+                    Ok(None) | Err(_) => EncodedValue::Null,
+                })
+                .collect();
+            EncodedValue::Array(elements)
+        }
+        Array::String(values) => {
+            let elements: Vec<EncodedValue> = values
+                .iter()
+                .map(|v| match v {
+                    Ok(Some(s)) => EncodedValue::Binary(s.to_string().into_bytes()),
+                    Ok(None) | Err(_) => EncodedValue::Null,
+                })
+                .collect();
+            EncodedValue::Array(elements)
+        }
+    }
 }
 
 /// Convert INFO fields to EncodedValue struct

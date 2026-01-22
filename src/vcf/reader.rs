@@ -12,9 +12,10 @@ use noodles::bgzf;
 use noodles::core::Region;
 use noodles::tabix;
 use noodles::vcf;
+use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// DataSource implementation for VCF files
 ///
@@ -195,6 +196,92 @@ impl VcfDataSource {
             Ok(Box::new(iter))
         }
     }
+
+    /// Perform an indexed query on a local file
+    fn indexed_query_local(
+        &self,
+        region: &Region,
+        index: &tabix::Index,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        // Open indexed reader using the file path
+        let mut indexed_reader = vcf::io::indexed_reader::Builder::default()
+            .set_index(index.clone())
+            .build_from_path(&self.path)
+            .map_err(HailError::Io)?;
+
+        // Read header
+        let header = Arc::new(indexed_reader.read_header().map_err(HailError::Io)?);
+
+        // Create query iterator
+        let query = indexed_reader
+            .query(&header, region)
+            .map_err(HailError::Io)?;
+
+        // Note: The noodles Query iterator borrows from the reader, so we can't
+        // easily return it as a streaming iterator. We collect records eagerly.
+        // For huge result sets, consider a different approach (channel-based).
+        let header_clone = header.clone();
+        let ranges = ranges.to_vec();
+        let records: Vec<Result<EncodedValue>> = query
+            .map(|result| {
+                result
+                    .map_err(HailError::Io)
+                    .and_then(|record| super::codec::record_to_row_lazy(&header_clone, &record))
+            })
+            .filter(|result| match result {
+                Ok(row) => ranges.is_empty() || row_matches_ranges(row, &ranges),
+                Err(_) => true,
+            })
+            .collect();
+
+        info!("Indexed query returned {} records", records.len());
+        Ok(Box::new(records.into_iter()))
+    }
+
+    /// Perform an indexed query on a remote file (GCS, S3, HTTP)
+    fn indexed_query_remote(
+        &self,
+        region: &Region,
+        index: &tabix::Index,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        // Get a reader for the remote file
+        let reader = crate::io::get_reader(&self.path)?;
+
+        // Create indexed reader using build_from_reader
+        // This wraps our BoxedReader in bgzf::io::Reader
+        let mut indexed_reader = vcf::io::indexed_reader::Builder::default()
+            .set_index(index.clone())
+            .build_from_reader(reader)
+            .map_err(HailError::Io)?;
+
+        // Read header
+        let header = Arc::new(indexed_reader.read_header().map_err(HailError::Io)?);
+
+        // Create query iterator
+        let query = indexed_reader
+            .query(&header, region)
+            .map_err(HailError::Io)?;
+
+        // Collect records eagerly (same as local)
+        let header_clone = header.clone();
+        let ranges = ranges.to_vec();
+        let records: Vec<Result<EncodedValue>> = query
+            .map(|result| {
+                result
+                    .map_err(HailError::Io)
+                    .and_then(|record| super::codec::record_to_row_lazy(&header_clone, &record))
+            })
+            .filter(|result| match result {
+                Ok(row) => ranges.is_empty() || row_matches_ranges(row, &ranges),
+                Err(_) => true,
+            })
+            .collect();
+
+        info!("Remote indexed query returned {} records", records.len());
+        Ok(Box::new(records.into_iter()))
+    }
 }
 
 /// Iterator over VCF records that converts them to EncodedValue
@@ -218,6 +305,76 @@ impl<R: BufRead + Send + 'static> Iterator for VcfRecordIterator<R> {
 
 // We need Send for the iterator
 unsafe impl<R: BufRead + Send> Send for VcfRecordIterator<R> {}
+
+/// Check if a row matches all the given key ranges
+fn row_matches_ranges(row: &EncodedValue, ranges: &[KeyRange]) -> bool {
+    for range in ranges {
+        if !row_matches_single_range(row, range) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check if a row matches a single key range
+fn row_matches_single_range(row: &EncodedValue, range: &KeyRange) -> bool {
+    // Extract the field value using the field path
+    let field_value = get_nested_field(row, &range.field_path);
+    let field_value = match field_value {
+        Some(v) => v,
+        None => return false, // Missing field doesn't match
+    };
+
+    // Compare against range bounds
+    let cmp_start = match &range.start {
+        QueryBound::Unbounded => true,
+        QueryBound::Included(key) => compare_values(field_value, key) >= std::cmp::Ordering::Equal,
+        QueryBound::Excluded(key) => compare_values(field_value, key) > std::cmp::Ordering::Equal,
+    };
+
+    let cmp_end = match &range.end {
+        QueryBound::Unbounded => true,
+        QueryBound::Included(key) => compare_values(field_value, key) <= std::cmp::Ordering::Equal,
+        QueryBound::Excluded(key) => compare_values(field_value, key) < std::cmp::Ordering::Equal,
+    };
+
+    cmp_start && cmp_end
+}
+
+/// Get a nested field value from an EncodedValue
+fn get_nested_field<'a>(value: &'a EncodedValue, path: &[String]) -> Option<&'a EncodedValue> {
+    if path.is_empty() {
+        return Some(value);
+    }
+
+    if let EncodedValue::Struct(fields) = value {
+        for (name, field_value) in fields {
+            if name == &path[0] {
+                return get_nested_field(field_value, &path[1..]);
+            }
+        }
+    }
+
+    None
+}
+
+/// Compare an EncodedValue to a KeyValue
+fn compare_values(value: &EncodedValue, key: &KeyValue) -> std::cmp::Ordering {
+    match (value, key) {
+        (EncodedValue::Int32(v), KeyValue::Int32(k)) => v.cmp(k),
+        (EncodedValue::Int64(v), KeyValue::Int64(k)) => v.cmp(k),
+        (EncodedValue::Float32(v), KeyValue::Float32(k)) => v.partial_cmp(k).unwrap_or(std::cmp::Ordering::Equal),
+        (EncodedValue::Float64(v), KeyValue::Float64(k)) => v.partial_cmp(k).unwrap_or(std::cmp::Ordering::Equal),
+        (EncodedValue::Binary(v), KeyValue::String(k)) => {
+            String::from_utf8_lossy(v).as_ref().cmp(k)
+        }
+        (EncodedValue::Boolean(v), KeyValue::Boolean(k)) => v.cmp(k),
+        // Cross-type comparisons
+        (EncodedValue::Int32(v), KeyValue::Int64(k)) => (*v as i64).cmp(k),
+        (EncodedValue::Int64(v), KeyValue::Int32(k)) => v.cmp(&(*k as i64)),
+        _ => std::cmp::Ordering::Equal, // Default for unsupported comparisons
+    }
+}
 
 impl DataSource for VcfDataSource {
     fn row_type(&self) -> &EncodedType {
@@ -257,19 +414,42 @@ impl DataSource for VcfDataSource {
         &self,
         ranges: &[KeyRange],
     ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
-        // TODO: Indexed queries require local file access for bgzf seeking
-        // For now, always do full scan and filter in-memory if ranges provided
-        let _ = ranges; // Acknowledge ranges parameter
+        // Try indexed query if we have an index and can build a region
+        if let Some(index) = &self.index {
+            if self.is_bgzf {
+                if let Some(region) = self.ranges_to_region(ranges) {
+                    // Check if this is a local file or remote
+                    let is_local = !self.path.starts_with("gs://")
+                        && !self.path.starts_with("s3://")
+                        && !self.path.starts_with("http");
 
-        // Check if we could potentially use index (for logging)
-        if self.index.is_some() && self.is_bgzf {
-            if let Some(_region) = self.ranges_to_region(ranges) {
-                debug!("Index available but indexed queries not yet supported for cloud/boxed readers");
+                    if is_local {
+                        info!("Using local indexed query for region: {:?}", region);
+                        return self.indexed_query_local(&region, index, ranges);
+                    } else {
+                        info!("Using remote indexed query for region: {:?}", region);
+                        return self.indexed_query_remote(&region, index, ranges);
+                    }
+                }
             }
         }
 
-        debug!("Performing full VCF scan");
-        self.full_scan_iter()
+        // Fall back to full scan with post-filtering
+        debug!("Performing full VCF scan with post-filtering");
+        let base_iter = self.full_scan_iter()?;
+
+        if ranges.is_empty() {
+            return Ok(base_iter);
+        }
+
+        // Apply in-memory filtering
+        let ranges = ranges.to_vec();
+        let filtered = base_iter.filter(move |result| match result {
+            Ok(row) => row_matches_ranges(row, &ranges),
+            Err(_) => true, // Pass through errors
+        });
+
+        Ok(Box::new(filtered))
     }
 }
 
