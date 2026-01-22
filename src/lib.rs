@@ -48,6 +48,7 @@ pub mod query;
 pub mod schema;
 pub mod summary;
 pub mod validation;
+pub mod vcf;
 
 pub use error::{HailError, Result};
 

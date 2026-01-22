@@ -51,6 +51,9 @@ rand = "0.8"
 # Progress bars
 indicatif = "0.17"
 
+# VCF Support
+noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core"] }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
