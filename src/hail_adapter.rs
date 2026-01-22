@@ -1,0 +1,335 @@
+//! Hail Table Data Source Adapter
+//!
+//! Implements the `DataSource` trait for native Hail Tables (.ht directories).
+
+use crate::buffer::{BlockMap, BufferBuilder, InputBuffer, LEB128Buffer, SliceBuffer};
+use crate::codec::{EncodedType, EncodedValue, ETypeParser};
+use crate::datasource::DataSource;
+use crate::index::IndexReader;
+use crate::io::{join_path, read_single_block};
+use crate::metadata::RVDComponentSpec;
+use crate::query::{filter_partitions, KeyRange, KeyValue, PartitionStream};
+use crate::HailError;
+use crate::Result;
+use crossbeam_channel;
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
+
+/// DataSource implementation for Hail Tables
+///
+/// Provides read access to Hail Table format (.ht directories) using:
+/// - Partition pruning based on key ranges
+/// - B-tree index lookups for efficient point queries
+/// - Row decoding from partition files
+///
+/// Supports both local and cloud storage paths (GCS, S3).
+pub struct HailTableSource {
+    /// Path to the rows directory
+    rows_path: String,
+    /// Base path to the table
+    table_path: String,
+    /// RVD metadata for rows
+    rvd_spec: RVDComponentSpec,
+    /// Parsed row type for decoding
+    row_type: EncodedType,
+    /// Cached index readers (one per partition) - Arc/Mutex for thread safety
+    index_readers: Arc<Mutex<HashMap<usize, Arc<IndexReader>>>>,
+    /// Cached block maps for efficient random access (one per partition) - Arc/Mutex for thread safety
+    block_maps: Arc<Mutex<HashMap<usize, Arc<BlockMap>>>>,
+}
+
+impl HailTableSource {
+    /// Open a Hail table
+    ///
+    /// # Arguments
+    /// * `table_path` - Path to the table directory (local or cloud URL)
+    pub fn new(table_path: &str) -> Result<Self> {
+        let table_path = table_path.trim_end_matches('/').to_string();
+        let rows_path = join_path(&table_path, "rows");
+
+        // Load RVD metadata
+        let metadata_path = join_path(&rows_path, "metadata.json.gz");
+        let rvd_spec = RVDComponentSpec::from_path(&metadata_path)?;
+
+        // Parse the row type from the codec spec
+        let row_type = ETypeParser::parse(&rvd_spec.codec_spec.e_type)?;
+
+        Ok(HailTableSource {
+            rows_path,
+            table_path,
+            rvd_spec,
+            row_type,
+            index_readers: Arc::new(Mutex::new(HashMap::new())),
+            block_maps: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Get the RVD specification
+    ///
+    /// This provides access to Hail-specific metadata for inspection commands.
+    pub fn rvd_spec(&self) -> &RVDComponentSpec {
+        &self.rvd_spec
+    }
+
+    /// Get the path to a partition file
+    fn get_partition_path(&self, partition_idx: usize) -> String {
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+        let parts_path = join_path(&self.rows_path, "parts");
+        join_path(&parts_path, part_file)
+    }
+
+    /// Convert an EncodedValue key to KeyRanges for partition pruning
+    fn key_to_ranges(&self, key: &EncodedValue) -> Result<Vec<KeyRange>> {
+        let mut ranges = Vec::new();
+
+        if let EncodedValue::Struct(fields) = key {
+            for (field_name, field_value) in fields {
+                if let Some(key_value) = self.encoded_to_key_value(field_value) {
+                    ranges.push(KeyRange::point(field_name.clone(), key_value));
+                }
+            }
+        }
+
+        Ok(ranges)
+    }
+
+    /// Convert an EncodedValue to a KeyValue
+    fn encoded_to_key_value(&self, value: &EncodedValue) -> Option<KeyValue> {
+        match value {
+            EncodedValue::Binary(b) => {
+                Some(KeyValue::String(String::from_utf8_lossy(b).into_owned()))
+            }
+            EncodedValue::Int32(i) => Some(KeyValue::Int32(*i)),
+            EncodedValue::Int64(i) => Some(KeyValue::Int64(*i)),
+            EncodedValue::Float32(f) => Some(KeyValue::Float32(*f)),
+            EncodedValue::Float64(f) => Some(KeyValue::Float64(*f)),
+            EncodedValue::Boolean(b) => Some(KeyValue::Boolean(*b)),
+            _ => None,
+        }
+    }
+
+    /// Get or create an index reader for a partition
+    fn get_index_reader(&self, partition_idx: usize) -> Result<Arc<IndexReader>> {
+        let mut cache = self.index_readers.lock().unwrap();
+        if let Some(reader) = cache.get(&partition_idx) {
+            return Ok(reader.clone());
+        }
+
+        let index_spec = self.rvd_spec.index_spec.as_ref().ok_or_else(|| {
+            HailError::Index("Table does not have an index".to_string())
+        })?;
+
+        // Get the partition file name and derive the index directory name
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+
+        // Index directory is named like the partition file but with .idx extension
+        // e.g., part-0-xxx -> part-0-xxx.idx
+        let index_dir_name = format!("{}.idx", part_file);
+        let index_rel_path = index_spec.rel_path.trim_start_matches("../");
+        let index_base = join_path(&self.table_path, index_rel_path);
+        let index_path = join_path(&index_base, &index_dir_name);
+
+        let reader = Arc::new(IndexReader::new_from_path(&index_path, index_spec)?);
+        cache.insert(partition_idx, reader.clone());
+        Ok(reader)
+    }
+
+    /// Get or create a block map for a partition
+    fn get_block_map(&self, partition_idx: usize) -> Result<Arc<BlockMap>> {
+        let mut cache = self.block_maps.lock().unwrap();
+        if let Some(map) = cache.get(&partition_idx) {
+            return Ok(map.clone());
+        }
+
+        let part_path = self.get_partition_path(partition_idx);
+        let block_map = Arc::new(BlockMap::build_from_path(&part_path)?);
+        cache.insert(partition_idx, block_map.clone());
+        Ok(block_map)
+    }
+
+    /// Read a row from a partition file at a specific offset using the block map
+    fn read_row_at_offset(&self, partition_idx: usize, offset: i64) -> Result<EncodedValue> {
+        let part_path = self.get_partition_path(partition_idx);
+
+        // Get or create the block map for this partition
+        let block_map = self.get_block_map(partition_idx)?;
+
+        // Find the block containing our offset
+        let block_entry = block_map.find_block(offset as u64).ok_or_else(|| {
+            HailError::Index(format!(
+                "Offset {} is out of bounds for partition {}",
+                offset, partition_idx
+            ))
+        })?;
+
+        // Calculate the offset within the decompressed block
+        let local_offset = (offset as u64 - block_entry.decompressed_offset) as usize;
+
+        // Read just this one block from the file
+        let block_data = read_single_block(&part_path, block_entry.file_offset)?;
+
+        // The block data format is: [4-byte decompressed_size][zstd_compressed_data]
+        if block_data.len() < 4 {
+            return Err(HailError::InvalidFormat(
+                "Block too small for decompressed size header".to_string(),
+            ));
+        }
+
+        // Decompress the block
+        let decompressed = zstd::decode_all(&block_data[4..]).map_err(|_| HailError::Zstd)?;
+
+        // Create a buffer for reading from the decompressed data at the local offset
+        // We need LEB128Buffer on top of SliceBuffer because Hail uses LEB128 encoding
+        let slice_buffer = SliceBuffer::new(&decompressed[local_offset..]);
+        let mut buffer = LEB128Buffer::new(slice_buffer);
+
+        // Read and decode the row
+        let row_present = buffer.read_bool()?;
+        if !row_present {
+            return Ok(EncodedValue::Null);
+        }
+        self.row_type.read_present_value(&mut buffer)
+    }
+
+    /// Internal method to create a partition stream
+    fn create_partition_stream(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+    ) -> Result<PartitionStream> {
+        let part_file = &self.rvd_spec.part_files[partition_idx];
+        let parts_path = join_path(&self.rows_path, "parts");
+        let part_path = join_path(&parts_path, part_file);
+
+        let buffer = BufferBuilder::from_path(&part_path)?
+            .with_leb128()
+            .build();
+
+        Ok(PartitionStream::new(
+            buffer,
+            self.row_type.clone(),
+            ranges.to_vec(),
+        ))
+    }
+}
+
+impl DataSource for HailTableSource {
+    fn row_type(&self) -> &EncodedType {
+        &self.row_type
+    }
+
+    fn globals(&self) -> Result<EncodedValue> {
+        // TODO: Implement globals reading from globals/part-0-...
+        // For now, return empty struct
+        Ok(EncodedValue::Struct(vec![]))
+    }
+
+    fn key_fields(&self) -> &[String] {
+        &self.rvd_spec.key
+    }
+
+    fn num_partitions(&self) -> usize {
+        self.rvd_spec.part_files.len()
+    }
+
+    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
+        self.create_partition_stream(partition_idx, ranges)?.collect()
+    }
+
+    fn query_stream(&self, ranges: &[KeyRange]) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
+
+        info!(
+            "query_stream: {} partitions matched filter",
+            matching_partitions.len()
+        );
+
+        // Use a bounded channel for backpressure
+        let (tx, rx) = crossbeam_channel::bounded(100);
+
+        // Capture necessary state for the thread
+        let rows_path = self.rows_path.clone();
+        let part_files = self.rvd_spec.part_files.clone();
+        let row_type = self.row_type.clone();
+        let ranges = ranges.to_vec();
+
+        let num_partitions = matching_partitions.len();
+
+        std::thread::spawn(move || {
+            info!(
+                "Background query thread started. Processing {} partitions.",
+                num_partitions
+            );
+
+            // Process partitions in parallel using rayon
+            matching_partitions
+                .into_par_iter()
+                .for_each_with(tx, |sender, idx| {
+                    debug!("Processing partition index {}", idx);
+                    let part_file = &part_files[idx];
+                    let parts_path = join_path(&rows_path, "parts");
+                    let part_path = join_path(&parts_path, part_file);
+
+                    let buffer_res = BufferBuilder::from_path(&part_path)
+                        .map(|b| b.with_leb128().build());
+
+                    match buffer_res {
+                        Ok(buffer) => {
+                            debug!("Partition {} opened successfully", idx);
+                            let stream =
+                                PartitionStream::new(buffer, row_type.clone(), ranges.clone());
+
+                            let mut row_count = 0;
+                            for row in stream {
+                                if sender.send(row).is_err() {
+                                    debug!("Partition {} sender dropped", idx);
+                                    break;
+                                }
+                                row_count += 1;
+                            }
+                            debug!("Partition {} finished, yielded {} rows", idx, row_count);
+                        }
+                        Err(e) => {
+                            warn!("Failed to open partition {}: {}", idx, e);
+                            let _ = sender.send(Err(e));
+                        }
+                    }
+                });
+
+            info!("Background query thread finished");
+        });
+
+        Ok(Box::new(rx.into_iter()))
+    }
+
+    fn lookup(&self, key: &EncodedValue) -> Result<Option<EncodedValue>> {
+        // For point lookups, skip partition pruning if there's only one partition
+        let matching_partitions = if self.rvd_spec.part_files.len() == 1 {
+            vec![0]
+        } else {
+            let key_ranges = self.key_to_ranges(key)?;
+            filter_partitions(&self.rvd_spec.range_bounds, &key_ranges)
+        };
+
+        if matching_partitions.is_empty() {
+            return Ok(None);
+        }
+
+        // For point lookups, we expect at most one partition to match
+        for partition_idx in matching_partitions {
+            // Get index reader for this partition
+            let reader = self.get_index_reader(partition_idx)?;
+            let offset_opt = reader.lookup(key)?;
+
+            if let Some(data_offset) = offset_opt {
+                // Read the row from the partition file at the given offset
+                let row = self.read_row_at_offset(partition_idx, data_offset)?;
+                return Ok(Some(row));
+            }
+        }
+
+        Ok(None)
+    }
+}
