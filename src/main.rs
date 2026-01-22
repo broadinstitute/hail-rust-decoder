@@ -55,6 +55,13 @@ fn main() -> Result<()> {
             }
             convert(&args[2], &args[3])?;
         }
+        "export-clickhouse" => {
+            run_export_clickhouse(&args[0], &args[2..])?;
+        }
+        #[cfg(feature = "bigquery")]
+        "export-bigquery" => {
+            run_export_bigquery(&args[0], &args[2..])?;
+        }
         "validate" => {
             run_validate(&args[0], &args[2..])?;
         }
@@ -87,6 +94,9 @@ fn print_usage(program: &str) {
     eprintln!("  validate <table.ht> <schema.json> [options]  Validate table against JSON schema");
     eprintln!("  generate-schema <table.ht> [output.json]    Generate JSON schema from table");
     eprintln!("  convert <table.ht> <out>     Convert to Parquet format");
+    eprintln!("  export-clickhouse <table.ht> <url> <table> [options]  Export to ClickHouse");
+    #[cfg(feature = "bigquery")]
+    eprintln!("  export-bigquery <table.ht> <project:dataset.table> --bucket <bucket>  Export to BigQuery");
     eprintln!();
     eprintln!("Query options:");
     eprintln!("  --key <field=value>          Point lookup (exact match)");
@@ -532,55 +542,17 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 }
 
 fn convert(input: &str, output: &str) -> Result<()> {
-    use arrow::record_batch::RecordBatch;
-    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
+    use hail_decoder::parquet::{hail_to_parquet, ConversionMetadata};
 
     println!("Converting {} to {}", input, output);
 
-    // Open the query engine to read the table
-    let engine = QueryEngine::open_path(input)?;
-    let num_partitions = engine.num_partitions();
-    let row_type = engine.row_type().clone();
+    // Get metadata for display
+    let metadata = ConversionMetadata::from_path(input)?;
+    println!("Table has {} partitions", metadata.num_partitions);
+    println!("Key fields: {:?}", metadata.key_fields);
 
-    println!("Table has {} partitions", num_partitions);
-    println!("Key fields: {:?}", engine.key_fields());
-
-    // Create the Parquet writer to get the schema
-    let mut writer = ParquetWriter::new(output, &row_type)?;
-    let arrow_schema = writer.schema().clone();
-
-    // Setup progress bar
-    let pb = ProgressBar::new(num_partitions as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({eta})")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
-
-    // Parallel scan: each partition produces a RecordBatch
-    let batches: Vec<Result<RecordBatch>> = (0..num_partitions)
-        .into_par_iter()
-        .map(|i| {
-            let rows = engine.scan_partition(i, &[])?;
-            let batch = build_record_batch(&rows, &row_type, arrow_schema.clone())?;
-            pb.inc(1);
-            Ok(batch)
-        })
-        .collect();
-
-    pb.finish_and_clear();
-
-    // Write all batches sequentially (each becomes a row group)
-    let mut total_rows = 0;
-    for batch_result in batches {
-        let batch = batch_result?;
-        total_rows += batch.num_rows();
-        writer.write_batch(&batch)?;
-    }
-
-    // Close the writer
-    writer.close()?;
+    // Perform conversion with progress bar
+    let total_rows = hail_to_parquet(input, output)?;
 
     // Print summary
     let output_size = std::fs::metadata(output)
@@ -934,6 +906,368 @@ fn run_generate_schema(program: &str, args: &[String]) -> Result<()> {
         println!();
         println!("{}", serde_json::to_string_pretty(&schema)?);
     }
+
+    Ok(())
+}
+
+/// Export a Hail table to ClickHouse with optional filtering
+fn run_export_clickhouse(program: &str, args: &[String]) -> Result<()> {
+    use hail_decoder::export::clickhouse::generate_create_table;
+    use hail_decoder::export::ClickHouseClient;
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
+    use uuid::Uuid;
+
+    if args.len() < 3 {
+        eprintln!("Usage: {} export-clickhouse <table.ht> <clickhouse_url> <table_name> [options]", program);
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --where <field=value>   Filter condition (same as query command)");
+        eprintln!("  --limit <n>             Limit number of rows to export");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  {} export-clickhouse data.ht http://localhost:8123 my_table", program);
+        eprintln!("  {} export-clickhouse data.ht http://user:pass@localhost:8123 my_table --limit 1000", program);
+        eprintln!("  {} export-clickhouse data.ht http://localhost:8123 my_table --where chrom=chr1 --limit 10000", program);
+        std::process::exit(1);
+    }
+
+    let input = &args[0];
+    let clickhouse_url = &args[1];
+    let table_name = &args[2];
+
+    // Parse optional arguments (reuse query parsing logic)
+    let mut where_filters: Vec<KeyRange> = Vec::new();
+    let mut limit: Option<usize> = None;
+
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--where" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --where requires a condition");
+                    std::process::exit(1);
+                }
+                if let Some(range) = parse_where_condition(&args[i]) {
+                    where_filters.push(range);
+                } else {
+                    eprintln!("Error: Invalid --where format. Use field=value or field>value");
+                    std::process::exit(1);
+                }
+            }
+            "--limit" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --limit requires a number");
+                    std::process::exit(1);
+                }
+                limit = args[i].parse().ok();
+                if limit.is_none() {
+                    eprintln!("Error: Invalid --limit value");
+                    std::process::exit(1);
+                }
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    println!("Exporting {} to ClickHouse", input);
+    println!("  ClickHouse URL: {}", clickhouse_url);
+    println!("  Target table: {}", table_name);
+    if !where_filters.is_empty() {
+        println!("  Filters: {:?}", where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+    }
+    if let Some(l) = limit {
+        println!("  Row limit: {}", l);
+    }
+    println!();
+
+    // Step 1: Open the query engine
+    println!("Reading table metadata...");
+    let engine = QueryEngine::open_path(input)?;
+    let row_type = engine.row_type().clone();
+    println!("  Partitions: {}", engine.num_partitions());
+    println!("  Key fields: {:?}", engine.key_fields());
+    println!();
+
+    // Step 2: Create ClickHouse client and generate DDL
+    let client = ClickHouseClient::new(clickhouse_url);
+
+    println!("Generating CREATE TABLE DDL...");
+    let ddl = generate_create_table(table_name, &row_type, engine.key_fields())
+        .map_err(|e| hail_decoder::HailError::InvalidFormat(e.to_string()))?;
+    println!("{}", ddl);
+    println!();
+
+    // Step 3: Execute CREATE TABLE
+    println!("Creating table in ClickHouse...");
+    client
+        .execute(&ddl)
+        .map_err(|e| hail_decoder::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))?;
+    println!("  Table created (or already exists)");
+    println!();
+
+    // Step 4: Convert filtered rows to temporary Parquet file
+    let temp_path = format!("/tmp/hail_export_{}.parquet", Uuid::new_v4());
+    println!("Converting to temporary Parquet file...");
+    println!("  Temp file: {}", temp_path);
+
+    // Create writer and get schema
+    let mut writer = ParquetWriter::new(&temp_path, &row_type)?;
+    let arrow_schema = writer.schema().clone();
+
+    // Use streaming query with filters
+    let iterator = engine.query_iter(&where_filters)?;
+
+    // Apply limit if specified
+    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = limit {
+        Box::new(iterator.take(n))
+    } else {
+        Box::new(iterator)
+    };
+
+    // Collect rows in batches for efficient parquet writing
+    let batch_size = 10000;
+    let mut batch_rows = Vec::with_capacity(batch_size);
+    let mut total_rows = 0;
+
+    // Progress indicator
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap()
+    );
+
+    for row_result in iterator {
+        let row = row_result?;
+        batch_rows.push(row);
+        total_rows += 1;
+
+        if batch_rows.len() >= batch_size {
+            pb.set_message(format!("{} rows processed...", total_rows));
+            let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+            writer.write_batch(&batch)?;
+            batch_rows.clear();
+        }
+    }
+
+    // Write remaining rows
+    if !batch_rows.is_empty() {
+        let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+        writer.write_batch(&batch)?;
+    }
+
+    pb.finish_and_clear();
+    writer.close()?;
+    println!("  Converted {} rows", total_rows);
+    println!();
+
+    // Step 5: Insert Parquet data into ClickHouse
+    println!("Inserting data into ClickHouse...");
+    client
+        .insert_parquet(table_name, &temp_path)
+        .map_err(|e| hail_decoder::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))?;
+
+    // Step 6: Clean up temp file
+    if let Err(e) = std::fs::remove_file(&temp_path) {
+        eprintln!("Warning: Failed to remove temp file {}: {}", temp_path, e);
+    }
+
+    // Step 7: Verify
+    let row_count = client
+        .count_rows(table_name)
+        .map_err(|e| hail_decoder::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        )))?;
+
+    println!();
+    println!("Export complete!");
+    println!("  Rows in ClickHouse table: {}", row_count);
+
+    Ok(())
+}
+
+/// Export a Hail table to BigQuery via GCS staging
+#[cfg(feature = "bigquery")]
+fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
+    use hail_decoder::export::BigQueryClient;
+    use hail_decoder::parquet::hail_to_parquet_with_options;
+    use uuid::Uuid;
+
+    if args.len() < 2 {
+        eprintln!(
+            "Usage: {} export-bigquery <table.ht> <project:dataset.table> --bucket <bucket> [options]",
+            program
+        );
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  --bucket <bucket>       GCS bucket for staging parquet file (required)");
+        eprintln!("  --limit <n>             Limit number of partitions to export");
+        eprintln!("  --temp-dir <dir>        Directory for temporary parquet file (default: /tmp)");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!(
+            "  {} export-bigquery data.ht my-project:genomics.variants --bucket my-staging-bucket",
+            program
+        );
+        std::process::exit(1);
+    }
+
+    let input = &args[0];
+    let dest_str = &args[1];
+
+    // Parse destination: project:dataset.table
+    let (project, dataset_table) = dest_str.split_once(':').ok_or_else(|| {
+        hail_decoder::HailError::InvalidFormat(
+            "Destination format must be project:dataset.table".to_string(),
+        )
+    })?;
+    let (dataset, table) = dataset_table.split_once('.').ok_or_else(|| {
+        hail_decoder::HailError::InvalidFormat(
+            "Destination format must be project:dataset.table".to_string(),
+        )
+    })?;
+
+    // Parse args
+    let mut bucket = None;
+    let mut limit: Option<usize> = None;
+    let mut temp_dir = "/tmp".to_string();
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bucket" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --bucket requires a value");
+                    std::process::exit(1);
+                }
+                bucket = Some(args[i].clone());
+            }
+            "--limit" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --limit requires a number");
+                    std::process::exit(1);
+                }
+                limit = args[i].parse().ok();
+                if limit.is_none() {
+                    eprintln!("Error: Invalid --limit value");
+                    std::process::exit(1);
+                }
+            }
+            "--temp-dir" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --temp-dir requires a value");
+                    std::process::exit(1);
+                }
+                temp_dir = args[i].clone();
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let bucket = match bucket {
+        Some(b) => b,
+        None => {
+            eprintln!("Error: --bucket argument is required");
+            std::process::exit(1);
+        }
+    };
+
+    println!("Exporting {} to BigQuery {}:{}.{}", input, project, dataset, table);
+    println!("  Staging bucket: {}", bucket);
+    if let Some(l) = limit {
+        println!("  Partition limit: {}", l);
+    }
+    println!();
+
+    // 1. Get Schema/Metadata
+    println!("Reading table metadata...");
+    let engine = QueryEngine::open_path(input)?;
+    let row_type = engine.row_type().clone();
+    println!("  Partitions: {}", engine.num_partitions());
+    println!("  Key fields: {:?}", engine.key_fields());
+    println!();
+
+    // 2. Convert to Parquet locally
+    let temp_file_path = std::path::Path::new(&temp_dir).join(format!("{}.parquet", Uuid::new_v4()));
+    let temp_file_str = temp_file_path.to_string_lossy().to_string();
+
+    println!("Converting to temporary Parquet file: {}", temp_file_str);
+    let rows_written = hail_to_parquet_with_options(input, &temp_file_str, true, limit)?;
+    println!("  Converted {} rows", rows_written);
+    println!();
+
+    // 3. Upload and Load (Async)
+    println!("Starting BigQuery export...");
+    let rt = tokio::runtime::Runtime::new()?;
+    let result = rt.block_on(async {
+        let client = BigQueryClient::new(project, &bucket)
+            .await
+            .map_err(|e| {
+                hail_decoder::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
+
+        println!("Uploading to GCS...");
+        let gcs_uri = client.upload_parquet(&temp_file_path).await.map_err(|e| {
+            hail_decoder::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+        println!("  Uploaded to: {}", gcs_uri);
+
+        println!("Triggering BigQuery Load Job...");
+        client
+            .load_parquet(dataset, table, &gcs_uri, &row_type)
+            .await
+            .map_err(|e| {
+                hail_decoder::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))
+            })?;
+        println!("  Load Job completed successfully.");
+
+        println!("Cleaning up GCS staging object...");
+        let _ = client.delete_object(&gcs_uri).await;
+
+        Ok::<(), hail_decoder::HailError>(())
+    });
+
+    // 4. Cleanup Local temp file
+    if std::fs::remove_file(&temp_file_path).is_err() {
+        eprintln!("Warning: Failed to remove local temp file");
+    }
+
+    // Propagate any errors from the async block
+    result?;
+
+    println!();
+    println!("Export complete!");
+    println!("  Rows exported: {}", rows_written);
+    println!("  BigQuery table: {}:{}.{}", project, dataset, table);
 
     Ok(())
 }

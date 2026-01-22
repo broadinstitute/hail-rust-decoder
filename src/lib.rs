@@ -39,6 +39,7 @@ pub mod buffer;
 pub mod codec;
 pub mod datasource;
 pub mod error;
+pub mod export;
 pub mod hail_adapter;
 pub mod index;
 pub mod io;

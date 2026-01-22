@@ -6,6 +6,10 @@ authors = ["Your Name <your.email@example.com>"]
 description = "Pure Rust decoder for Hail table format"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+bigquery = ["google-cloud-bigquery", "google-cloud-auth"]
+
 [dependencies]
 # Compression
 zstd = "0.13"
@@ -64,6 +68,17 @@ axum-extra = { version = "0.9", features = ["query"] }
 tower-http = { version = "0.5", features = ["cors", "fs"] }
 async-stream = "0.3"
 tokio-stream = "0.1"
+
+# HTTP Client (for ClickHouse export)
+reqwest = { version = "0.11", features = ["blocking"] }
+
+# UUID generation (for temp files)
+uuid = { version = "1.0", features = ["v4"] }
+
+# Google Cloud (for BigQuery export - optional)
+google-cloud-bigquery = { version = "0.13", optional = true }
+google-cloud-storage = "0.22"
+google-cloud-auth = { version = "0.19", optional = true }
 
 [[bin]]
 name = "hail-server"
