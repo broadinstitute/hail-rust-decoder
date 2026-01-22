@@ -96,7 +96,7 @@ fn print_usage(program: &str) {
     eprintln!("  convert <table.ht> <out>     Convert to Parquet format");
     eprintln!("  export-clickhouse <table.ht> <url> <table> [options]  Export to ClickHouse");
     #[cfg(feature = "bigquery")]
-    eprintln!("  export-bigquery <table.ht> <project:dataset.table> --bucket <bucket>  Export to BigQuery");
+    eprintln!("  export-bigquery <table.ht> <project:dataset.table> --bucket <bucket> [options]  Export to BigQuery");
     eprintln!();
     eprintln!("Query options:");
     eprintln!("  --key <field=value>          Point lookup (exact match)");
@@ -1103,7 +1103,7 @@ fn run_export_clickhouse(program: &str, args: &[String]) -> Result<()> {
 #[cfg(feature = "bigquery")]
 fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
     use hail_decoder::export::BigQueryClient;
-    use hail_decoder::parquet::hail_to_parquet_with_options;
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
     use uuid::Uuid;
 
     if args.len() < 2 {
@@ -1114,12 +1114,17 @@ fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --bucket <bucket>       GCS bucket for staging parquet file (required)");
-        eprintln!("  --limit <n>             Limit number of partitions to export");
+        eprintln!("  --where <field=value>   Filter condition (same as query command)");
+        eprintln!("  --limit <n>             Limit number of rows to export");
         eprintln!("  --temp-dir <dir>        Directory for temporary parquet file (default: /tmp)");
         eprintln!();
         eprintln!("Examples:");
         eprintln!(
             "  {} export-bigquery data.ht my-project:genomics.variants --bucket my-staging-bucket",
+            program
+        );
+        eprintln!(
+            "  {} export-bigquery data.ht my-project:genomics.variants --bucket my-bucket --where chrom=chr1 --limit 10000",
             program
         );
         std::process::exit(1);
@@ -1142,6 +1147,7 @@ fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
 
     // Parse args
     let mut bucket = None;
+    let mut where_filters: Vec<KeyRange> = Vec::new();
     let mut limit: Option<usize> = None;
     let mut temp_dir = "/tmp".to_string();
 
@@ -1155,6 +1161,19 @@ fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
                     std::process::exit(1);
                 }
                 bucket = Some(args[i].clone());
+            }
+            "--where" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --where requires a condition");
+                    std::process::exit(1);
+                }
+                if let Some(range) = parse_where_condition(&args[i]) {
+                    where_filters.push(range);
+                } else {
+                    eprintln!("Error: Invalid --where format. Use field=value or field>value");
+                    std::process::exit(1);
+                }
             }
             "--limit" => {
                 i += 1;
@@ -1194,8 +1213,11 @@ fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
 
     println!("Exporting {} to BigQuery {}:{}.{}", input, project, dataset, table);
     println!("  Staging bucket: {}", bucket);
+    if !where_filters.is_empty() {
+        println!("  Filters: {:?}", where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+    }
     if let Some(l) = limit {
-        println!("  Partition limit: {}", l);
+        println!("  Row limit: {}", l);
     }
     println!();
 
@@ -1207,12 +1229,58 @@ fn run_export_bigquery(program: &str, args: &[String]) -> Result<()> {
     println!("  Key fields: {:?}", engine.key_fields());
     println!();
 
-    // 2. Convert to Parquet locally
+    // 2. Convert filtered rows to Parquet locally
     let temp_file_path = std::path::Path::new(&temp_dir).join(format!("{}.parquet", Uuid::new_v4()));
-    let temp_file_str = temp_file_path.to_string_lossy().to_string();
+    println!("Converting to temporary Parquet file: {}", temp_file_path.display());
 
-    println!("Converting to temporary Parquet file: {}", temp_file_str);
-    let rows_written = hail_to_parquet_with_options(input, &temp_file_str, true, limit)?;
+    // Create writer and get schema
+    let mut writer = ParquetWriter::new(temp_file_path.to_string_lossy().as_ref(), &row_type)?;
+    let arrow_schema = writer.schema().clone();
+
+    // Use streaming query with filters
+    let iterator = engine.query_iter(&where_filters)?;
+
+    // Apply limit if specified
+    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = limit {
+        Box::new(iterator.take(n))
+    } else {
+        Box::new(iterator)
+    };
+
+    // Collect rows in batches for efficient parquet writing
+    let batch_size = 10000;
+    let mut batch_rows = Vec::with_capacity(batch_size);
+    let mut rows_written = 0;
+
+    // Progress indicator
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap()
+    );
+
+    for row_result in iterator {
+        let row = row_result?;
+        batch_rows.push(row);
+        rows_written += 1;
+
+        if batch_rows.len() >= batch_size {
+            pb.set_message(format!("{} rows processed...", rows_written));
+            let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+            writer.write_batch(&batch)?;
+            batch_rows.clear();
+        }
+    }
+
+    // Write remaining rows
+    if !batch_rows.is_empty() {
+        let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+        writer.write_batch(&batch)?;
+    }
+
+    pb.finish_and_clear();
+    writer.close()?;
     println!("  Converted {} rows", rows_written);
     println!();
 
