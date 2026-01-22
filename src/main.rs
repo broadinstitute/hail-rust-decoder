@@ -8,7 +8,6 @@
 
 use hail_decoder::codec::EncodedValue;
 use hail_decoder::io::{get_file_size, join_path};
-use hail_decoder::metadata::RVDComponentSpec;
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
 use hail_decoder::validation::{SchemaGenerator, SchemaValidator};
@@ -117,6 +116,17 @@ fn print_usage(program: &str) {
 }
 
 fn show_info(table_path: &str) -> Result<()> {
+    // Check if this is a VCF file
+    if table_path.ends_with(".vcf") || table_path.ends_with(".vcf.gz") || table_path.ends_with(".vcf.bgz") {
+        println!("VCF File Information");
+        println!("====================");
+        println!("Path: {}", table_path);
+        println!();
+        println!("Use 'inspect' command for detailed schema information.");
+        return Ok(());
+    }
+
+    // Hail Table
     let metadata_path = hail_decoder::io::join_path(table_path, "metadata.json.gz");
 
     let mut reader = hail_decoder::io::get_reader(&metadata_path)?;
@@ -137,61 +147,75 @@ fn show_info(table_path: &str) -> Result<()> {
 }
 
 fn inspect_table(table_path: &str) -> Result<()> {
-    // Load RVD metadata for detailed info
-    let rows_metadata_path = hail_decoder::io::join_path(table_path, "rows/metadata.json.gz");
+    // Open using query engine to support both Hail Tables and VCFs
+    let engine = QueryEngine::open_path(table_path)?;
 
-    let rvd_spec = RVDComponentSpec::from_path(&rows_metadata_path)?;
-
-    println!("Hail Table Inspection");
-    println!("=====================");
+    println!("Table Inspection");
+    println!("================");
     println!();
     println!("Path: {}", table_path);
     println!();
 
     // Key information
     println!("Key Fields:");
-    for (i, key) in rvd_spec.key.iter().enumerate() {
-        println!("  {}. {}", i + 1, key);
+    let keys = engine.key_fields();
+    if keys.is_empty() {
+        println!("  (none)");
+    } else {
+        for (i, key) in keys.iter().enumerate() {
+            println!("  {}. {}", i + 1, key);
+        }
     }
     println!();
 
     // Partition information
-    println!("Partitions: {}", rvd_spec.part_files.len());
-    if rvd_spec.part_files.len() <= 5 {
-        for (i, part) in rvd_spec.part_files.iter().enumerate() {
-            println!("  {}. {}", i, part);
+    println!("Partitions: {}", engine.num_partitions());
+    println!("Index: {}", if engine.has_index() { "Yes" } else { "No" });
+    println!();
+
+    // Hail-specific information if available
+    if let Some(rvd_spec) = engine.rvd_spec() {
+        // Partition files
+        if rvd_spec.part_files.len() <= 5 {
+            println!("Partition Files:");
+            for (i, part) in rvd_spec.part_files.iter().enumerate() {
+                println!("  {}. {}", i, part);
+            }
+        } else {
+            println!("Partition Files:");
+            for (i, part) in rvd_spec.part_files.iter().take(3).enumerate() {
+                println!("  {}. {}", i, part);
+            }
+            println!("  ... ({} more)", rvd_spec.part_files.len() - 3);
         }
-    } else {
-        for (i, part) in rvd_spec.part_files.iter().take(3).enumerate() {
-            println!("  {}. {}", i, part);
+        println!();
+
+        // Index information
+        if let Some(ref index_spec) = rvd_spec.index_spec {
+            println!("Index Details:");
+            println!("  Path: {}", index_spec.rel_path);
+            println!("  Key Type: {}", index_spec.key_type);
+            println!();
         }
-        println!("  ... ({} more)", rvd_spec.part_files.len() - 3);
-    }
-    println!();
 
-    // Index information
-    if let Some(ref index_spec) = rvd_spec.index_spec {
-        println!("Index: Yes");
-        println!("  Path: {}", index_spec.rel_path);
-        println!("  Key Type: {}", index_spec.key_type);
+        // Partition bounds
+        println!("Partition Bounds:");
+        for (i, interval) in rvd_spec.range_bounds.iter().enumerate() {
+            println!("  Partition {}:", i);
+            println!("    Start: {}", serde_json::to_string(&interval.start)?);
+            println!("    End: {}", serde_json::to_string(&interval.end)?);
+        }
+        println!();
+
+        // Codec information
+        println!("Row Codec:");
+        println!("  EType: {}", rvd_spec.codec_spec.e_type);
+        println!("  VType: {}", rvd_spec.codec_spec.v_type);
     } else {
-        println!("Index: No");
+        // VCF or other source - show schema info
+        println!("Row Schema:");
+        println!("{:?}", engine.row_type());
     }
-    println!();
-
-    // Partition bounds
-    println!("Partition Bounds:");
-    for (i, interval) in rvd_spec.range_bounds.iter().enumerate() {
-        println!("  Partition {}:", i);
-        println!("    Start: {}", serde_json::to_string(&interval.start)?);
-        println!("    End: {}", serde_json::to_string(&interval.end)?);
-    }
-    println!();
-
-    // Codec information
-    println!("Row Codec:");
-    println!("  EType: {}", rvd_spec.codec_spec.e_type);
-    println!("  VType: {}", rvd_spec.codec_spec.v_type);
 
     Ok(())
 }
@@ -590,12 +614,11 @@ fn format_bytes(bytes: u64) -> String {
 /// Run the summary command
 fn run_summary(table_path: &str) -> Result<()> {
     let engine = QueryEngine::open_path(table_path)?;
-    let rvd = engine.rvd_spec().clone();
     let part_count = engine.num_partitions();
 
     // Print header
-    println!("Hail Table Summary");
-    println!("==================");
+    println!("Table Summary");
+    println!("=============");
     println!();
 
     // Basic info
@@ -610,66 +633,78 @@ fn run_summary(table_path: &str) -> Result<()> {
 
     // Key fields
     println!("Key Fields:");
-    for (i, key) in rvd.key.iter().enumerate() {
-        println!("  {}. {}", i + 1, key);
+    let keys = engine.key_fields();
+    if keys.is_empty() {
+        println!("  (none)");
+    } else {
+        for (i, key) in keys.iter().enumerate() {
+            println!("  {}. {}", i + 1, key);
+        }
     }
     println!();
 
-    // Calculate partition sizes (parallel)
-    println!("Calculating partition sizes (parallel)...");
-    let pb = ProgressBar::new(part_count as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions")
-            .unwrap()
-            .progress_chars("#>-"),
-    );
+    // Hail-specific partition size calculation
+    if let Some(rvd) = engine.rvd_spec() {
+        // Calculate partition sizes (parallel)
+        println!("Calculating partition sizes (parallel)...");
+        let pb = ProgressBar::new(part_count as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
 
-    let parts_dir = join_path(&join_path(table_path, "rows"), "parts");
+        let parts_dir = join_path(&join_path(table_path, "rows"), "parts");
 
-    let sizes: Vec<u64> = rvd.part_files
-        .par_iter()
-        .map(|part| {
-            let path = join_path(&parts_dir, part);
-            let size = get_file_size(&path).unwrap_or(0);
-            pb.inc(1);
-            size
-        })
-        .collect();
+        let sizes: Vec<u64> = rvd.part_files
+            .par_iter()
+            .map(|part| {
+                let path = join_path(&parts_dir, part);
+                let size = get_file_size(&path).unwrap_or(0);
+                pb.inc(1);
+                size
+            })
+            .collect();
 
-    pb.finish_and_clear();
+        pb.finish_and_clear();
 
-    let total_size: u64 = sizes.iter().sum();
-    let mean_size = if part_count > 0 {
-        total_size as f64 / part_count as f64
+        let total_size: u64 = sizes.iter().sum();
+        let mean_size = if part_count > 0 {
+            total_size as f64 / part_count as f64
+        } else {
+            0.0
+        };
+
+        // Calculate standard deviation
+        let variance = if part_count > 1 {
+            let mean = mean_size;
+            sizes.iter().map(|&s| {
+                let diff = s as f64 - mean;
+                diff * diff
+            }).sum::<f64>() / (part_count - 1) as f64
+        } else {
+            0.0
+        };
+        let std_dev = variance.sqrt();
+
+        println!("Size Statistics:");
+        println!("  Total Size: {}", format_bytes(total_size));
+        println!("  Mean Partition Size: {}", format_bytes(mean_size as u64));
+        println!("  Std Dev: {}", format_bytes(std_dev as u64));
+        println!();
+
+        // Schema
+        println!("Schema:");
+        println!("----------------------------------------");
+        println!("{}", format_schema_clean(&rvd.codec_spec.v_type));
+        println!("----------------------------------------");
+        println!();
     } else {
-        0.0
-    };
-
-    // Calculate standard deviation
-    let variance = if part_count > 1 {
-        let mean = mean_size;
-        sizes.iter().map(|&s| {
-            let diff = s as f64 - mean;
-            diff * diff
-        }).sum::<f64>() / (part_count - 1) as f64
-    } else {
-        0.0
-    };
-    let std_dev = variance.sqrt();
-
-    println!("Size Statistics:");
-    println!("  Total Size: {}", format_bytes(total_size));
-    println!("  Mean Partition Size: {}", format_bytes(mean_size as u64));
-    println!("  Std Dev: {}", format_bytes(std_dev as u64));
-    println!();
-
-    // Schema
-    println!("Schema:");
-    println!("----------------------------------------");
-    println!("{}", format_schema_clean(&rvd.codec_spec.v_type));
-    println!("----------------------------------------");
-    println!();
+        // VCF or other non-Hail source
+        println!("(Size statistics not available for this format)");
+        println!();
+    }
 
     // Data scan for statistics (parallel)
     println!("Scanning data for field statistics (parallel)...");

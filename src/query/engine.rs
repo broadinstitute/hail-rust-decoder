@@ -8,6 +8,7 @@ use crate::datasource::DataSource;
 use crate::hail_adapter::HailTableSource;
 use crate::metadata::RVDComponentSpec;
 use crate::query::KeyRange;
+use crate::vcf::VcfDataSource;
 use crate::Result;
 use std::path::Path;
 
@@ -71,18 +72,30 @@ impl QueryEngine {
     /// let engine = QueryEngine::open_path("gs://my-bucket/data/my_table.ht").unwrap();
     /// ```
     pub fn open_path(table_path: &str) -> Result<Self> {
-        // For now, assume everything is a Hail Table
-        // In Phase 4, we will add VCF support here
-        let hail_source = HailTableSource::new(table_path)?;
+        // Detect file type by extension
+        if table_path.ends_with(".vcf")
+            || table_path.ends_with(".vcf.gz")
+            || table_path.ends_with(".vcf.bgz")
+        {
+            // VCF file
+            let vcf_source = VcfDataSource::new(table_path)?;
+            Ok(QueryEngine {
+                source: Box::new(vcf_source),
+                hail_source: None,
+            })
+        } else {
+            // Assume Hail Table
+            let hail_source = HailTableSource::new(table_path)?;
 
-        // Create a second instance for the trait object
-        // (This is necessary because we need to keep Hail-specific access for rvd_spec())
-        let source = Box::new(HailTableSource::new(table_path)?);
+            // Create a second instance for the trait object
+            // (This is necessary because we need to keep Hail-specific access for rvd_spec())
+            let source = Box::new(HailTableSource::new(table_path)?);
 
-        Ok(QueryEngine {
-            source,
-            hail_source: Some(hail_source),
-        })
+            Ok(QueryEngine {
+                source,
+                hail_source: Some(hail_source),
+            })
+        }
     }
 
     /// Get the key field names for this table
@@ -107,14 +120,10 @@ impl QueryEngine {
 
     /// Get the RVD specification (Hail tables only)
     ///
-    /// Returns reference to RVD spec or panics if not a Hail table.
+    /// Returns Some(&RVDComponentSpec) for Hail tables, None for other sources (e.g., VCF).
     /// This is used by inspection commands.
-    pub fn rvd_spec(&self) -> &RVDComponentSpec {
-        if let Some(hail) = &self.hail_source {
-            hail.rvd_spec()
-        } else {
-            panic!("Not a Hail table")
-        }
+    pub fn rvd_spec(&self) -> Option<&RVDComponentSpec> {
+        self.hail_source.as_ref().map(|h| h.rvd_spec())
     }
 
     /// Get the row type (schema) for this table

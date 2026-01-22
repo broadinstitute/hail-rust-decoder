@@ -259,7 +259,12 @@ async fn table_schema(
         )
     })?;
 
-    let schema = format_schema_clean(&engine.rvd_spec().codec_spec.v_type);
+    let schema = if let Some(rvd_spec) = engine.rvd_spec() {
+        format_schema_clean(&rvd_spec.codec_spec.v_type)
+    } else {
+        // VCF or other source - show EncodedType debug representation
+        format!("{:?}", engine.row_type())
+    };
     Ok(schema)
 }
 

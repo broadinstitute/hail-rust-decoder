@@ -329,9 +329,97 @@ impl SchemaGenerator {
     }
 
     /// Generate a JSON schema from a QueryEngine
+    ///
+    /// For Hail Tables, uses the VType from the codec spec.
+    /// For VCF files, generates schema from the EncodedType.
     pub fn from_engine(engine: &QueryEngine, title: Option<&str>) -> Result<Value> {
-        let vtype = &engine.rvd_spec().codec_spec.v_type;
-        Self::from_vtype(vtype, title)
+        if let Some(rvd_spec) = engine.rvd_spec() {
+            // Hail Table - use VType string
+            let vtype = &rvd_spec.codec_spec.v_type;
+            Self::from_vtype(vtype, title)
+        } else {
+            // VCF or other source - generate from EncodedType
+            Self::from_encoded_type(engine.row_type(), title)
+        }
+    }
+
+    /// Generate a JSON schema from an EncodedType
+    pub fn from_encoded_type(row_type: &crate::codec::EncodedType, title: Option<&str>) -> Result<Value> {
+        use crate::codec::EncodedType;
+
+        fn type_to_schema(t: &EncodedType) -> Value {
+            match t {
+                EncodedType::EBoolean { required } => {
+                    if *required {
+                        json!({"type": "boolean"})
+                    } else {
+                        json!({"type": ["boolean", "null"]})
+                    }
+                }
+                EncodedType::EInt32 { required } | EncodedType::EInt64 { required } => {
+                    if *required {
+                        json!({"type": "integer"})
+                    } else {
+                        json!({"type": ["integer", "null"]})
+                    }
+                }
+                EncodedType::EFloat32 { required } | EncodedType::EFloat64 { required } => {
+                    if *required {
+                        json!({"type": "number"})
+                    } else {
+                        json!({"type": ["number", "null"]})
+                    }
+                }
+                EncodedType::EBinary { required } => {
+                    if *required {
+                        json!({"type": "string"})
+                    } else {
+                        json!({"type": ["string", "null"]})
+                    }
+                }
+                EncodedType::EArray { required, element } => {
+                    let items = type_to_schema(element);
+                    if *required {
+                        json!({"type": "array", "items": items})
+                    } else {
+                        json!({"type": ["array", "null"], "items": items})
+                    }
+                }
+                EncodedType::EBaseStruct { required, fields } => {
+                    let mut properties = Map::new();
+                    let mut required_fields = Vec::new();
+                    for field in fields {
+                        properties.insert(field.name.clone(), type_to_schema(&field.encoded_type));
+                        // Check if field type is required
+                        if field.encoded_type.is_required() {
+                            required_fields.push(Value::String(field.name.clone()));
+                        }
+                    }
+                    let type_val = if *required {
+                        json!("object")
+                    } else {
+                        json!(["object", "null"])
+                    };
+                    let mut obj = json!({
+                        "type": type_val,
+                        "properties": properties,
+                        "additionalProperties": false
+                    });
+                    if !required_fields.is_empty() {
+                        obj["required"] = Value::Array(required_fields);
+                    }
+                    obj
+                }
+                _ => json!({}), // Handle other types as needed
+            }
+        }
+
+        let mut schema = type_to_schema(row_type);
+        schema["$schema"] = json!("https://json-schema.org/draft/2020-12/schema");
+        if let Some(t) = title {
+            schema["title"] = json!(t);
+        }
+        Ok(schema)
     }
 
     /// Write schema to a file
