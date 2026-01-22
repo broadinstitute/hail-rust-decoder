@@ -154,8 +154,15 @@ impl Seek for CloudReader {
     }
 }
 
+/// Trait combining Read and Seek for seekable readers
+pub trait ReadSeek: Read + Seek {}
+
+/// Blanket implementation for any type that implements both Read and Seek
+impl<T: Read + Seek> ReadSeek for T {}
+
 /// A boxed reader that can be either a local file or a cloud reader
-pub type BoxedReader = Box<dyn Read + Send + Sync>;
+/// Includes Seek to support indexed reading (BGZF/Tabix)
+pub type BoxedReader = Box<dyn ReadSeek + Send + Sync>;
 
 /// Create a reader for a path, detecting whether it's local or cloud
 ///
