@@ -1,0 +1,12 @@
+[
+  {"contig": "chr1", "start": 55039447, "end": 55064852, "gene": "PCSK9", "gene_id": "ENSG00000169174"},
+  {"contig": "chr2", "start": 178525989, "end": 178830802, "gene": "TTN", "gene_id": "ENSG00000155657"},
+  {"contig": "chr7", "start": 55019017, "end": 55211628, "gene": "EGFR", "gene_id": "ENSG00000146648"},
+  {"contig": "chr7", "start": 117287120, "end": 117715971, "gene": "CFTR", "gene_id": "ENSG00000001626"},
+  {"contig": "chr11", "start": 5225464, "end": 5229395, "gene": "HBB", "gene_id": "ENSG00000244734"},
+  {"contig": "chr13", "start": 32315086, "end": 32400268, "gene": "BRCA2", "gene_id": "ENSG00000139618"},
+  {"contig": "chr17", "start": 7661779, "end": 7687538, "gene": "TP53", "gene_id": "ENSG00000141510"},
+  {"contig": "chr17", "start": 43044295, "end": 43170245, "gene": "BRCA1", "gene_id": "ENSG00000012048"},
+  {"contig": "chr19", "start": 44905791, "end": 44909393, "gene": "APOE", "gene_id": "ENSG00000130203"},
+  {"contig": "chrX", "start": 31097677, "end": 33339609, "gene": "DMD", "gene_id": "ENSG00000198947"}
+]
