@@ -23,9 +23,9 @@ cargo build --bin hail-server --features server
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `gcp` | Google Cloud Storage support | Yes |
+| `validation` | `schema validate` and `schema generate` commands | Yes |
 | `aws` | Amazon S3 support | No |
 | `http` | HTTP/HTTPS URL support | No |
-| `validation` | `validate` and `generate-schema` commands | No |
 | `clickhouse` | `export clickhouse` command | No |
 | `bigquery` | `export bigquery` command (requires gcp) | No |
 | `server` | `hail-server` HTTP binary | No |
@@ -34,11 +34,8 @@ cargo build --bin hail-server --features server
 ### Examples
 
 ```bash
-# GCS + S3 support
+# Add S3 support
 cargo build --features aws
-
-# CLI with validation commands
-cargo build --features validation
 
 # Full cloud support (GCS + S3 + HTTP)
 cargo build --features gcp,aws,http
@@ -54,8 +51,8 @@ cargo build --features full
 - `summary` - Show comprehensive table summary with statistics
 - `query` - Query with optional filters
 - `convert` - Convert to Parquet format
-- `validate` - Validate table against JSON schema (requires `validation` feature)
-- `generate-schema` - Generate JSON schema from table (requires `validation` feature)
+- `schema validate` - Validate table against JSON schema
+- `schema generate` - Generate JSON schema from table
 - `export clickhouse` - Export to ClickHouse (requires `clickhouse` feature)
 - `export bigquery` - Export to BigQuery (requires `bigquery` feature)
 
