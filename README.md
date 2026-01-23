@@ -5,7 +5,7 @@ Pure Rust decoder for Hail table format with support for cloud storage, Parquet 
 ## Features
 
 - **Zero Java/Hail dependencies**: Single static binary, no JVM required
-- **Streaming capable**: Read from local disk or cloud storage (GCS, S3)
+- **Local/Cloud Storage**: Read from local disk or cloud storage (GCS, S3)
 - **Memory efficient**: Process tables of any size with minimal memory
 - **Multiple outputs**: Export to Parquet, VCF, ClickHouse, BigQuery
 - **VCF support**: Query and export VCF files with tabix index support
@@ -268,9 +268,39 @@ cargo test --features full  # test all features
 
 ## Architecture
 
-The decoder uses a unified `DataSource` abstraction that enables the same query interface across:
-- Hail tables (`.ht` directories)
-- VCF files (`.vcf`, `.vcf.gz`, `.vcf.bgz`)
-- Local and cloud storage (GCS, S3)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         HAIL-DECODER DATA FLOW                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  INPUT SOURCES                  CORE ENGINE                 OUTPUT TARGETS  │
+│  ─────────────                  ───────────                 ──────────────  │
+│                                                                             │
+│  ┌───────────┐                                              ┌───────────┐  │
+│  │Hail Table │──┐                                        ┌─►│  stdout   │  │
+│  │  (.ht)    │  │                                        │  │  (JSON)   │  │
+│  └───────────┘  │                                        │  └───────────┘  │
+│                 │    ┌─────────────────────────────┐     │                  │
+│  ┌───────────┐  │    │        QueryEngine          │     │  ┌───────────┐  │
+│  │ VCF File  │──┼───►│  ┌───────────────────────┐  │─────┼─►│  Parquet  │  │
+│  │(.vcf.bgz) │  │    │  │   DataSource Trait    │  │     │  │ (.parquet)│  │
+│  └───────────┘  │    │  │  - row_type()         │  │     │  └───────────┘  │
+│                 │    │  │  - query_iter()       │  │     │                  │
+│  ┌───────────┐  │    │  │  - key_fields()       │  │     │  ┌───────────┐  │
+│  │  Remote   │──┘    │  └───────────────────────┘  │     ├─►│ClickHouse │  │
+│  │(gs://,s3://)      │                             │     │  │  (HTTP)   │  │
+│  └───────────┘       │  ┌───────────────────────┐  │     │  └───────────┘  │
+│                      │  │   Index (optional)    │  │     │                  │
+│                      │  │  - Partition bounds   │  │     │  ┌───────────┐  │
+│                      │  │  - Tabix (VCF)        │  │     └─►│ BigQuery  │  │
+│                      │  └───────────────────────┘  │        │(GCS+Load) │  │
+│                      └─────────────────────────────┘        └───────────┘  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-All export commands share consistent `--where`, `--limit`, `--interval`, and `--intervals-file` options.
+**Key Principles:**
+- **DataSource Abstraction** - Unified interface for Hail tables and VCF files
+- **Streaming by Default** - Memory-efficient processing of arbitrarily large datasets
+- **Parquet as Intermediate** - Bridge between row-oriented sources and columnar targets
+- **Consistent CLI** - Same `--where`/`--limit`/`--interval` options work across all commands
