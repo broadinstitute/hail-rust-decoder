@@ -74,6 +74,14 @@ pub struct CommonExportArgs {
     /// Limit number of rows to export
     #[arg(long)]
     pub limit: Option<usize>,
+
+    /// Genomic interval (chr:start-end format, can be specified multiple times)
+    #[arg(long)]
+    pub interval: Vec<String>,
+
+    /// Path to interval file (.bed, .json, or text with chr:start-end lines)
+    #[arg(long)]
+    pub intervals_file: Option<String>,
 }
 
 /// Trait that all export argument structs must implement.
@@ -136,6 +144,14 @@ pub struct QueryArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Genomic interval (chr:start-end format, can be specified multiple times)
+    #[arg(long)]
+    pub interval: Vec<String>,
+
+    /// Path to interval file (.bed, .json, or text with chr:start-end lines)
+    #[arg(long)]
+    pub intervals_file: Option<String>,
 }
 
 #[cfg(feature = "clickhouse")]

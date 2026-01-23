@@ -56,6 +56,10 @@ cargo build --features full
 - `export clickhouse` - Export to ClickHouse (requires `clickhouse` feature)
 - `export bigquery` - Export to BigQuery (requires `bigquery` feature)
 
+## ClickHouse
+
+For local ClickHouse testing, see the Docker container running on `localhost:8123` (user: `default`, password: `test`).
+
 ## Test
 
 ```bash

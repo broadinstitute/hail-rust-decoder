@@ -5,9 +5,11 @@
 
 use crate::buffer::InputBuffer;
 use crate::codec::{EncodedType, EncodedValue};
+use crate::query::intervals::IntervalList;
 use crate::query::{KeyRange, KeyValue, QueryBound};
 use crate::HailError;
 use crate::Result;
+use std::sync::Arc;
 
 /// Iterator that streams rows from a single partition
 ///
@@ -17,6 +19,7 @@ pub struct PartitionStream {
     buffer: Box<dyn InputBuffer>,
     row_type: EncodedType,
     ranges: Vec<KeyRange>,
+    intervals: Option<Arc<IntervalList>>,
 }
 
 impl PartitionStream {
@@ -31,6 +34,28 @@ impl PartitionStream {
             buffer,
             row_type,
             ranges,
+            intervals: None,
+        }
+    }
+
+    /// Create a new partition stream with interval filtering
+    ///
+    /// # Arguments
+    /// * `buffer` - The initialized buffer for reading partition data
+    /// * `row_type` - The row schema for decoding
+    /// * `ranges` - Key range filters to apply
+    /// * `intervals` - Optional interval list for genomic region filtering
+    pub fn with_intervals(
+        buffer: Box<dyn InputBuffer>,
+        row_type: EncodedType,
+        ranges: Vec<KeyRange>,
+        intervals: Option<Arc<IntervalList>>,
+    ) -> Self {
+        Self {
+            buffer,
+            row_type,
+            ranges,
+            intervals,
         }
     }
 }
@@ -59,11 +84,19 @@ impl Iterator for PartitionStream {
                 Err(e) => return Some(Err(e)),
             };
 
-            // Apply filters
-            if row_matches_ranges(&row, &self.ranges) {
-                return Some(Ok(row));
+            // Apply key range filters
+            if !row_matches_ranges(&row, &self.ranges) {
+                continue;
             }
-            // If no match, continue to next row
+
+            // Apply interval filters if present
+            if let Some(ref intervals) = self.intervals {
+                if !row_matches_intervals(&row, intervals) {
+                    continue;
+                }
+            }
+
+            return Some(Ok(row));
         }
     }
 }
@@ -83,6 +116,37 @@ pub fn row_matches_ranges(row: &EncodedValue, ranges: &[KeyRange]) -> bool {
         }
     }
     true
+}
+
+/// Check if a row's locus falls within any interval in the list
+///
+/// Extracts the locus.contig and locus.position from the row and checks
+/// if the position falls within any interval for that contig.
+pub fn row_matches_intervals(row: &EncodedValue, intervals: &IntervalList) -> bool {
+    // Extract locus struct
+    let locus = extract_field_by_path(row, &["locus".to_string()]);
+    let locus = match locus {
+        Some(l) => l,
+        None => return true, // No locus field, pass through
+    };
+
+    // Extract contig
+    let contig = extract_field_by_path(locus, &["contig".to_string()]);
+    let contig_str = match contig {
+        Some(EncodedValue::Binary(b)) => String::from_utf8_lossy(b).into_owned(),
+        _ => return true, // Can't extract contig, pass through
+    };
+
+    // Extract position
+    let position = extract_field_by_path(locus, &["position".to_string()]);
+    let position_val = match position {
+        Some(EncodedValue::Int32(p)) => *p,
+        Some(EncodedValue::Int64(p)) => *p as i32,
+        _ => return true, // Can't extract position, pass through
+    };
+
+    // Check if position is within any interval for this contig
+    intervals.contains(&contig_str, position_val)
 }
 
 /// Extract a field from an EncodedValue by following a field path
@@ -194,5 +258,76 @@ mod tests {
             KeyValue::String("test".to_string()),
         );
         assert!(row_matches_ranges(&row, &[range]));
+    }
+
+    fn create_locus_row(contig: &str, position: i32) -> EncodedValue {
+        EncodedValue::Struct(vec![
+            ("locus".to_string(), EncodedValue::Struct(vec![
+                ("contig".to_string(), EncodedValue::Binary(contig.as_bytes().to_vec())),
+                ("position".to_string(), EncodedValue::Int32(position)),
+            ])),
+            ("alleles".to_string(), EncodedValue::Array(vec![
+                EncodedValue::Binary(b"A".to_vec()),
+                EncodedValue::Binary(b"G".to_vec()),
+            ])),
+        ])
+    }
+
+    #[test]
+    fn test_row_matches_intervals_basic() {
+        let mut intervals = IntervalList::new();
+        intervals.add("chr1".to_string(), 100, 200);
+        intervals.add("chr1".to_string(), 300, 400);
+        intervals.optimize();
+
+        // Row within first interval
+        let row1 = create_locus_row("chr1", 150);
+        assert!(row_matches_intervals(&row1, &intervals));
+
+        // Row within second interval
+        let row2 = create_locus_row("chr1", 350);
+        assert!(row_matches_intervals(&row2, &intervals));
+
+        // Row outside intervals
+        let row3 = create_locus_row("chr1", 250);
+        assert!(!row_matches_intervals(&row3, &intervals));
+
+        // Row on different contig
+        let row4 = create_locus_row("chr2", 150);
+        assert!(!row_matches_intervals(&row4, &intervals));
+    }
+
+    #[test]
+    fn test_row_matches_intervals_boundary() {
+        let mut intervals = IntervalList::new();
+        intervals.add("chr1".to_string(), 100, 200);
+        intervals.optimize();
+
+        // Exact start
+        let row1 = create_locus_row("chr1", 100);
+        assert!(row_matches_intervals(&row1, &intervals));
+
+        // Exact end
+        let row2 = create_locus_row("chr1", 200);
+        assert!(row_matches_intervals(&row2, &intervals));
+
+        // Just before start
+        let row3 = create_locus_row("chr1", 99);
+        assert!(!row_matches_intervals(&row3, &intervals));
+
+        // Just after end
+        let row4 = create_locus_row("chr1", 201);
+        assert!(!row_matches_intervals(&row4, &intervals));
+    }
+
+    #[test]
+    fn test_row_matches_intervals_no_locus() {
+        let intervals = IntervalList::from_strings(&["chr1:100-200".to_string()]).unwrap();
+
+        // Row without locus field should pass through
+        let row = EncodedValue::Struct(vec![
+            ("field1".to_string(), EncodedValue::Int32(42)),
+        ]);
+        assert!(row_matches_intervals(&row, &intervals));
     }
 }

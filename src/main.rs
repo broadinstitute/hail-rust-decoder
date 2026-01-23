@@ -16,8 +16,9 @@ use cli::{SchemaSubcommands, ValidateArgs};
 use cli::ExportClickhouseArgs;
 use hail_decoder::codec::EncodedValue;
 use hail_decoder::io::{get_file_size, join_path};
-use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
+use hail_decoder::query::{IntervalList, KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
+use std::sync::Arc;
 #[cfg(feature = "validation")]
 use hail_decoder::validation::{SchemaGenerator, SchemaValidator};
 use hail_decoder::Result;
@@ -78,6 +79,53 @@ fn parse_export_filters(args: &impl HasCommonExportArgs) -> Vec<KeyRange> {
         }
     }
     filters
+}
+
+/// Parse interval list from CLI arguments (file and/or strings)
+///
+/// # Arguments
+/// * `file` - Optional path to interval file (.bed, .json, or text)
+/// * `strings` - Optional list of interval strings (chr:start-end format)
+///
+/// # Returns
+/// * `Ok(None)` if no intervals specified
+/// * `Ok(Some(Arc<IntervalList>))` with merged and optimized intervals
+/// * `Err` on parse errors
+fn parse_interval_list(
+    file: Option<&str>,
+    strings: &[String],
+) -> Result<Option<Arc<IntervalList>>> {
+    // Return None if no intervals specified
+    if file.is_none() && strings.is_empty() {
+        return Ok(None);
+    }
+
+    let mut list = IntervalList::new();
+
+    // Load from file if specified
+    if let Some(path) = file {
+        let file_list = IntervalList::from_file(path)?;
+        list.merge(file_list);
+    }
+
+    // Parse string intervals if specified
+    if !strings.is_empty() {
+        let string_list = IntervalList::from_strings(strings)?;
+        list.merge(string_list);
+    }
+
+    // Optimize the combined list
+    list.optimize();
+
+    Ok(Some(Arc::new(list)))
+}
+
+/// Parse interval list from export args
+fn parse_export_intervals(args: &impl HasCommonExportArgs) -> Result<Option<Arc<IntervalList>>> {
+    parse_interval_list(
+        args.common().intervals_file.as_deref(),
+        &args.common().interval,
+    )
 }
 
 fn show_info(table_path: &str) -> Result<()> {
@@ -218,11 +266,17 @@ fn run_query(args: QueryArgs) -> Result<()> {
         }
     }
 
+    // Parse interval list
+    let intervals = parse_interval_list(args.intervals_file.as_deref(), &args.interval)?;
+
     // Open the table (supports both local and cloud paths)
     let mut engine = QueryEngine::open_path(table_path)?;
 
     println!("{} {}", "Querying table:".green(), table_path.bright_white());
     println!("{} {:?}", "Key fields:".green(), engine.key_fields());
+    if let Some(ref ivl) = intervals {
+        println!("{} {} intervals", "Interval filter:".green(), ivl.len().to_string().bright_white());
+    }
     println!();
 
     // Execute query
@@ -233,6 +287,14 @@ fn run_query(args: QueryArgs) -> Result<()> {
 
         match engine.lookup(&key)? {
             Some(row) => {
+                // Apply interval filter to lookup result if specified
+                if let Some(ref ivl) = intervals {
+                    if !row_matches_intervals(&row, ivl) {
+                        println!();
+                        println!("{}", "Row found but filtered out by interval list.".yellow());
+                        return Ok(());
+                    }
+                }
                 println!();
                 println!("{}", "Found row:".green().bold());
                 print_row(&row, args.json)?;
@@ -244,24 +306,26 @@ fn run_query(args: QueryArgs) -> Result<()> {
         }
     } else {
         // Range query using --where (or full scan if no filters)
-        if where_filters.is_empty() {
+        if where_filters.is_empty() && intervals.is_none() {
             println!("{}", "Warning: No filters specified. This may scan all partitions.".yellow());
         } else {
-            println!(
-                "{} {:?}",
-                "Filter conditions:".cyan(),
-                where_filters
-                    .iter()
-                    .map(|r| r.field_path_str())
-                    .collect::<Vec<_>>()
-            );
+            if !where_filters.is_empty() {
+                println!(
+                    "{} {:?}",
+                    "Filter conditions:".cyan(),
+                    where_filters
+                        .iter()
+                        .map(|r| r.field_path_str())
+                        .collect::<Vec<_>>()
+                );
+            }
         }
 
         println!();
         println!("{}", "Streaming results...".dimmed());
 
-        // Use streaming query for memory-efficient iteration
-        let iterator = engine.query_iter(&where_filters)?;
+        // Use streaming query with intervals for memory-efficient iteration
+        let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
 
         // Apply limit if specified
         let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.limit {
@@ -286,6 +350,26 @@ fn run_query(args: QueryArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Check if a row's locus matches any interval (used for point lookup filtering)
+fn row_matches_intervals(row: &EncodedValue, intervals: &IntervalList) -> bool {
+    // Extract locus.contig and locus.position from the row
+    if let EncodedValue::Struct(fields) = row {
+        if let Some((_, locus)) = fields.iter().find(|(name, _)| name == "locus") {
+            if let EncodedValue::Struct(locus_fields) = locus {
+                let contig = locus_fields.iter().find(|(name, _)| name == "contig").map(|(_, v)| v);
+                let position = locus_fields.iter().find(|(name, _)| name == "position").map(|(_, v)| v);
+
+                if let (Some(EncodedValue::Binary(c)), Some(EncodedValue::Int32(p))) = (contig, position) {
+                    let contig_str = String::from_utf8_lossy(c);
+                    return intervals.contains(&contig_str, *p);
+                }
+            }
+        }
+    }
+    // If we can't extract locus, pass through
+    true
 }
 
 fn parse_equality(s: &str) -> Option<(String, String)> {
@@ -479,6 +563,7 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     use hail_decoder::parquet::{build_record_batch, ParquetWriter};
 
     let where_filters = parse_export_filters(&args);
+    let intervals = parse_export_intervals(&args)?;
 
     println!("{} {} {} {}", "Converting".green(), args.common.input.bright_white(), "to".green(), args.output.bright_white());
 
@@ -490,6 +575,9 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     if !where_filters.is_empty() {
         println!("{} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
     }
+    if let Some(ref ivl) = intervals {
+        println!("{} {} intervals", "Interval filter:".cyan(), ivl.len().to_string().bright_white());
+    }
     if let Some(l) = args.common.limit {
         println!("{} {}", "Row limit:".cyan(), l.to_string().bright_white());
     }
@@ -499,8 +587,8 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     let mut writer = ParquetWriter::new(&args.output, &row_type)?;
     let arrow_schema = writer.schema().clone();
 
-    // Use streaming query with filters
-    let iterator = engine.query_iter(&where_filters)?;
+    // Use streaming query with filters and intervals
+    let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
 
     // Apply limit if specified
     let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
@@ -840,12 +928,16 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
     use uuid::Uuid;
 
     let where_filters = parse_export_filters(&args);
+    let intervals = parse_export_intervals(&args)?;
 
     println!("{} {}", "Exporting to ClickHouse:".green().bold(), args.common.input.bright_white());
     println!("  {} {}", "ClickHouse URL:".cyan(), args.url.bright_white());
     println!("  {} {}", "Target table:".cyan(), args.table.bright_white());
     if !where_filters.is_empty() {
         println!("  {} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+    }
+    if let Some(ref ivl) = intervals {
+        println!("  {} {} intervals", "Interval filter:".cyan(), ivl.len().to_string().bright_white());
     }
     if let Some(l) = args.common.limit {
         println!("  {} {}", "Row limit:".cyan(), l.to_string().bright_white());
@@ -889,8 +981,8 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
     let mut writer = ParquetWriter::new(&temp_path, &row_type)?;
     let arrow_schema = writer.schema().clone();
 
-    // Use streaming query with filters
-    let iterator = engine.query_iter(&where_filters)?;
+    // Use streaming query with filters and intervals
+    let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
 
     // Apply limit if specified
     let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
@@ -981,6 +1073,7 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
     })?;
 
     let where_filters = parse_export_filters(&args);
+    let intervals = parse_export_intervals(&args)?;
 
     println!("{} {} {} {}:{}.{}",
         "Exporting".green().bold(),
@@ -990,6 +1083,9 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
     println!("  {} {}", "Staging bucket:".cyan(), args.bucket.bright_white());
     if !where_filters.is_empty() {
         println!("  {} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+    }
+    if let Some(ref ivl) = intervals {
+        println!("  {} {} intervals", "Interval filter:".cyan(), ivl.len().to_string().bright_white());
     }
     if let Some(l) = args.common.limit {
         println!("  {} {}", "Row limit:".cyan(), l.to_string().bright_white());
@@ -1012,8 +1108,8 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
     let mut writer = ParquetWriter::new(temp_file_path.to_string_lossy().as_ref(), &row_type)?;
     let arrow_schema = writer.schema().clone();
 
-    // Use streaming query with filters
-    let iterator = engine.query_iter(&where_filters)?;
+    // Use streaming query with filters and intervals
+    let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
 
     // Apply limit if specified
     let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {

@@ -8,7 +8,7 @@ use crate::datasource::DataSource;
 use crate::index::IndexReader;
 use crate::io::{join_path, read_single_block};
 use crate::metadata::RVDComponentSpec;
-use crate::query::{filter_partitions, KeyRange, KeyValue, PartitionStream};
+use crate::query::{filter_partitions, filter_partitions_with_intervals, IntervalList, KeyRange, KeyValue, PartitionStream};
 use crate::HailError;
 use crate::Result;
 use crossbeam_channel;
@@ -199,6 +199,16 @@ impl HailTableSource {
         partition_idx: usize,
         ranges: &[KeyRange],
     ) -> Result<PartitionStream> {
+        self.create_partition_stream_with_intervals(partition_idx, ranges, None)
+    }
+
+    /// Internal method to create a partition stream with interval filtering
+    fn create_partition_stream_with_intervals(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+        intervals: Option<Arc<IntervalList>>,
+    ) -> Result<PartitionStream> {
         let part_file = &self.rvd_spec.part_files[partition_idx];
         let parts_path = join_path(&self.rows_path, "parts");
         let part_path = join_path(&parts_path, part_file);
@@ -207,10 +217,11 @@ impl HailTableSource {
             .with_leb128()
             .build();
 
-        Ok(PartitionStream::new(
+        Ok(PartitionStream::with_intervals(
             buffer,
             self.row_type.clone(),
             ranges.to_vec(),
+            intervals,
         ))
     }
 }
@@ -238,8 +249,16 @@ impl DataSource for HailTableSource {
         self.create_partition_stream(partition_idx, ranges)?.collect()
     }
 
-    fn query_stream(&self, ranges: &[KeyRange]) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
-        let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
+    fn query_stream_with_intervals(
+        &self,
+        ranges: &[KeyRange],
+        intervals: Option<Arc<IntervalList>>,
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        let matching_partitions = filter_partitions_with_intervals(
+            &self.rvd_spec.range_bounds,
+            ranges,
+            intervals.as_deref(),
+        );
 
         info!(
             "query_stream: {} partitions matched filter",
@@ -278,8 +297,12 @@ impl DataSource for HailTableSource {
                     match buffer_res {
                         Ok(buffer) => {
                             debug!("Partition {} opened successfully", idx);
-                            let stream =
-                                PartitionStream::new(buffer, row_type.clone(), ranges.clone());
+                            let stream = PartitionStream::with_intervals(
+                                buffer,
+                                row_type.clone(),
+                                ranges.clone(),
+                                intervals.clone(),
+                            );
 
                             let mut row_count = 0;
                             for row in stream {

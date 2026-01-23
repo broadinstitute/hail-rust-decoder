@@ -7,10 +7,11 @@ use crate::codec::{EncodedType, EncodedValue};
 use crate::datasource::DataSource;
 use crate::hail_adapter::HailTableSource;
 use crate::metadata::RVDComponentSpec;
-use crate::query::KeyRange;
+use crate::query::{IntervalList, KeyRange};
 use crate::vcf::VcfDataSource;
 use crate::Result;
 use std::path::Path;
+use std::sync::Arc;
 
 /// High-level query engine for Hail tables and other data sources
 ///
@@ -232,6 +233,38 @@ impl QueryEngine {
         ranges: &[KeyRange],
     ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
         self.source.query_stream(ranges)
+    }
+
+    /// Query with streaming output and interval filtering
+    ///
+    /// Returns an iterator that yields rows as they are read, filtering by
+    /// both key ranges and genomic intervals. This is more memory-efficient
+    /// for large result sets and allows processing to start immediately.
+    ///
+    /// # Arguments
+    /// * `ranges` - Key range constraints for the query
+    /// * `intervals` - Optional interval list for genomic region filtering
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::{QueryEngine, KeyRange, IntervalList};
+    /// use std::sync::Arc;
+    ///
+    /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
+    /// let intervals = IntervalList::from_strings(&["chr1:100-200".to_string()]).unwrap();
+    ///
+    /// // Stream results filtered by intervals
+    /// for row in engine.query_iter_with_intervals(&[], Some(Arc::new(intervals))).unwrap().take(100) {
+    ///     let row = row.unwrap();
+    ///     println!("{:?}", row);
+    /// }
+    /// ```
+    pub fn query_iter_with_intervals(
+        &self,
+        ranges: &[KeyRange],
+        intervals: Option<Arc<IntervalList>>,
+    ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
+        self.source.query_stream_with_intervals(ranges, intervals)
     }
 
     /// Sample random rows from the data source

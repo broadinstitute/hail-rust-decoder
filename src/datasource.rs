@@ -4,8 +4,9 @@
 //! for reading data from various formats (Hail Tables, VCFs, etc.).
 
 use crate::codec::{EncodedType, EncodedValue};
-use crate::query::KeyRange;
+use crate::query::{IntervalList, KeyRange};
 use crate::Result;
+use std::sync::Arc;
 
 /// A source of genomic table data
 ///
@@ -50,7 +51,24 @@ pub trait DataSource: Send + Sync {
     ///
     /// # Arguments
     /// * `ranges` - Key range constraints for filtering rows
-    fn query_stream(&self, ranges: &[KeyRange]) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>>;
+    fn query_stream(&self, ranges: &[KeyRange]) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        self.query_stream_with_intervals(ranges, None)
+    }
+
+    /// Stream rows matching the given key ranges and optional interval list
+    ///
+    /// This is the primary method for querying with genomic interval filtering.
+    /// Implementations should return an iterator that yields rows lazily for
+    /// memory-efficient processing.
+    ///
+    /// # Arguments
+    /// * `ranges` - Key range constraints for filtering rows
+    /// * `intervals` - Optional interval list for genomic region filtering
+    fn query_stream_with_intervals(
+        &self,
+        ranges: &[KeyRange],
+        intervals: Option<Arc<IntervalList>>,
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>>;
 
     /// Perform a point lookup for a specific key
     ///

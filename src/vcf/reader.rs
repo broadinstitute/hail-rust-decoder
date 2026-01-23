@@ -6,7 +6,7 @@
 
 use crate::codec::{EncodedType, EncodedValue};
 use crate::datasource::DataSource;
-use crate::query::{KeyRange, KeyValue, QueryBound};
+use crate::query::{IntervalList, KeyRange, KeyValue, QueryBound};
 use crate::{HailError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use noodles::bgzf;
@@ -693,9 +693,10 @@ impl DataSource for VcfDataSource {
         Ok(samples)
     }
 
-    fn query_stream(
+    fn query_stream_with_intervals(
         &self,
         ranges: &[KeyRange],
+        intervals: Option<Arc<IntervalList>>,
     ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
         // Try indexed query if we have an index and can build a region
         if let Some(index) = &self.index {
@@ -706,13 +707,23 @@ impl DataSource for VcfDataSource {
                         && !self.path.starts_with("s3://")
                         && !self.path.starts_with("http");
 
-                    if is_local {
+                    let base_iter = if is_local {
                         info!("Using local indexed query for region: {:?}", region);
-                        return self.indexed_query_local(&region, index, ranges);
+                        self.indexed_query_local(&region, index, ranges)?
                     } else {
                         info!("Using remote indexed query for region: {:?}", region);
-                        return self.indexed_query_remote(&region, index, ranges);
+                        self.indexed_query_remote(&region, index, ranges)?
+                    };
+
+                    // Apply interval filtering if present
+                    if let Some(interval_list) = intervals {
+                        let filtered = base_iter.filter(move |result| match result {
+                            Ok(row) => row_matches_interval_list(row, &interval_list),
+                            Err(_) => true,
+                        });
+                        return Ok(Box::new(filtered));
                     }
+                    return Ok(base_iter);
                 }
             }
         }
@@ -721,19 +732,52 @@ impl DataSource for VcfDataSource {
         debug!("Performing full VCF scan with post-filtering");
         let base_iter = self.full_scan_iter()?;
 
-        if ranges.is_empty() {
-            return Ok(base_iter);
-        }
-
         // Apply in-memory filtering
         let ranges = ranges.to_vec();
         let filtered = base_iter.filter(move |result| match result {
-            Ok(row) => row_matches_ranges(row, &ranges),
+            Ok(row) => {
+                // Check key ranges
+                if !ranges.is_empty() && !row_matches_ranges(row, &ranges) {
+                    return false;
+                }
+                // Check intervals
+                if let Some(ref interval_list) = intervals {
+                    if !row_matches_interval_list(row, interval_list) {
+                        return false;
+                    }
+                }
+                true
+            }
             Err(_) => true, // Pass through errors
         });
 
         Ok(Box::new(filtered))
     }
+}
+
+/// Check if a row matches the interval list
+fn row_matches_interval_list(row: &EncodedValue, intervals: &IntervalList) -> bool {
+    // Extract locus.contig and locus.position
+    let locus = get_nested_field(row, &["locus".to_string()]);
+    let locus = match locus {
+        Some(l) => l,
+        None => return true, // No locus field, pass through
+    };
+
+    let contig = get_nested_field(locus, &["contig".to_string()]);
+    let contig_str = match contig {
+        Some(EncodedValue::Binary(b)) => String::from_utf8_lossy(b).into_owned(),
+        _ => return true, // Can't extract contig, pass through
+    };
+
+    let position = get_nested_field(locus, &["position".to_string()]);
+    let position_val = match position {
+        Some(EncodedValue::Int32(p)) => *p,
+        Some(EncodedValue::Int64(p)) => *p as i32,
+        _ => return true, // Can't extract position, pass through
+    };
+
+    intervals.contains(&contig_str, position_val)
 }
 
 #[cfg(test)]
