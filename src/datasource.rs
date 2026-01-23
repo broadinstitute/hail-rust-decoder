@@ -65,4 +65,20 @@ pub trait DataSource: Send + Sync {
             "Lookup not implemented for this data source".to_string(),
         ))
     }
+
+    /// Sample random rows from the data source
+    ///
+    /// Returns a random sample of rows. Implementations may optimize this
+    /// differently:
+    /// - Hail tables: sample random partitions then random rows within
+    /// - VCFs with tabix index: use index to seek to random positions
+    /// - Unindexed sources: fall back to streaming with reservoir sampling
+    ///
+    /// Default implementation returns an error indicating sampling is not supported.
+    /// Implementations should override this with optimized sampling strategies.
+    fn sample_random(&self, _sample_size: usize) -> Result<Vec<EncodedValue>> {
+        Err(crate::HailError::Index(
+            "Random sampling not implemented for this data source".to_string(),
+        ))
+    }
 }

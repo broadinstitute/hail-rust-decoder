@@ -4,6 +4,7 @@
 //! allowing verification that table contents conform to expected schemas
 //! before export to databases or other systems.
 
+use crate::codec::EncodedValue;
 use crate::query::QueryEngine;
 use crate::Result;
 use crate::HailError;
@@ -142,6 +143,61 @@ impl SchemaValidator {
         Ok(report)
     }
 
+    /// Validate a collection of pre-sampled rows
+    ///
+    /// Used by data sources that provide optimized random sampling (like indexed VCFs).
+    fn validate_rows(
+        &self,
+        rows: Vec<EncodedValue>,
+        fail_fast: bool,
+    ) -> Result<ValidationReport> {
+        let mut report = ValidationReport::default();
+        let max_errors = 10;
+
+        let pb = ProgressBar::new(rows.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        for row in rows {
+            report.scanned_count += 1;
+
+            // Serialize row to JSON value for validation
+            let json_val = serde_json::to_value(&row)?;
+
+            // Validate against schema
+            if self.validator.validate(&json_val).is_ok() {
+                report.valid_count += 1;
+            } else {
+                report.invalid_count += 1;
+
+                if report.errors.len() < max_errors {
+                    for err in self.validator.iter_errors(&json_val) {
+                        report.errors.push(format!(
+                            "Row {}: {} at path '{}'",
+                            report.scanned_count, err, err.instance_path
+                        ));
+                        if report.errors.len() >= max_errors {
+                            break;
+                        }
+                    }
+                }
+
+                if fail_fast {
+                    break;
+                }
+            }
+
+            pb.inc(1);
+        }
+
+        pb.finish_and_clear();
+        Ok(report)
+    }
+
     /// Validate rows using streaming iteration (memory efficient)
     ///
     /// For single-partition sources (like VCFs), validates first N rows
@@ -241,8 +297,22 @@ impl SchemaValidator {
             return Ok(ValidationReport::default());
         }
 
-        // For single-partition sources (like VCFs), use streaming validation
-        // to avoid loading the entire file into memory
+        // Try optimized random sampling first (e.g., VCFs with tabix index)
+        match engine.sample_random(sample_size) {
+            Ok(samples) => {
+                println!(
+                    "Using indexed random sampling ({} samples)...",
+                    samples.len()
+                );
+                return self.validate_rows(samples, fail_fast);
+            }
+            Err(_) => {
+                // Fall through to partition-based or streaming sampling
+            }
+        }
+
+        // For single-partition sources without optimized sampling (like unindexed VCFs),
+        // use streaming validation to avoid loading the entire file into memory
         if num_partitions == 1 {
             return self.validate_streaming(engine, Some(sample_size), fail_fast);
         }

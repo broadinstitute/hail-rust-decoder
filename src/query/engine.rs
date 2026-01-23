@@ -233,6 +233,31 @@ impl QueryEngine {
     ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
         self.source.query_stream(ranges)
     }
+
+    /// Sample random rows from the data source
+    ///
+    /// Returns a random sample of rows using an optimized strategy based on
+    /// the underlying data source:
+    /// - Hail tables: samples from random partitions
+    /// - VCFs with tabix index: uses index seeking for O(N) vs O(file_size)
+    /// - Unindexed sources: returns an error (caller should fall back to streaming)
+    ///
+    /// # Arguments
+    /// * `sample_size` - Number of rows to sample
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::query::QueryEngine;
+    ///
+    /// let engine = QueryEngine::open_path("data/variants.vcf.gz").unwrap();
+    ///
+    /// // Sample 100 random variants using tabix index
+    /// let samples = engine.sample_random(100).unwrap();
+    /// println!("Sampled {} variants", samples.len());
+    /// ```
+    pub fn sample_random(&self, sample_size: usize) -> Result<Vec<EncodedValue>> {
+        self.source.sample_random(sample_size)
+    }
 }
 
 #[cfg(test)]

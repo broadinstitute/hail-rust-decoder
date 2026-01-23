@@ -8,14 +8,16 @@ use crate::codec::{EncodedType, EncodedValue};
 use crate::datasource::DataSource;
 use crate::query::{KeyRange, KeyValue, QueryBound};
 use crate::{HailError, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use noodles::bgzf;
 use noodles::core::Region;
+use noodles::csi::BinningIndex;
 use noodles::tabix;
 use noodles::vcf;
-use std::fs::File;
+use rand::Rng;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// DataSource implementation for VCF files
 ///
@@ -35,6 +37,10 @@ pub struct VcfDataSource {
     index: Option<tabix::Index>,
     /// Whether the file is BGZF compressed
     is_bgzf: bool,
+    /// Contig names from the header (for chromosome-based partitioning)
+    contigs: Vec<String>,
+    /// Contig lengths from the header (if available)
+    contig_lengths: Vec<Option<usize>>,
 }
 
 impl VcfDataSource {
@@ -61,11 +67,56 @@ impl VcfDataSource {
             vcf_reader.read_header().map_err(HailError::Io)?
         };
 
+        // Extract contig information from header (for lengths)
+        let (header_contigs, header_lengths) = Self::extract_contigs(&header);
+        if !header_contigs.is_empty() {
+            debug!("Found {} contigs in VCF header", header_contigs.len());
+        }
+
         // Generate schema from header
         let schema = super::schema::extract_schema_from_header(&header)?;
 
         // Try to load tabix index
         let index = Self::load_index(path);
+
+        // Determine which contigs to use for partitioning:
+        // - If we have a tabix index with header, use only contigs that exist in the index
+        //   (the index only contains contigs with actual data)
+        // - Otherwise, fall back to header contigs
+        let (contigs, contig_lengths) = if let Some(ref idx) = index {
+            if let Some(idx_header) = idx.header() {
+                let index_contigs: Vec<String> = idx_header
+                    .reference_sequence_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                debug!(
+                    "Tabix index contains {} contigs: {:?}",
+                    index_contigs.len(),
+                    index_contigs
+                );
+
+                // Map index contigs to their lengths from the header
+                let lengths: Vec<Option<usize>> = index_contigs
+                    .iter()
+                    .map(|name| {
+                        header_contigs
+                            .iter()
+                            .position(|h| h == name)
+                            .and_then(|pos| header_lengths.get(pos).copied().flatten())
+                    })
+                    .collect();
+
+                (index_contigs, lengths)
+            } else {
+                debug!("Tabix index has no header, falling back to VCF header contigs");
+                (header_contigs, header_lengths)
+            }
+        } else {
+            (header_contigs, header_lengths)
+        };
+
         if index.is_some() {
             debug!("Loaded tabix index for {}", path);
         }
@@ -76,7 +127,38 @@ impl VcfDataSource {
             schema,
             index,
             is_bgzf,
+            contigs,
+            contig_lengths,
         })
+    }
+
+    /// Extract contig names and lengths from the VCF header
+    fn extract_contigs(header: &vcf::Header) -> (Vec<String>, Vec<Option<usize>>) {
+        let contigs = header.contigs();
+        let names: Vec<String> = contigs.keys().map(|s| s.to_string()).collect();
+        let lengths: Vec<Option<usize>> = contigs
+            .values()
+            .map(|c| c.length().map(|l| l.into()))
+            .collect();
+        (names, lengths)
+    }
+
+    /// Check if random access is available (has tabix index)
+    pub fn has_index(&self) -> bool {
+        self.index.is_some() && self.is_bgzf
+    }
+
+    /// Get list of contigs (chromosomes) in the VCF
+    pub fn contigs(&self) -> &[String] {
+        &self.contigs
+    }
+
+    /// Get the length of a contig if known from the header
+    pub fn contig_length(&self, contig: &str) -> Option<usize> {
+        self.contigs
+            .iter()
+            .position(|c| c == contig)
+            .and_then(|idx| self.contig_lengths.get(idx).copied().flatten())
     }
 
     /// Try to load a tabix index for the VCF file
@@ -239,6 +321,7 @@ impl VcfDataSource {
         Ok(Box::new(records.into_iter()))
     }
 
+
     /// Perform an indexed query on a remote file (GCS, S3, HTTP)
     fn indexed_query_remote(
         &self,
@@ -394,9 +477,13 @@ impl DataSource for VcfDataSource {
     }
 
     fn num_partitions(&self) -> usize {
-        // Single partition for now
-        // Future: could partition by chromosome using index
-        1
+        // When indexed and we have contigs, treat each chromosome as a partition
+        if self.has_index() && !self.contigs.is_empty() {
+            self.contigs.len()
+        } else {
+            // Single partition for unindexed files
+            1
+        }
     }
 
     fn scan_partition(
@@ -404,10 +491,206 @@ impl DataSource for VcfDataSource {
         partition_idx: usize,
         ranges: &[KeyRange],
     ) -> Result<Vec<EncodedValue>> {
-        if partition_idx != 0 {
-            return Ok(vec![]);
+        // When indexed, partition_idx maps to a chromosome
+        if self.has_index() && !self.contigs.is_empty() {
+            if partition_idx >= self.contigs.len() {
+                return Ok(vec![]);
+            }
+
+            let contig = &self.contigs[partition_idx];
+            let index = self.index.as_ref().unwrap();
+
+            // Create a region for this entire chromosome
+            let region: Region = contig.parse().unwrap_or_else(|_| Region::new(contig.clone(), ..));
+
+            // Check if this is a local file or remote
+            let is_local = !self.path.starts_with("gs://")
+                && !self.path.starts_with("s3://")
+                && !self.path.starts_with("http");
+
+            let records = if is_local {
+                debug!("Scanning partition {} (contig {}) locally", partition_idx, contig);
+                self.indexed_query_local(&region, index, ranges)?
+            } else {
+                debug!("Scanning partition {} (contig {}) remotely", partition_idx, contig);
+                self.indexed_query_remote(&region, index, ranges)?
+            };
+
+            records.collect()
+        } else {
+            // Fall back to full scan for partition 0 on unindexed files
+            if partition_idx != 0 {
+                return Ok(vec![]);
+            }
+            self.query_stream(ranges)?.collect()
         }
-        self.query_stream(ranges)?.collect()
+    }
+
+    fn sample_random(&self, sample_size: usize) -> Result<Vec<EncodedValue>> {
+        // Require tabix index for random sampling
+        if !self.has_index() {
+            return Err(HailError::Index(
+                "Random sampling requires tabix index (.tbi file)".to_string(),
+            ));
+        }
+
+        if self.contigs.is_empty() {
+            return Err(HailError::Index(
+                "No contigs found in VCF header for random sampling".to_string(),
+            ));
+        }
+
+        let index = self.index.as_ref().unwrap();
+
+        debug!("Contigs for sampling: {:?}", self.contigs);
+
+        // Calculate total genome length for weighted sampling
+        let total_length: usize = self.contig_lengths
+            .iter()
+            .filter_map(|l| *l)
+            .sum();
+
+        // If we don't have length info, fall back to uniform sampling across contigs
+        let use_uniform = total_length == 0;
+        if use_uniform {
+            warn!("Contig lengths not available in VCF header, using uniform sampling");
+        }
+
+        let mut rng = rand::thread_rng();
+        let mut samples = Vec::with_capacity(sample_size);
+        let max_retries = sample_size * 3; // Avoid infinite loops
+        let mut attempts = 0;
+
+        let is_local = !self.path.starts_with("gs://")
+            && !self.path.starts_with("s3://")
+            && !self.path.starts_with("http");
+
+        // For local files, create and reuse an indexed reader for efficiency
+        let mut indexed_reader = if is_local {
+            Some(
+                vcf::io::indexed_reader::Builder::default()
+                    .set_index(index.clone())
+                    .build_from_path(&self.path)
+                    .map_err(HailError::Io)?
+            )
+        } else {
+            None
+        };
+
+        // Read header once if we have a reader
+        let reader_header = if let Some(ref mut reader) = indexed_reader {
+            Some(Arc::new(reader.read_header().map_err(HailError::Io)?))
+        } else {
+            None
+        };
+
+        // Progress bar for sampling
+        let pb = ProgressBar::new(sample_size as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} Sampling: [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        while samples.len() < sample_size && attempts < max_retries {
+            attempts += 1;
+
+            // Pick a random contig (weighted by length if available)
+            let (_contig_idx, contig, position) = if use_uniform {
+                let idx = rng.gen_range(0..self.contigs.len());
+                let contig = &self.contigs[idx];
+                // Use a default large position range since we don't know the length
+                let pos = rng.gen_range(1..250_000_000usize);
+                (idx, contig.clone(), pos)
+            } else {
+                // Weighted selection by contig length
+                let target = rng.gen_range(0..total_length);
+                let mut cumulative = 0usize;
+                let mut selected_idx = 0;
+                let mut selected_pos = 1;
+
+                for (idx, length_opt) in self.contig_lengths.iter().enumerate() {
+                    if let Some(length) = length_opt {
+                        if cumulative + length > target {
+                            selected_idx = idx;
+                            selected_pos = target - cumulative + 1; // 1-based position
+                            break;
+                        }
+                        cumulative += length;
+                    }
+                }
+
+                (selected_idx, self.contigs[selected_idx].clone(), selected_pos)
+            };
+
+            // Create a region around the selected position
+            // Use a moderate window - larger windows increase hit rate for exomes
+            // but we only fetch the first record so it's fast
+            use noodles::core::Position;
+            let window_size = 500_000; // 500kb window for good hit rate on exomes
+            let start = Position::try_from(position.saturating_sub(window_size / 2).max(1))
+                .unwrap_or(Position::MIN);
+            let end = Position::try_from(position + window_size / 2).unwrap_or(Position::MAX);
+            let region = Region::new(contig.clone(), start..=end);
+
+            // Query the region - use optimized single-record fetch
+            let query_result = if let (Some(ref mut reader), Some(ref header)) = (&mut indexed_reader, &reader_header) {
+                // Use pre-opened reader for efficiency
+                let query = reader.query(header, &region).map_err(HailError::Io)?;
+                if let Some(result) = query.into_iter().next() {
+                    let record = result.map_err(HailError::Io)?;
+                    super::codec::record_to_row_lazy(header, &record).map(Some)
+                } else {
+                    Ok(None)
+                }
+            } else {
+                // For remote files, still use the full query but take first
+                self.indexed_query_remote(&region, index, &[])
+                    .map(|mut iter| iter.next().and_then(|r| r.ok()))
+            };
+
+            match query_result {
+                Ok(Some(record)) => {
+                    samples.push(record);
+                    pb.inc(1);
+                    debug!(
+                        "Sampled variant {} from contig {} position ~{}",
+                        samples.len(),
+                        contig,
+                        position
+                    );
+                }
+                Ok(None) => {
+                    // If no record found, we just retry with a different position
+                }
+                Err(e) => {
+                    debug!("Query error for contig {} position {}: {}", contig, position, e);
+                    // Continue trying other positions
+                }
+            }
+        }
+
+        pb.finish_and_clear();
+
+        if samples.is_empty() {
+            return Err(HailError::Index(
+                "Failed to sample any variants from indexed VCF".to_string(),
+            ));
+        }
+
+        if samples.len() < sample_size {
+            warn!(
+                "Only sampled {} of {} requested variants after {} attempts",
+                samples.len(),
+                sample_size,
+                attempts
+            );
+        }
+
+        info!("Sampled {} random variants from indexed VCF", samples.len());
+        Ok(samples)
     }
 
     fn query_stream(
@@ -463,6 +746,7 @@ mod tests {
         let header: vcf::Header = "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
             .parse()
             .unwrap();
+        let (contigs, contig_lengths) = VcfDataSource::extract_contigs(&header);
         let schema = super::super::schema::extract_schema_from_header(&header).unwrap();
 
         let source = VcfDataSource {
@@ -471,6 +755,8 @@ mod tests {
             schema,
             index: None,
             is_bgzf: false,
+            contigs,
+            contig_lengths,
         };
 
         let ranges = vec![KeyRange {
@@ -481,5 +767,60 @@ mod tests {
 
         let region = source.ranges_to_region(&ranges);
         assert!(region.is_some());
+    }
+
+    #[test]
+    fn test_has_index() {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+            .parse()
+            .unwrap();
+        let (contigs, contig_lengths) = VcfDataSource::extract_contigs(&header);
+        let schema = super::super::schema::extract_schema_from_header(&header).unwrap();
+
+        // Unindexed VCF
+        let source = VcfDataSource {
+            path: "test.vcf".to_string(),
+            header: Arc::new(header.clone()),
+            schema: schema.clone(),
+            index: None,
+            is_bgzf: false,
+            contigs: contigs.clone(),
+            contig_lengths: contig_lengths.clone(),
+        };
+        assert!(!source.has_index());
+
+        // BGZF without index - still no random access
+        let source2 = VcfDataSource {
+            path: "test.vcf.gz".to_string(),
+            header: Arc::new(header),
+            schema,
+            index: None,
+            is_bgzf: true,
+            contigs,
+            contig_lengths,
+        };
+        assert!(!source2.has_index());
+    }
+
+    #[test]
+    fn test_num_partitions_unindexed() {
+        let header: vcf::Header = "##fileformat=VCFv4.3\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
+            .parse()
+            .unwrap();
+        let (contigs, contig_lengths) = VcfDataSource::extract_contigs(&header);
+        let schema = super::super::schema::extract_schema_from_header(&header).unwrap();
+
+        let source = VcfDataSource {
+            path: "test.vcf".to_string(),
+            header: Arc::new(header),
+            schema,
+            index: None,
+            is_bgzf: false,
+            contigs,
+            contig_lengths,
+        };
+
+        // Without index, should be single partition
+        assert_eq!(source.num_partitions(), 1);
     }
 }

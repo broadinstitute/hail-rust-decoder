@@ -72,7 +72,7 @@ clap = { version = "4.4", features = ["derive"] }
 owo-colors = "4"
 
 # VCF Support
-noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core"] }
+noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core", "csi"] }
 
 # Logging
 tracing = "0.1"
