@@ -698,15 +698,64 @@ impl DataSource for VcfDataSource {
         ranges: &[KeyRange],
         intervals: Option<Arc<IntervalList>>,
     ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
-        // Try indexed query if we have an index and can build a region
+        // Try indexed query if we have an index
         if let Some(index) = &self.index {
             if self.is_bgzf {
-                if let Some(region) = self.ranges_to_region(ranges) {
-                    // Check if this is a local file or remote
-                    let is_local = !self.path.starts_with("gs://")
-                        && !self.path.starts_with("s3://")
-                        && !self.path.starts_with("http");
+                // Check if this is a local file or remote
+                let is_local = !self.path.starts_with("gs://")
+                    && !self.path.starts_with("s3://")
+                    && !self.path.starts_with("http");
 
+                // If we have intervals, use tabix to query each interval directly
+                if let Some(ref interval_list) = intervals {
+                    info!(
+                        "Using tabix indexed query for {} intervals",
+                        interval_list.len()
+                    );
+
+                    // Collect all results from each interval using tabix
+                    let mut all_results: Vec<EncodedValue> = Vec::new();
+
+                    for contig in interval_list.contigs() {
+                        if let Some(ranges_for_contig) = interval_list.intervals_for_contig(contig) {
+                            for range in ranges_for_contig {
+                                let start = *range.start();
+                                let end = *range.end();
+
+                                // Build a region from the interval
+                                let start_pos = noodles::core::Position::try_from(start as usize).ok();
+                                let end_pos = noodles::core::Position::try_from(end as usize).ok();
+
+                                if let (Some(s), Some(e)) = (start_pos, end_pos) {
+                                    let region = Region::new(contig.as_str(), s..=e);
+
+                                    let iter_result = if is_local {
+                                        debug!("Tabix query for interval: {}:{}-{}", contig, start, end);
+                                        self.indexed_query_local(&region, index, ranges)
+                                    } else {
+                                        self.indexed_query_remote(&region, index, ranges)
+                                    };
+
+                                    if let Ok(iter) = iter_result {
+                                        for result in iter {
+                                            if let Ok(row) = result {
+                                                // Apply any additional --where filters
+                                                if ranges.is_empty() || row_matches_ranges(&row, ranges) {
+                                                    all_results.push(row);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return Ok(Box::new(all_results.into_iter().map(Ok)));
+                }
+
+                // No intervals, but try to build region from --where filters
+                if let Some(region) = self.ranges_to_region(ranges) {
                     let base_iter = if is_local {
                         info!("Using local indexed query for region: {:?}", region);
                         self.indexed_query_local(&region, index, ranges)?
@@ -715,14 +764,6 @@ impl DataSource for VcfDataSource {
                         self.indexed_query_remote(&region, index, ranges)?
                     };
 
-                    // Apply interval filtering if present
-                    if let Some(interval_list) = intervals {
-                        let filtered = base_iter.filter(move |result| match result {
-                            Ok(row) => row_matches_interval_list(row, &interval_list),
-                            Err(_) => true,
-                        });
-                        return Ok(Box::new(filtered));
-                    }
                     return Ok(base_iter);
                 }
             }

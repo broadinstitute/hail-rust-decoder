@@ -1063,7 +1063,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 /// Run the generate-schema command
 #[cfg(feature = "validation")]
 fn run_generate_schema(table_path: &str, output_path: Option<&str>) -> Result<()> {
-    println!("{} {}", "Generating JSON schema for:".green(), table_path.bright_white());
+    eprintln!("{} {}", "Generating JSON schema for:".green(), table_path.bright_white());
 
     // Open the table
     let engine = QueryEngine::open_path(table_path)?;
@@ -1080,10 +1080,9 @@ fn run_generate_schema(table_path: &str, output_path: Option<&str>) -> Result<()
     if let Some(path) = output_path {
         // Write to file
         SchemaGenerator::write_to_file(&schema, path)?;
-        println!("{} {}", "Schema written to:".green(), path.bright_white());
+        eprintln!("{} {}", "Schema written to:".green(), path.bright_white());
     } else {
         // Print to stdout
-        println!();
         println!("{}", serde_json::to_string_pretty(&schema)?);
     }
 

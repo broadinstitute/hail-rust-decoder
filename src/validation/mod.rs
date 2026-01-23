@@ -1159,14 +1159,18 @@ impl SchemaGenerator {
             }
             ParsedType::Struct(fields) => {
                 let mut properties = Map::new();
+                let mut required_fields = Vec::new();
 
                 for (name, field_type) in fields {
                     properties.insert(name.clone(), Self::type_to_schema(field_type));
+                    required_fields.push(Value::String(name.clone()));
                 }
 
                 json!({
                     "type": ["object", "null"],
-                    "properties": properties
+                    "properties": properties,
+                    "required": required_fields,
+                    "additionalProperties": false
                 })
             }
             ParsedType::Locus(rg) => {
