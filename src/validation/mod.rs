@@ -7,7 +7,7 @@
 use crate::query::QueryEngine;
 use crate::Result;
 use crate::HailError;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use jsonschema::Validator;
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
@@ -142,6 +142,88 @@ impl SchemaValidator {
         Ok(report)
     }
 
+    /// Validate rows using streaming iteration (memory efficient)
+    ///
+    /// For single-partition sources (like VCFs), validates first N rows
+    /// sequentially with early termination.
+    fn validate_streaming(
+        &self,
+        engine: &QueryEngine,
+        limit: Option<usize>,
+        fail_fast: bool,
+    ) -> Result<ValidationReport> {
+        let mut report = ValidationReport::default();
+        let max_errors = 10;
+
+        if limit.is_some() {
+            println!(
+                "Note: Single-partition source - validating first {} rows sequentially",
+                limit.unwrap()
+            );
+        } else {
+            println!("Streaming validation (single partition)...");
+        }
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap()
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        // Use streaming iterator with early termination
+        let iterator = engine.query_iter(&[])?;
+
+        for row_result in iterator {
+            // Check limit
+            if let Some(l) = limit {
+                if report.scanned_count >= l {
+                    break;
+                }
+            }
+
+            let row = row_result?;
+            report.scanned_count += 1;
+
+            if report.scanned_count % 100 == 0 {
+                pb.set_message(format!(
+                    "{} rows ({} ok, {} invalid)",
+                    report.scanned_count, report.valid_count, report.invalid_count
+                ));
+            }
+
+            // Serialize row to JSON value for validation
+            let json_val = serde_json::to_value(&row)?;
+
+            // Validate against schema
+            if self.validator.validate(&json_val).is_ok() {
+                report.valid_count += 1;
+            } else {
+                report.invalid_count += 1;
+
+                if report.errors.len() < max_errors {
+                    for err in self.validator.iter_errors(&json_val) {
+                        report.errors.push(format!(
+                            "Row {}: {} at path '{}'",
+                            report.scanned_count, err, err.instance_path
+                        ));
+                        if report.errors.len() >= max_errors {
+                            break;
+                        }
+                    }
+                }
+
+                if fail_fast {
+                    break;
+                }
+            }
+        }
+
+        pb.finish_and_clear();
+        Ok(report)
+    }
+
     /// Validate a random sample of rows from a query engine (parallel)
     ///
     /// # Arguments
@@ -159,13 +241,19 @@ impl SchemaValidator {
             return Ok(ValidationReport::default());
         }
 
+        // For single-partition sources (like VCFs), use streaming validation
+        // to avoid loading the entire file into memory
+        if num_partitions == 1 {
+            return self.validate_streaming(engine, Some(sample_size), fail_fast);
+        }
+
         // Sample from a reasonable number of partitions to balance coverage vs speed
-        // Use sqrt(sample_size) partitions, capped at available partitions and min 1
-        let partitions_to_sample = std::cmp::max(
-            1,
+        // Use sqrt(sample_size) partitions, capped at available partitions and sample_size
+        let partitions_to_sample = std::cmp::min(
+            sample_size,
             std::cmp::min(
                 num_partitions,
-                ((sample_size as f64).sqrt().ceil() as usize).max(10)
+                std::cmp::max(1, (sample_size as f64).sqrt().ceil() as usize)
             )
         );
 
@@ -179,11 +267,18 @@ impl SchemaValidator {
         // Calculate roughly how many rows to sample per partition
         let rows_per_partition = (sample_size / partitions_to_sample) + 1;
 
-        // Progress bar
+        // Get thread count for display
+        let num_threads = rayon::current_num_threads();
+
+        // Progress bar with informative prefix
+        println!(
+            "Sampling {} rows across {} partitions using {} threads...",
+            sample_size, partitions_to_sample, num_threads
+        );
         let pb = ProgressBar::new(partitions_to_sample as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({eta})")
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
                 .unwrap()
                 .progress_chars("#>-"),
         );
@@ -303,6 +398,282 @@ impl SchemaValidator {
                 }
             }
         }
+
+        Ok(final_report)
+    }
+
+    /// Validate a random sample of rows with verbose output (parallel)
+    ///
+    /// Shows progress in a fixed-height box with worker status lines.
+    pub fn validate_sample_verbose(
+        &self,
+        engine: &QueryEngine,
+        sample_size: usize,
+        fail_fast: bool,
+    ) -> Result<ValidationReport> {
+        use crate::codec::EncodedValue;
+        use std::sync::{Arc, Mutex};
+        use crossbeam_channel::{bounded, Sender};
+
+        let num_partitions = engine.num_partitions();
+        if num_partitions == 0 {
+            return Ok(ValidationReport::default());
+        }
+
+        // Sample from partitions
+        let partitions_to_sample = std::cmp::min(sample_size, num_partitions);
+
+        let mut partition_indices: Vec<usize> = (0..num_partitions).collect();
+        {
+            let mut rng = rand::thread_rng();
+            partition_indices.shuffle(&mut rng);
+        }
+        partition_indices.truncate(partitions_to_sample);
+
+        let num_threads = rayon::current_num_threads();
+        let key_fields = engine.key_fields().to_vec();
+
+        println!(
+            "Sampling {} rows across {} partitions using {} threads",
+            sample_size, partitions_to_sample, num_threads
+        );
+        if !key_fields.is_empty() {
+            println!("Key fields: {:?}", key_fields);
+        }
+        println!();
+
+        // Create multi-progress with fixed worker bars + summary bar
+        let mp = MultiProgress::new();
+
+        // Create fixed worker bars (one per thread)
+        let idle_style = ProgressStyle::with_template("  {msg}")
+            .unwrap();
+        let spinner_style = ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏");
+
+        let worker_bars: Vec<ProgressBar> = (0..num_threads)
+            .map(|i| {
+                let pb = mp.add(ProgressBar::new_spinner());
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("worker {} idle", i));
+                pb
+            })
+            .collect();
+        let worker_bars = Arc::new(worker_bars);
+
+        // Summary bar at the bottom
+        let summary_bar = mp.add(ProgressBar::new(partitions_to_sample as u64));
+        summary_bar.set_style(
+            ProgressStyle::with_template("{bar:40.green/dim} {pos}/{len} done | {msg}")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+        summary_bar.set_message("0 ok, 0 invalid");
+
+        // Shared counters
+        let valid_count = Arc::new(AtomicUsize::new(0));
+        let invalid_count = Arc::new(AtomicUsize::new(0));
+        let should_stop = Arc::new(AtomicBool::new(false));
+        let total_scanned = Arc::new(AtomicUsize::new(0));
+
+        // Results collector
+        let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Helper to extract key values from a row
+        fn extract_keys(row: &EncodedValue, key_fields: &[String]) -> String {
+            if key_fields.is_empty() {
+                return String::new();
+            }
+            if let EncodedValue::Struct(fields) = row {
+                let key_vals: Vec<String> = key_fields.iter().filter_map(|k| {
+                    fields.iter().find(|(name, _)| name == k).map(|(name, val)| {
+                        let val_str = match val {
+                            EncodedValue::Binary(b) => String::from_utf8_lossy(b).to_string(),
+                            EncodedValue::Int32(i) => i.to_string(),
+                            EncodedValue::Int64(i) => i.to_string(),
+                            EncodedValue::Float32(f) => f.to_string(),
+                            EncodedValue::Float64(f) => f.to_string(),
+                            EncodedValue::Boolean(b) => b.to_string(),
+                            EncodedValue::Null => "null".to_string(),
+                            EncodedValue::Struct(inner) => {
+                                let parts: Vec<String> = inner.iter().map(|(n, v)| {
+                                    let v_str = match v {
+                                        EncodedValue::Binary(b) => String::from_utf8_lossy(b).to_string(),
+                                        EncodedValue::Int32(i) => i.to_string(),
+                                        EncodedValue::Int64(i) => i.to_string(),
+                                        _ => format!("{:?}", v),
+                                    };
+                                    format!("{}={}", n, v_str)
+                                }).collect();
+                                format!("{{{}}}", parts.join(","))
+                            }
+                            _ => format!("{:?}", val),
+                        };
+                        format!("{}={}", name, val_str)
+                    })
+                }).collect();
+                key_vals.join(" ")
+            } else {
+                String::new()
+            }
+        }
+
+        // Process partitions in parallel
+        let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        partition_indices.par_iter().for_each(|&partition_idx| {
+            if should_stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            if total_scanned.load(Ordering::Relaxed) >= sample_size {
+                return;
+            }
+
+            // Get the actual thread's worker bar
+            let worker_id = rayon::current_thread_index().unwrap_or(0);
+            let pb = &worker_bars[worker_id];
+
+            pb.set_style(spinner_style.clone());
+            pb.enable_steady_tick(std::time::Duration::from_millis(80));
+            pb.set_message(format!("partition {:>4} reading...", partition_idx));
+
+            let rows = match engine.scan_partition(partition_idx, &[]) {
+                Ok(r) => r,
+                Err(e) => {
+                    pb.set_style(idle_style.clone());
+                    pb.set_message(format!("partition {:>4} ERROR: {}", partition_idx, e));
+                    summary_bar.inc(1);
+                    return;
+                }
+            };
+
+            if rows.is_empty() {
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("partition {:>4} (empty)", partition_idx));
+                summary_bar.inc(1);
+                return;
+            }
+
+            // Check limit
+            if total_scanned.fetch_add(1, Ordering::Relaxed) >= sample_size {
+                total_scanned.fetch_sub(1, Ordering::Relaxed);
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("worker {} idle", worker_id));
+                return;
+            }
+
+            pb.set_message(format!("partition {:>4} validating...", partition_idx));
+
+            // Randomly select one row
+            let row_idx = {
+                use rand::Rng;
+                rand::thread_rng().gen_range(0..rows.len())
+            };
+
+            let row = &rows[row_idx];
+            let key_str = extract_keys(row, &key_fields);
+            let key_display = if key_str.is_empty() {
+                format!("row {}", row_idx)
+            } else {
+                key_str
+            };
+
+            // Serialize to JSON
+            let json_val = match serde_json::to_value(row) {
+                Ok(v) => v,
+                Err(e) => {
+                    invalid_count.fetch_add(1, Ordering::Relaxed);
+                    let inv = invalid_count.load(Ordering::Relaxed);
+                    let val = valid_count.load(Ordering::Relaxed);
+                    summary_bar.set_message(format!("{} ok, {} invalid", val, inv));
+                    summary_bar.inc(1);
+                    pb.set_style(idle_style.clone());
+                    pb.set_message(format!("partition {:>4} ERROR: {}", partition_idx, e));
+                    return;
+                }
+            };
+
+            // Validate
+            if self.validator.validate(&json_val).is_ok() {
+                valid_count.fetch_add(1, Ordering::Relaxed);
+                let inv = invalid_count.load(Ordering::Relaxed);
+                let val = valid_count.load(Ordering::Relaxed);
+                summary_bar.set_message(format!("{} ok, {} invalid", val, inv));
+
+                results.lock().unwrap().push(format!(
+                    "  OK  partition {:>4}  {}",
+                    partition_idx, key_display
+                ));
+
+                // Show last validated key
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("OK  {}", key_display));
+            } else {
+                invalid_count.fetch_add(1, Ordering::Relaxed);
+                let inv = invalid_count.load(Ordering::Relaxed);
+                let val = valid_count.load(Ordering::Relaxed);
+                summary_bar.set_message(format!("{} ok, {} invalid", val, inv));
+
+                let errs: Vec<String> = self.validator
+                    .iter_errors(&json_val)
+                    .take(2)
+                    .map(|e| format!("{} at '{}'", e, e.instance_path))
+                    .collect();
+
+                let error_summary = if errs.len() == 1 {
+                    errs[0].clone()
+                } else if !errs.is_empty() {
+                    format!("{} (+{} more)", errs[0], errs.len() - 1)
+                } else {
+                    "unknown error".to_string()
+                };
+
+                results.lock().unwrap().push(format!(
+                    "  FAIL partition {:>4}  {}  [{}]",
+                    partition_idx, key_display, error_summary
+                ));
+
+                let mut err_lock = errors.lock().unwrap();
+                for err in errs {
+                    if err_lock.len() < 10 {
+                        err_lock.push(format!("Partition {}, Row {}: {}", partition_idx, row_idx, err));
+                    }
+                }
+
+                // Show last validated key with error
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("FAIL {}  [{}]", key_display, error_summary));
+
+                if fail_fast {
+                    should_stop.store(true, Ordering::Relaxed);
+                }
+            }
+
+            summary_bar.inc(1);
+        });
+
+        // Clear worker bars and summary
+        for pb in worker_bars.iter() {
+            pb.finish_and_clear();
+        }
+        summary_bar.finish_and_clear();
+
+        // Print collected results
+        println!("Results:");
+        for line in results.lock().unwrap().iter() {
+            println!("{}", line);
+        }
+        println!();
+
+        // Build final report
+        let final_report = ValidationReport {
+            scanned_count: total_scanned.load(Ordering::Relaxed),
+            valid_count: valid_count.load(Ordering::Relaxed),
+            invalid_count: invalid_count.load(Ordering::Relaxed),
+            errors: errors.lock().unwrap().clone(),
+        };
 
         Ok(final_report)
     }
@@ -586,10 +957,18 @@ impl SchemaGenerator {
                 })
             }
             ParsedType::Dict(value_type) => {
+                // Hail serializes Dict as array of {key, value} objects
                 let value_schema = Self::type_to_schema(value_type);
                 json!({
-                    "type": ["object", "null"],
-                    "additionalProperties": value_schema
+                    "type": ["array", "null"],
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key": {},
+                            "value": value_schema
+                        },
+                        "required": ["key", "value"]
+                    }
                 })
             }
             ParsedType::Struct(fields) => {
@@ -600,7 +979,7 @@ impl SchemaGenerator {
                 }
 
                 json!({
-                    "type": "object",
+                    "type": ["object", "null"],
                     "properties": properties
                 })
             }

@@ -55,6 +55,10 @@ rand = "0.8"
 # Progress bars
 indicatif = "0.17"
 
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+owo-colors = "4"
+
 # VCF Support
 noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core"] }
 
