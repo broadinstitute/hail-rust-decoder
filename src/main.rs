@@ -9,7 +9,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, QueryArgs};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, HasCommonExportArgs, QueryArgs};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -63,6 +63,21 @@ fn progress_style_spinner() -> ProgressStyle {
     ProgressStyle::default_spinner()
         .template("{spinner:.green} {msg}")
         .unwrap()
+}
+
+/// Parse where filters from any export args implementing HasCommonExportArgs.
+/// This enforces at compile time that all export targets have common args.
+fn parse_export_filters(args: &impl HasCommonExportArgs) -> Vec<KeyRange> {
+    let mut filters = Vec::new();
+    for clause in &args.common().where_clauses {
+        if let Some(range) = parse_where_condition(clause) {
+            filters.push(range);
+        } else {
+            eprintln!("{} Invalid --where format: {}", "Error:".red().bold(), clause);
+            std::process::exit(1);
+        }
+    }
+    filters
 }
 
 fn show_info(table_path: &str) -> Result<()> {
@@ -463,16 +478,7 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     use hail_decoder::parquet::{build_record_batch, ParquetWriter};
 
-    // Parse where filters
-    let mut where_filters: Vec<KeyRange> = Vec::new();
-    for clause in &args.common.where_clauses {
-        if let Some(range) = parse_where_condition(clause) {
-            where_filters.push(range);
-        } else {
-            eprintln!("{} Invalid --where format: {}", "Error:".red().bold(), clause);
-            std::process::exit(1);
-        }
-    }
+    let where_filters = parse_export_filters(&args);
 
     println!("{} {} {} {}", "Converting".green(), args.common.input.bright_white(), "to".green(), args.output.bright_white());
 
@@ -833,16 +839,7 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
     use hail_decoder::parquet::{build_record_batch, ParquetWriter};
     use uuid::Uuid;
 
-    // Parse where filters
-    let mut where_filters: Vec<KeyRange> = Vec::new();
-    for clause in &args.common.where_clauses {
-        if let Some(range) = parse_where_condition(clause) {
-            where_filters.push(range);
-        } else {
-            eprintln!("{} Invalid --where format: {}", "Error:".red().bold(), clause);
-            std::process::exit(1);
-        }
-    }
+    let where_filters = parse_export_filters(&args);
 
     println!("{} {}", "Exporting to ClickHouse:".green().bold(), args.common.input.bright_white());
     println!("  {} {}", "ClickHouse URL:".cyan(), args.url.bright_white());
@@ -983,16 +980,7 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
         )
     })?;
 
-    // Parse where filters
-    let mut where_filters: Vec<KeyRange> = Vec::new();
-    for clause in &args.common.where_clauses {
-        if let Some(range) = parse_where_condition(clause) {
-            where_filters.push(range);
-        } else {
-            eprintln!("{} Invalid --where format: {}", "Error:".red().bold(), clause);
-            std::process::exit(1);
-        }
-    }
+    let where_filters = parse_export_filters(&args);
 
     println!("{} {} {} {}:{}.{}",
         "Exporting".green().bold(),

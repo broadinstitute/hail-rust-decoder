@@ -60,7 +60,8 @@ pub enum ExportCommands {
 }
 
 /// Common arguments shared by all export commands.
-/// Use `#[command(flatten)]` to include these in export arg structs.
+/// Use `#[command(flatten)]` to include these in export arg structs,
+/// then implement `HasCommonExportArgs` for compile-time enforcement.
 #[derive(Args)]
 pub struct CommonExportArgs {
     /// Path to the Hail table
@@ -75,6 +76,12 @@ pub struct CommonExportArgs {
     pub limit: Option<usize>,
 }
 
+/// Trait that all export argument structs must implement.
+/// This enforces at compile time that all export targets have common args.
+pub trait HasCommonExportArgs {
+    fn common(&self) -> &CommonExportArgs;
+}
+
 #[derive(Args)]
 pub struct ExportParquetArgs {
     #[command(flatten)]
@@ -82,6 +89,12 @@ pub struct ExportParquetArgs {
 
     /// Output Parquet file path
     pub output: String,
+}
+
+impl HasCommonExportArgs for ExportParquetArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
 }
 
 #[cfg(feature = "validation")]
@@ -138,6 +151,13 @@ pub struct ExportClickhouseArgs {
     pub table: String,
 }
 
+#[cfg(feature = "clickhouse")]
+impl HasCommonExportArgs for ExportClickhouseArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
+}
+
 #[cfg(feature = "bigquery")]
 #[derive(Args)]
 pub struct ExportBigqueryArgs {
@@ -154,6 +174,13 @@ pub struct ExportBigqueryArgs {
     /// Directory for temporary parquet file
     #[arg(long, default_value = "/tmp")]
     pub temp_dir: String,
+}
+
+#[cfg(feature = "bigquery")]
+impl HasCommonExportArgs for ExportBigqueryArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
 }
 
 #[cfg(feature = "validation")]
