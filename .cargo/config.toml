@@ -1,0 +1,20 @@
+# Cargo configuration for improved build times across worktrees
+#
+# sccache: Caches compilation artifacts globally, enabling sharing between worktrees
+# without the file locking issues of a shared target directory.
+#
+# Note: mold linker is Linux-only (macOS Mach-O support was removed).
+# On macOS ARM64, Apple's default linker is quite fast.
+
+[build]
+rustc-wrapper = "sccache"
+
+# Linux x86_64: use mold for faster linking
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Linux ARM64: use mold for faster linking
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
