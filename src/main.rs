@@ -11,7 +11,7 @@ mod cli;
 use clap::Parser;
 use cli::{Cli, Commands, QueryArgs};
 #[cfg(feature = "validation")]
-use cli::ValidateArgs;
+use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(any(feature = "clickhouse", feature = "bigquery"))]
 use cli::ExportCommands;
 #[cfg(feature = "clickhouse")]
@@ -45,9 +45,10 @@ fn main() -> Result<()> {
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
         #[cfg(feature = "validation")]
-        Commands::Validate(args) => run_validate(args)?,
-        #[cfg(feature = "validation")]
-        Commands::GenerateSchema { table, output } => run_generate_schema(&table, output.as_deref())?,
+        Commands::Schema { command } => match command {
+            SchemaSubcommands::Validate(args) => run_validate(args)?,
+            SchemaSubcommands::Generate(args) => run_generate_schema(&args.table, args.output.as_deref())?,
+        },
     }
 
     Ok(())

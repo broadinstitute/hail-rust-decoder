@@ -52,17 +52,11 @@ pub enum Commands {
         command: ExportCommands,
     },
 
-    /// Validate table against JSON schema
+    /// Schema operations (validate, generate)
     #[cfg(feature = "validation")]
-    Validate(ValidateArgs),
-
-    /// Generate JSON schema from table
-    #[cfg(feature = "validation")]
-    GenerateSchema {
-        /// Path to the Hail table
-        table: String,
-        /// Output JSON schema file (stdout if not specified)
-        output: Option<String>,
+    Schema {
+        #[command(subcommand)]
+        command: SchemaSubcommands,
     },
 }
 
@@ -76,6 +70,25 @@ pub enum ExportCommands {
     /// Export to BigQuery
     #[cfg(feature = "bigquery")]
     Bigquery(ExportBigqueryArgs),
+}
+
+#[cfg(feature = "validation")]
+#[derive(Subcommand)]
+pub enum SchemaSubcommands {
+    /// Validate table against JSON schema
+    Validate(ValidateArgs),
+
+    /// Generate JSON schema from table
+    Generate(GenerateSchemaArgs),
+}
+
+#[cfg(feature = "validation")]
+#[derive(Args)]
+pub struct GenerateSchemaArgs {
+    /// Path to the Hail table
+    pub table: String,
+    /// Output JSON schema file (stdout if not specified)
+    pub output: Option<String>,
 }
 
 #[derive(Args)]
