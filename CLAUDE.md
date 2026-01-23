@@ -55,6 +55,8 @@ cargo build --features full
 - `schema generate` - Generate JSON schema from table
 - `export clickhouse` - Export to ClickHouse (requires `clickhouse` feature)
 - `export bigquery` - Export to BigQuery (requires `bigquery` feature)
+- `export vcf` - Export to VCF format (from MatrixTable-derived tables)
+- `export hail` - Export to Hail table format
 
 ## ClickHouse
 
