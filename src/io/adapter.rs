@@ -188,6 +188,7 @@ fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
         .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
 
     let (store, path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+        #[cfg(feature = "gcp")]
         "gs" => {
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
@@ -200,6 +201,7 @@ fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
 
             (Arc::new(gcs), ObjPath::from(path))
         }
+        #[cfg(feature = "aws")]
         "s3" => {
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
@@ -212,6 +214,7 @@ fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
 
             (Arc::new(s3), ObjPath::from(path))
         }
+        #[cfg(feature = "http")]
         "http" | "https" => {
             // For HTTP, use the HttpStore
             let http = object_store::http::HttpBuilder::new()
@@ -298,6 +301,7 @@ fn range_read_cloud(url_str: &str, offset: u64, length: usize) -> Result<Vec<u8>
         .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
 
     let (store, path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+        #[cfg(feature = "gcp")]
         "gs" => {
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
@@ -308,6 +312,7 @@ fn range_read_cloud(url_str: &str, offset: u64, length: usize) -> Result<Vec<u8>
                 .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
             (Arc::new(gcs), ObjPath::from(path))
         }
+        #[cfg(feature = "aws")]
         "s3" => {
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
@@ -318,6 +323,7 @@ fn range_read_cloud(url_str: &str, offset: u64, length: usize) -> Result<Vec<u8>
                 .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
             (Arc::new(s3), ObjPath::from(path))
         }
+        #[cfg(feature = "http")]
         "http" | "https" => {
             let http = object_store::http::HttpBuilder::new()
                 .with_url(url_str)
@@ -377,6 +383,7 @@ pub fn get_file_size(path: &str) -> Result<u64> {
             .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
 
         let (store, obj_path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+            #[cfg(feature = "gcp")]
             "gs" => {
                 let bucket = url.host_str()
                     .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
@@ -387,6 +394,7 @@ pub fn get_file_size(path: &str) -> Result<u64> {
                     .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
                 (Arc::new(gcs), ObjPath::from(path))
             }
+            #[cfg(feature = "aws")]
             "s3" => {
                 let bucket = url.host_str()
                     .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
@@ -397,6 +405,7 @@ pub fn get_file_size(path: &str) -> Result<u64> {
                     .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
                 (Arc::new(s3), ObjPath::from(path))
             }
+            #[cfg(feature = "http")]
             "http" | "https" => {
                 let http = object_store::http::HttpBuilder::new()
                     .with_url(path)

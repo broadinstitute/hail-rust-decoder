@@ -46,15 +46,18 @@ pub enum Commands {
     },
 
     /// Export to external databases
+    #[cfg(any(feature = "clickhouse", feature = "bigquery"))]
     Export {
         #[command(subcommand)]
         command: ExportCommands,
     },
 
     /// Validate table against JSON schema
+    #[cfg(feature = "validation")]
     Validate(ValidateArgs),
 
     /// Generate JSON schema from table
+    #[cfg(feature = "validation")]
     GenerateSchema {
         /// Path to the Hail table
         table: String,
@@ -63,13 +66,15 @@ pub enum Commands {
     },
 }
 
+#[cfg(any(feature = "clickhouse", feature = "bigquery"))]
 #[derive(Subcommand)]
 pub enum ExportCommands {
     /// Export to ClickHouse
+    #[cfg(feature = "clickhouse")]
     Clickhouse(ExportClickhouseArgs),
 
-    #[cfg(feature = "bigquery")]
     /// Export to BigQuery
+    #[cfg(feature = "bigquery")]
     Bigquery(ExportBigqueryArgs),
 }
 
@@ -95,6 +100,7 @@ pub struct QueryArgs {
     pub json: bool,
 }
 
+#[cfg(feature = "clickhouse")]
 #[derive(Args)]
 pub struct ExportClickhouseArgs {
     /// Path to the Hail table
@@ -141,6 +147,7 @@ pub struct ExportBigqueryArgs {
     pub temp_dir: String,
 }
 
+#[cfg(feature = "validation")]
 #[derive(Args)]
 pub struct ValidateArgs {
     /// Path to the Hail table

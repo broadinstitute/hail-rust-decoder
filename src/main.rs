@@ -9,11 +9,18 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportClickhouseArgs, QueryArgs, ValidateArgs};
+use cli::{Cli, Commands, QueryArgs};
+#[cfg(feature = "validation")]
+use cli::ValidateArgs;
+#[cfg(any(feature = "clickhouse", feature = "bigquery"))]
+use cli::ExportCommands;
+#[cfg(feature = "clickhouse")]
+use cli::ExportClickhouseArgs;
 use hail_decoder::codec::EncodedValue;
 use hail_decoder::io::{get_file_size, join_path};
 use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
 use hail_decoder::summary::{format_schema_clean, StatsAccumulator};
+#[cfg(feature = "validation")]
 use hail_decoder::validation::{SchemaGenerator, SchemaValidator};
 use hail_decoder::Result;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -30,12 +37,16 @@ fn main() -> Result<()> {
         Commands::Summary { path } => run_summary(&path)?,
         Commands::Query(args) => run_query(args)?,
         Commands::Convert { input, output } => convert(&input, &output)?,
+        #[cfg(any(feature = "clickhouse", feature = "bigquery"))]
         Commands::Export { command } => match command {
+            #[cfg(feature = "clickhouse")]
             ExportCommands::Clickhouse(args) => run_export_clickhouse(args)?,
             #[cfg(feature = "bigquery")]
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
+        #[cfg(feature = "validation")]
         Commands::Validate(args) => run_validate(args)?,
+        #[cfg(feature = "validation")]
         Commands::GenerateSchema { table, output } => run_generate_schema(&table, output.as_deref())?,
     }
 
@@ -668,6 +679,7 @@ fn run_summary(table_path: &str) -> Result<()> {
 }
 
 /// Run the validate command
+#[cfg(feature = "validation")]
 fn run_validate(args: ValidateArgs) -> Result<()> {
     // Validate that --limit and --sample aren't both specified
     if args.limit.is_some() && args.sample.is_some() {
@@ -722,6 +734,7 @@ fn run_validate(args: ValidateArgs) -> Result<()> {
 }
 
 /// Run the generate-schema command
+#[cfg(feature = "validation")]
 fn run_generate_schema(table_path: &str, output_path: Option<&str>) -> Result<()> {
     println!("{} {}", "Generating JSON schema for:".green(), table_path.bright_white());
 
@@ -751,6 +764,7 @@ fn run_generate_schema(table_path: &str, output_path: Option<&str>) -> Result<()
 }
 
 /// Export a Hail table to ClickHouse with optional filtering
+#[cfg(feature = "clickhouse")]
 fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
     use hail_decoder::export::clickhouse::generate_create_table;
     use hail_decoder::export::ClickHouseClient;
