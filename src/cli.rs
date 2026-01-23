@@ -16,37 +16,22 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Show basic table metadata
+    /// Show table metadata, keys, partition layout, and schema (fast)
     Info {
         /// Path to the Hail table or VCF file
         path: String,
     },
 
-    /// Show detailed table information including keys and index status
-    Inspect {
-        /// Path to the Hail table or VCF file
-        path: String,
-    },
-
-    /// Show comprehensive table summary with statistics
+    /// Scan full dataset to calculate row counts and field statistics (slow)
     Summary {
         /// Path to the Hail table
         path: String,
     },
 
-    /// Query the table with optional filters
+    /// Stream rows with optional filtering (lazy)
     Query(QueryArgs),
 
-    /// Convert to Parquet format
-    Convert {
-        /// Input Hail table path
-        input: String,
-        /// Output Parquet file path
-        output: String,
-    },
-
-    /// Export to external databases
-    #[cfg(any(feature = "clickhouse", feature = "bigquery"))]
+    /// Export data to other formats
     Export {
         #[command(subcommand)]
         command: ExportCommands,
@@ -60,9 +45,11 @@ pub enum Commands {
     },
 }
 
-#[cfg(any(feature = "clickhouse", feature = "bigquery"))]
 #[derive(Subcommand)]
 pub enum ExportCommands {
+    /// Convert to Parquet file
+    Parquet(ExportParquetArgs),
+
     /// Export to ClickHouse
     #[cfg(feature = "clickhouse")]
     Clickhouse(ExportClickhouseArgs),
@@ -70,6 +57,31 @@ pub enum ExportCommands {
     /// Export to BigQuery
     #[cfg(feature = "bigquery")]
     Bigquery(ExportBigqueryArgs),
+}
+
+/// Common arguments shared by all export commands.
+/// Use `#[command(flatten)]` to include these in export arg structs.
+#[derive(Args)]
+pub struct CommonExportArgs {
+    /// Path to the Hail table
+    pub input: String,
+
+    /// Filter conditions (field=value, field>value, field>=value, etc.)
+    #[arg(long = "where")]
+    pub where_clauses: Vec<String>,
+
+    /// Limit number of rows to export
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Args)]
+pub struct ExportParquetArgs {
+    #[command(flatten)]
+    pub common: CommonExportArgs,
+
+    /// Output Parquet file path
+    pub output: String,
 }
 
 #[cfg(feature = "validation")]
@@ -116,29 +128,21 @@ pub struct QueryArgs {
 #[cfg(feature = "clickhouse")]
 #[derive(Args)]
 pub struct ExportClickhouseArgs {
-    /// Path to the Hail table
-    pub input: String,
+    #[command(flatten)]
+    pub common: CommonExportArgs,
 
     /// ClickHouse URL (e.g., http://localhost:8123)
     pub url: String,
 
     /// Target table name in ClickHouse
     pub table: String,
-
-    /// Filter conditions (same as query command)
-    #[arg(long = "where")]
-    pub where_clauses: Vec<String>,
-
-    /// Limit number of rows to export
-    #[arg(long)]
-    pub limit: Option<usize>,
 }
 
 #[cfg(feature = "bigquery")]
 #[derive(Args)]
 pub struct ExportBigqueryArgs {
-    /// Path to the Hail table
-    pub input: String,
+    #[command(flatten)]
+    pub common: CommonExportArgs,
 
     /// BigQuery destination (project:dataset.table)
     pub destination: String,
@@ -146,14 +150,6 @@ pub struct ExportBigqueryArgs {
     /// GCS bucket for staging parquet file
     #[arg(long)]
     pub bucket: String,
-
-    /// Filter conditions (same as query command)
-    #[arg(long = "where")]
-    pub where_clauses: Vec<String>,
-
-    /// Limit number of rows to export
-    #[arg(long)]
-    pub limit: Option<usize>,
 
     /// Directory for temporary parquet file
     #[arg(long, default_value = "/tmp")]

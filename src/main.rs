@@ -1,19 +1,17 @@
 //! Hail decoder CLI tool
 //!
 //! Commands:
-//! - info: Show basic table metadata
-//! - inspect: Show detailed table information including keys and index status
-//! - query: Query a table with optional key filters
-//! - summary: Show comprehensive table summary with statistics
+//! - info: Show table metadata, keys, partition layout, and schema (fast)
+//! - query: Stream rows with optional filtering (lazy)
+//! - summary: Scan full dataset to calculate row counts and field statistics (slow)
+//! - export: Export data to other formats (Parquet, ClickHouse, BigQuery)
 
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Commands, QueryArgs};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, QueryArgs};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
-#[cfg(any(feature = "clickhouse", feature = "bigquery"))]
-use cli::ExportCommands;
 #[cfg(feature = "clickhouse")]
 use cli::ExportClickhouseArgs;
 use hail_decoder::codec::EncodedValue;
@@ -33,12 +31,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Info { path } => show_info(&path)?,
-        Commands::Inspect { path } => inspect_table(&path)?,
         Commands::Summary { path } => run_summary(&path)?,
         Commands::Query(args) => run_query(args)?,
-        Commands::Convert { input, output } => convert(&input, &output)?,
-        #[cfg(any(feature = "clickhouse", feature = "bigquery"))]
         Commands::Export { command } => match command {
+            ExportCommands::Parquet(args) => run_export_parquet(args)?,
             #[cfg(feature = "clickhouse")]
             ExportCommands::Clickhouse(args) => run_export_clickhouse(args)?,
             #[cfg(feature = "bigquery")]
@@ -76,39 +72,42 @@ fn show_info(table_path: &str) -> Result<()> {
         println!();
         println!("{} {}", "Path:".green(), table_path.bright_white());
         println!();
-        println!("Use 'inspect' command for detailed schema information.");
+
+        // Open using query engine to get schema info
+        let engine = QueryEngine::open_path(table_path)?;
+
+        println!("{} {}", "Contigs:".green(), engine.num_partitions().to_string().bright_white());
+        println!("{}", "Row Schema:".green());
+        println!("{:?}", engine.row_type());
         return Ok(());
     }
 
-    // Hail Table
+    // Hail Table - Read basic metadata first
     let metadata_path = hail_decoder::io::join_path(table_path, "metadata.json.gz");
 
-    let mut reader = hail_decoder::io::get_reader(&metadata_path)?;
-    let mut data = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut data)?;
-
-    let metadata = hail_decoder::schema::Metadata::from_gzipped_json(&data)?;
+    // Try reading metadata (might fail if not a hail table)
+    let metadata = match hail_decoder::io::get_reader(&metadata_path) {
+        Ok(mut reader) => {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut reader, &mut data)?;
+            hail_decoder::schema::Metadata::from_gzipped_json(&data)?
+        },
+        Err(_) => {
+            println!("{} Not a valid Hail table or VCF file", "Error:".red());
+            return Ok(());
+        }
+    };
 
     println!("{}", "Hail Table Information".bold().underline());
     println!();
+    println!("{} {}", "Path:".green(), table_path.bright_white());
     println!("{} {}", "Format version:".green(), metadata.file_version.bright_white());
     println!("{} {}", "Hail version:".green(), metadata.hail_version.bright_white());
     println!("{} {}", "References:".green(), metadata.references_rel_path.bright_white());
     println!();
-    println!("{}", "Full metadata:".green());
-    println!("{}", serde_json::to_string_pretty(&metadata)?);
 
-    Ok(())
-}
-
-fn inspect_table(table_path: &str) -> Result<()> {
-    // Open using query engine to support both Hail Tables and VCFs
+    // Open using query engine for structural inspection
     let engine = QueryEngine::open_path(table_path)?;
-
-    println!("{}", "Table Inspection".bold().underline());
-    println!();
-    println!("{} {}", "Path:".green(), table_path.bright_white());
-    println!();
 
     // Key information
     println!("{}", "Key Fields:".green());
@@ -131,7 +130,7 @@ fn inspect_table(table_path: &str) -> Result<()> {
     }
     println!();
 
-    // Hail-specific information if available
+    // Hail-specific structural information
     if let Some(rvd_spec) = engine.rvd_spec() {
         // Partition files
         if rvd_spec.part_files.len() <= 5 {
@@ -140,11 +139,11 @@ fn inspect_table(table_path: &str) -> Result<()> {
                 println!("  {}. {}", i.to_string().cyan(), part.dimmed());
             }
         } else {
-            println!("{}", "Partition Files:".green());
-            for (i, part) in rvd_spec.part_files.iter().take(3).enumerate() {
+            println!("{}", "Partition Files (first 5):".green());
+            for (i, part) in rvd_spec.part_files.iter().take(5).enumerate() {
                 println!("  {}. {}", i.to_string().cyan(), part.dimmed());
             }
-            println!("  {} ({} more)", "...".dimmed(), rvd_spec.part_files.len() - 3);
+            println!("  {} ({} more)", "...".dimmed(), rvd_spec.part_files.len() - 5);
         }
         println!();
 
@@ -156,23 +155,24 @@ fn inspect_table(table_path: &str) -> Result<()> {
             println!();
         }
 
-        // Partition bounds
-        println!("{}", "Partition Bounds:".green());
-        for (i, interval) in rvd_spec.range_bounds.iter().enumerate() {
+        // Partition bounds (sample)
+        println!("{}", "Partition Bounds (first 3):".green());
+        for (i, interval) in rvd_spec.range_bounds.iter().take(3).enumerate() {
             println!("  {} {}:", "Partition".cyan(), i);
-            println!("    {} {}", "Start:".dimmed(), serde_json::to_string(&interval.start)?);
-            println!("    {} {}", "End:".dimmed(), serde_json::to_string(&interval.end)?);
+            // Just show start/end JSON cleanly
+            let start = serde_json::to_string(&interval.start).unwrap_or_default();
+            let end = serde_json::to_string(&interval.end).unwrap_or_default();
+            println!("    {} .. {}", start.dimmed(), end.dimmed());
+        }
+        if rvd_spec.range_bounds.len() > 3 {
+            println!("    {}", "...".dimmed());
         }
         println!();
 
         // Codec information
         println!("{}", "Row Codec:".green());
-        println!("  {} {}", "EType:".cyan(), rvd_spec.codec_spec.e_type.dimmed());
-        println!("  {} {}", "VType:".cyan(), rvd_spec.codec_spec.v_type.dimmed());
-    } else {
-        // VCF or other source - show schema info
-        println!("{}", "Row Schema:".green());
-        println!("{:?}", engine.row_type());
+        // Clean format the VType
+        println!("{}", format_schema_clean(&rvd_spec.codec_spec.v_type));
     }
 
     Ok(())
@@ -460,28 +460,89 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
     }
 }
 
-fn convert(input: &str, output: &str) -> Result<()> {
-    use hail_decoder::parquet::{hail_to_parquet, ConversionMetadata};
+fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
 
-    println!("{} {} {} {}", "Converting".green(), input.bright_white(), "to".green(), output.bright_white());
+    // Parse where filters
+    let mut where_filters: Vec<KeyRange> = Vec::new();
+    for clause in &args.common.where_clauses {
+        if let Some(range) = parse_where_condition(clause) {
+            where_filters.push(range);
+        } else {
+            eprintln!("{} Invalid --where format: {}", "Error:".red().bold(), clause);
+            std::process::exit(1);
+        }
+    }
 
-    // Get metadata for display
-    let metadata = ConversionMetadata::from_path(input)?;
-    println!("{} {}", "Partitions:".cyan(), metadata.num_partitions.to_string().bright_white());
-    println!("{} {:?}", "Key fields:".cyan(), metadata.key_fields);
+    println!("{} {} {} {}", "Converting".green(), args.common.input.bright_white(), "to".green(), args.output.bright_white());
 
-    // Perform conversion with progress bar
-    let total_rows = hail_to_parquet(input, output)?;
+    // Open the query engine
+    let engine = QueryEngine::open_path(&args.common.input)?;
+    let row_type = engine.row_type().clone();
+    println!("{} {}", "Partitions:".cyan(), engine.num_partitions().to_string().bright_white());
+    println!("{} {:?}", "Key fields:".cyan(), engine.key_fields());
+    if !where_filters.is_empty() {
+        println!("{} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
+    }
+    if let Some(l) = args.common.limit {
+        println!("{} {}", "Row limit:".cyan(), l.to_string().bright_white());
+    }
+    println!();
+
+    // Create writer and get schema
+    let mut writer = ParquetWriter::new(&args.output, &row_type)?;
+    let arrow_schema = writer.schema().clone();
+
+    // Use streaming query with filters
+    let iterator = engine.query_iter(&where_filters)?;
+
+    // Apply limit if specified
+    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
+        Box::new(iterator.take(n))
+    } else {
+        Box::new(iterator)
+    };
+
+    // Collect rows in batches for efficient parquet writing
+    let batch_size = 10000;
+    let mut batch_rows = Vec::with_capacity(batch_size);
+    let mut total_rows = 0;
+
+    // Progress indicator
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(progress_style_spinner());
+
+    for row_result in iterator {
+        let row = row_result?;
+        batch_rows.push(row);
+        total_rows += 1;
+
+        if batch_rows.len() >= batch_size {
+            pb.set_message(format!("{} rows processed...", total_rows));
+            let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+            writer.write_batch(&batch)?;
+            batch_rows.clear();
+        }
+    }
+
+    // Write remaining rows
+    if !batch_rows.is_empty() {
+        let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+        writer.write_batch(&batch)?;
+    }
+
+    pb.finish_and_clear();
+    writer.close()?;
 
     // Print summary
-    let output_size = std::fs::metadata(output)
+    let output_size = std::fs::metadata(&args.output)
         .map(|m| format_bytes(m.len()))
         .unwrap_or_else(|_| "unknown".to_string());
 
     println!();
     println!("{}", "Conversion complete!".green().bold());
     println!("  {} {}", "Rows written:".cyan(), total_rows.to_string().bright_white());
-    println!("  {} {}", "Output file:".cyan(), output.bright_white());
+    println!("  {} {}", "Output file:".cyan(), args.output.bright_white());
     println!("  {} {}", "Output size:".cyan(), output_size.bright_white());
 
     Ok(())
@@ -774,7 +835,7 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
 
     // Parse where filters
     let mut where_filters: Vec<KeyRange> = Vec::new();
-    for clause in &args.where_clauses {
+    for clause in &args.common.where_clauses {
         if let Some(range) = parse_where_condition(clause) {
             where_filters.push(range);
         } else {
@@ -783,20 +844,20 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
         }
     }
 
-    println!("{} {}", "Exporting to ClickHouse:".green().bold(), args.input.bright_white());
+    println!("{} {}", "Exporting to ClickHouse:".green().bold(), args.common.input.bright_white());
     println!("  {} {}", "ClickHouse URL:".cyan(), args.url.bright_white());
     println!("  {} {}", "Target table:".cyan(), args.table.bright_white());
     if !where_filters.is_empty() {
         println!("  {} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
     }
-    if let Some(l) = args.limit {
+    if let Some(l) = args.common.limit {
         println!("  {} {}", "Row limit:".cyan(), l.to_string().bright_white());
     }
     println!();
 
     // Step 1: Open the query engine
     println!("{}", "Reading table metadata...".dimmed());
-    let engine = QueryEngine::open_path(&args.input)?;
+    let engine = QueryEngine::open_path(&args.common.input)?;
     let row_type = engine.row_type().clone();
     println!("  {} {}", "Partitions:".cyan(), engine.num_partitions().to_string().bright_white());
     println!("  {} {:?}", "Key fields:".cyan(), engine.key_fields());
@@ -835,7 +896,7 @@ fn run_export_clickhouse(args: ExportClickhouseArgs) -> Result<()> {
     let iterator = engine.query_iter(&where_filters)?;
 
     // Apply limit if specified
-    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.limit {
+    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
         Box::new(iterator.take(n))
     } else {
         Box::new(iterator)
@@ -924,7 +985,7 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
 
     // Parse where filters
     let mut where_filters: Vec<KeyRange> = Vec::new();
-    for clause in &args.where_clauses {
+    for clause in &args.common.where_clauses {
         if let Some(range) = parse_where_condition(clause) {
             where_filters.push(range);
         } else {
@@ -935,21 +996,21 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
 
     println!("{} {} {} {}:{}.{}",
         "Exporting".green().bold(),
-        args.input.bright_white(),
+        args.common.input.bright_white(),
         "to BigQuery".green(),
         project, dataset, table);
     println!("  {} {}", "Staging bucket:".cyan(), args.bucket.bright_white());
     if !where_filters.is_empty() {
         println!("  {} {:?}", "Filters:".cyan(), where_filters.iter().map(|r| r.field_path_str()).collect::<Vec<_>>());
     }
-    if let Some(l) = args.limit {
+    if let Some(l) = args.common.limit {
         println!("  {} {}", "Row limit:".cyan(), l.to_string().bright_white());
     }
     println!();
 
     // 1. Get Schema/Metadata
     println!("{}", "Reading table metadata...".dimmed());
-    let engine = QueryEngine::open_path(&args.input)?;
+    let engine = QueryEngine::open_path(&args.common.input)?;
     let row_type = engine.row_type().clone();
     println!("  {} {}", "Partitions:".cyan(), engine.num_partitions().to_string().bright_white());
     println!("  {} {:?}", "Key fields:".cyan(), engine.key_fields());
@@ -967,7 +1028,7 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
     let iterator = engine.query_iter(&where_filters)?;
 
     // Apply limit if specified
-    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.limit {
+    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
         Box::new(iterator.take(n))
     } else {
         Box::new(iterator)
