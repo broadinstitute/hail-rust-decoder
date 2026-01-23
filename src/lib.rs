@@ -39,6 +39,7 @@ pub mod buffer;
 pub mod codec;
 pub mod datasource;
 pub mod error;
+pub mod export;
 pub mod hail_adapter;
 pub mod index;
 pub mod io;
@@ -48,10 +49,6 @@ pub mod query;
 pub mod schema;
 pub mod summary;
 pub mod vcf;
-
-// Optional modules behind feature flags
-#[cfg(any(feature = "clickhouse", feature = "bigquery"))]
-pub mod export;
 
 #[cfg(feature = "validation")]
 pub mod validation;

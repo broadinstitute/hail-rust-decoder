@@ -50,6 +50,12 @@ pub enum ExportCommands {
     /// Convert to Parquet file
     Parquet(ExportParquetArgs),
 
+    /// Export to VCF file
+    Vcf(ExportVcfArgs),
+
+    /// Export to Hail Table format
+    Hail(ExportHailArgs),
+
     /// Export to ClickHouse
     #[cfg(feature = "clickhouse")]
     Clickhouse(ExportClickhouseArgs),
@@ -100,6 +106,40 @@ pub struct ExportParquetArgs {
 }
 
 impl HasCommonExportArgs for ExportParquetArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
+}
+
+#[derive(Args)]
+pub struct ExportVcfArgs {
+    #[command(flatten)]
+    pub common: CommonExportArgs,
+
+    /// Output VCF file path
+    pub output: String,
+
+    /// Compress output with BGZF
+    #[arg(long)]
+    pub bgzip: bool,
+}
+
+impl HasCommonExportArgs for ExportVcfArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
+}
+
+#[derive(Args)]
+pub struct ExportHailArgs {
+    #[command(flatten)]
+    pub common: CommonExportArgs,
+
+    /// Output Hail table directory path
+    pub output: String,
+}
+
+impl HasCommonExportArgs for ExportHailArgs {
     fn common(&self) -> &CommonExportArgs {
         &self.common
     }
