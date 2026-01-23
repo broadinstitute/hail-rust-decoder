@@ -198,6 +198,100 @@ impl SchemaValidator {
         Ok(report)
     }
 
+    /// Validate a collection of pre-sampled rows with verbose output
+    ///
+    /// Shows each row's validation result in real-time.
+    fn validate_rows_verbose(
+        &self,
+        rows: Vec<EncodedValue>,
+        fail_fast: bool,
+        key_fields: &[String],
+    ) -> Result<ValidationReport> {
+        let mut report = ValidationReport::default();
+        let max_errors = 10;
+
+        let pb = ProgressBar::new(rows.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} Validating: [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        for (idx, row) in rows.iter().enumerate() {
+            report.scanned_count += 1;
+
+            // Extract key for display - try locus for VCFs, fall back to key fields
+            let key_display = if let EncodedValue::Struct(fields) = &row {
+                // Try to get locus info (common for VCF/genomic data)
+                let locus = fields.iter().find(|(n, _)| n == "locus");
+                if let Some((_, EncodedValue::Struct(locus_fields))) = locus {
+                    let contig = locus_fields.iter().find(|(n, _)| n == "contig")
+                        .map(|(_, v)| match v {
+                            EncodedValue::Binary(b) => String::from_utf8_lossy(b).to_string(),
+                            _ => "?".to_string(),
+                        })
+                        .unwrap_or_default();
+                    let pos = locus_fields.iter().find(|(n, _)| n == "position")
+                        .map(|(_, v)| match v {
+                            EncodedValue::Int32(i) => i.to_string(),
+                            _ => "?".to_string(),
+                        })
+                        .unwrap_or_default();
+                    format!("{}:{}", contig, pos)
+                } else if !key_fields.is_empty() {
+                    // Fall back to key fields for Hail tables
+                    key_fields.iter()
+                        .filter_map(|k| fields.iter().find(|(n, _)| n == k))
+                        .map(|(_, v)| match v {
+                            EncodedValue::Binary(b) => String::from_utf8_lossy(b).to_string(),
+                            EncodedValue::Int32(i) => i.to_string(),
+                            _ => format!("{:?}", v),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(":")
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
+            // Serialize row to JSON value for validation
+            let json_val = serde_json::to_value(&row)?;
+
+            // Validate against schema
+            if self.validator.validate(&json_val).is_ok() {
+                report.valid_count += 1;
+                println!("  row {:>6} {} ok", idx, key_display);
+            } else {
+                report.invalid_count += 1;
+                println!("  row {:>6} {} INVALID", idx, key_display);
+
+                if report.errors.len() < max_errors {
+                    for err in self.validator.iter_errors(&json_val) {
+                        report.errors.push(format!(
+                            "Row {}: {} at path '{}'",
+                            idx, err, err.instance_path
+                        ));
+                        if report.errors.len() >= max_errors {
+                            break;
+                        }
+                    }
+                }
+
+                if fail_fast {
+                    break;
+                }
+            }
+
+            pb.inc(1);
+        }
+
+        pb.finish_and_clear();
+        Ok(report)
+    }
+
     /// Validate rows using streaming iteration (memory efficient)
     ///
     /// For single-partition sources (like VCFs), validates first N rows
@@ -483,11 +577,33 @@ impl SchemaValidator {
     ) -> Result<ValidationReport> {
         use crate::codec::EncodedValue;
         use std::sync::{Arc, Mutex};
-        use crossbeam_channel::{bounded, Sender};
 
         let num_partitions = engine.num_partitions();
         if num_partitions == 0 {
             return Ok(ValidationReport::default());
+        }
+
+        // Try optimized random sampling first (e.g., VCFs with tabix index)
+        // This is the same logic as validate_sample - both methods should use
+        // the optimized path when available
+        match engine.sample_random(sample_size) {
+            Ok(samples) => {
+                println!(
+                    "Using indexed random sampling ({} samples)...",
+                    samples.len()
+                );
+                return self.validate_rows_verbose(samples, fail_fast, engine.key_fields());
+            }
+            Err(_) => {
+                // Fall through to partition-based sampling
+            }
+        }
+
+        // For single-partition sources without optimized sampling,
+        // fall back to non-verbose streaming (verbose doesn't help for sequential)
+        if num_partitions == 1 {
+            println!("Note: Single-partition source - using sequential validation");
+            return self.validate_streaming(engine, Some(sample_size), fail_fast);
         }
 
         // Sample from partitions
