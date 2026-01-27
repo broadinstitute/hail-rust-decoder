@@ -6,8 +6,10 @@ use crate::parquet::{build_record_batch, ParquetWriter};
 use crate::query::QueryEngine;
 use crate::Result;
 use arrow::record_batch::RecordBatch;
+use crossbeam_channel;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use std::thread;
 
 /// Convert a Hail table to Parquet format.
 ///
@@ -71,6 +73,9 @@ impl Default for ConversionOptions {
 
 /// Convert a Hail table to Parquet format with full options.
 ///
+/// Uses a producer-consumer pattern with bounded channels for efficient parallelization.
+/// Worker threads process partitions in parallel and send batches to a dedicated writer thread.
+///
 /// # Arguments
 ///
 /// * `input_path` - Path to the input Hail table (local or cloud)
@@ -90,11 +95,13 @@ pub fn hail_to_parquet_with_options(
     // Open the query engine to read the table
     let engine = QueryEngine::open_path(input_path)?;
     let total_partitions = engine.num_partitions();
-    let num_partitions = max_partitions.map(|m| m.min(total_partitions)).unwrap_or(total_partitions);
+    let num_partitions = max_partitions
+        .map(|m| m.min(total_partitions))
+        .unwrap_or(total_partitions);
     let row_type = engine.row_type().clone();
 
-    // Create the Parquet writer to get the schema
-    let mut writer = ParquetWriter::new(output_path, &row_type)?;
+    // Create the Parquet writer to get the schema, then move to writer thread
+    let writer = ParquetWriter::new(output_path, &row_type)?;
     let arrow_schema = writer.schema().clone();
 
     // Setup progress bar if requested
@@ -111,35 +118,77 @@ pub fn hail_to_parquet_with_options(
         None
     };
 
-    // Parallel scan: each partition produces a RecordBatch
-    let batches: Vec<Result<RecordBatch>> = (0..num_partitions)
+    // Create a bounded channel - capacity 32 keeps writer busy without bloating memory
+    let (tx, rx) = crossbeam_channel::bounded::<Result<RecordBatch>>(32);
+
+    // Spawn the writer thread
+    let writer_handle = thread::spawn(move || -> Result<usize> {
+        let mut writer = writer;
+        let mut total_rows = 0;
+
+        // Receive and write batches from workers
+        for batch_result in rx {
+            let batch = batch_result?;
+            total_rows += batch.num_rows();
+            writer.write_batch(&batch)?;
+        }
+
+        // Close writer when all senders drop
+        writer.close()?;
+        Ok(total_rows)
+    });
+
+    // Run parallel workers using try_for_each_with
+    // This clones the sender per-thread, enabling true parallelism
+    let engine_ref = &engine;
+    let row_type_ref = &row_type;
+    let schema_ref = &arrow_schema;
+
+    let worker_result: Result<()> = (0..num_partitions)
         .into_par_iter()
-        .map(|i| {
-            let rows = engine.scan_partition(i, &[])?;
-            let batch = build_record_batch(&rows, &row_type, arrow_schema.clone())?;
+        .try_for_each_with(tx, |sender, i| -> Result<()> {
+            // Process partition
+            let rows = engine_ref.scan_partition(i, &[])?;
+
+            // Build Arrow batch
+            let batch = build_record_batch(&rows, row_type_ref, schema_ref.clone())?;
+
+            // Update progress
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
-            Ok(batch)
-        })
-        .collect();
 
-    if let Some(pb) = pb {
+            // Send to writer (blocks if channel full, providing backpressure)
+            if sender.send(Ok(batch)).is_err() {
+                // Writer thread died (likely due to write error)
+                return Err(crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Writer thread disconnected",
+                )));
+            }
+
+            Ok(())
+        });
+
+    if let Some(pb) = &pb {
         pb.finish_and_clear();
     }
 
-    // Write all batches sequentially (each becomes a row group)
-    let mut total_rows = 0;
-    for batch_result in batches {
-        let batch = batch_result?;
-        total_rows += batch.num_rows();
-        writer.write_batch(&batch)?;
+    // Handle results from workers and writer
+    match worker_result {
+        Ok(()) => {
+            // Workers finished successfully, wait for writer
+            match writer_handle.join() {
+                Ok(writer_res) => writer_res,
+                Err(e) => std::panic::resume_unwind(e),
+            }
+        }
+        Err(e) => {
+            // Workers failed. Wait for writer to clean up, then return worker error.
+            let _ = writer_handle.join();
+            Err(e)
+        }
     }
-
-    // Close the writer
-    writer.close()?;
-
-    Ok(total_rows)
 }
 
 /// Get metadata about the conversion without performing it.
