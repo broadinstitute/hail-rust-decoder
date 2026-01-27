@@ -20,7 +20,7 @@
 //! When output is a cloud path, each partition is buffered in memory and uploaded
 //! on completion, providing a truly diskless pipeline.
 
-use crate::io::{is_cloud_path, CloudWriter};
+use crate::io::{is_cloud_path, CloudWriter, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
 use crate::query::QueryEngine;
 use crate::Result;
@@ -260,7 +260,18 @@ pub fn hail_to_parquet_sharded(
     show_progress: bool,
     shard_count: Option<usize>,
 ) -> Result<usize> {
-    hail_to_parquet_sharded_with_metrics(input_path, output_dir, show_progress, shard_count, None, None)
+    hail_to_parquet_sharded_with_options(input_path, output_dir, show_progress, shard_count, false)
+}
+
+/// Convert a Hail table to a directory of Parquet files (sharded) with upload options.
+pub fn hail_to_parquet_sharded_with_options(
+    input_path: &str,
+    output_dir: &str,
+    show_progress: bool,
+    shard_count: Option<usize>,
+    buffered_upload: bool,
+) -> Result<usize> {
+    hail_to_parquet_sharded_with_metrics(input_path, output_dir, show_progress, shard_count, None, None, buffered_upload)
 }
 
 /// Convert a Hail table to a directory of Parquet files (sharded) with optional metrics.
@@ -273,6 +284,7 @@ pub fn hail_to_parquet_sharded_with_metrics(
     shard_count: Option<usize>,
     rows_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    buffered_upload: bool,
 ) -> Result<usize> {
     hail_to_parquet_sharded_full(
         input_path,
@@ -282,6 +294,7 @@ pub fn hail_to_parquet_sharded_with_metrics(
         rows_counter,
         partitions_counter,
         None,
+        buffered_upload,
     )
 }
 
@@ -302,6 +315,7 @@ pub fn hail_to_parquet_sharded_full(
     rows_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     row_size_stats: Option<std::sync::Arc<std::sync::Mutex<crate::benchmark::RowSizeStats>>>,
+    buffered_upload: bool,
 ) -> Result<usize> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -464,8 +478,8 @@ pub fn hail_to_parquet_sharded_full(
             }};
         }
 
-        if output_is_cloud {
-            // Cloud output: use CloudWriter
+        if output_is_cloud && buffered_upload {
+            // Cloud output with buffered upload: faster but uses more memory
             let cloud_writer = CloudWriter::new(&output_path)?;
             let writer = crate::parquet::ParquetWriter::from_writer(cloud_writer, row_type_ref)?;
             let arrow_schema = writer.schema().clone();
@@ -473,6 +487,17 @@ pub fn hail_to_parquet_sharded_full(
             let writer = process_partitions!(writer, arrow_schema);
 
             // Get the CloudWriter back and finish it (upload to cloud)
+            let cloud_writer = writer.into_inner()?;
+            cloud_writer.finish()?;
+        } else if output_is_cloud {
+            // Cloud output: use StreamingCloudWriter for background multipart upload (default)
+            let cloud_writer = StreamingCloudWriter::new(&output_path)?;
+            let writer = crate::parquet::ParquetWriter::from_writer(cloud_writer, row_type_ref)?;
+            let arrow_schema = writer.schema().clone();
+
+            let writer = process_partitions!(writer, arrow_schema);
+
+            // Get the StreamingCloudWriter back and finish it (complete multipart upload)
             let cloud_writer = writer.into_inner()?;
             cloud_writer.finish()?;
         } else {

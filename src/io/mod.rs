@@ -31,4 +31,4 @@ pub use adapter::{
     get_file_size, get_reader, is_cloud_path, join_path, range_read, read_single_block,
     BoxedReader, CloudReader, MmapReader, PrefetchingCloudReader,
 };
-pub use writer::{CloudWriter, OutputWriter};
+pub use writer::{CloudWriter, OutputWriter, StreamingCloudWriter};

@@ -1,24 +1,44 @@
 //! Cloud storage writer for streaming output to object stores
 //!
-//! This module provides `CloudWriter`, which implements `std::io::Write` and
-//! buffers data before uploading to cloud storage (GCS, S3).
+//! This module provides cloud storage writers implementing `std::io::Write`:
+//!
+//! - `CloudWriter` - Buffers entire file in memory, uploads on finish (simple, for <1GB files)
+//! - `StreamingCloudWriter` - Streams parts in background as data is written (for large files)
 //!
 //! ## Architecture
 //!
-//! For Parquet files (typically <1GB per partition), we buffer the entire file
-//! in memory and upload on `finish()`. This is simpler and more reliable than
-//! multipart uploads for files of this size.
+//! ### CloudWriter (Simple)
+//! ```text
+//! write() → [Memory Buffer] → finish() → [Single Upload]
+//! ```
+//! Good for files under ~1GB. Simple and reliable.
 //!
-//! For larger files or streaming use cases, consider using the multipart upload
-//! API directly with `object_store`'s `put_multipart`.
+//! ### StreamingCloudWriter (Background Pipeline)
+//! ```text
+//! write() → [8MB Buffer] → [Channel] → [Background Task] → [Multipart Upload]
+//!              sync          async        parallel upload
+//! ```
+//! Good for large files. Uploads happen in parallel with continued writing.
 
 use crate::io::adapter::IO_RUNTIME;
 use crate::{HailError, Result};
+use bytes::Bytes;
+use crossbeam_channel::{bounded, Sender};
 use object_store::path::Path as ObjPath;
-use object_store::ObjectStore;
+use object_store::{ObjectStore, WriteMultipart};
 use std::io::Write;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use url::Url;
+
+/// Minimum part size for multipart uploads (5MB for S3/GCS)
+const MIN_PART_SIZE: usize = 5 * 1024 * 1024;
+
+/// Default part size for streaming uploads (8MB)
+const DEFAULT_PART_SIZE: usize = 8 * 1024 * 1024;
+
+/// Number of parts to buffer in the channel before backpressure kicks in
+const UPLOAD_CHANNEL_CAPACITY: usize = 4;
 
 /// A writer that buffers data and uploads to cloud storage on finish
 ///
@@ -156,6 +176,242 @@ impl Write for CloudWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         // No-op: we flush everything on finish()
         Ok(())
+    }
+}
+
+/// A streaming cloud writer that uploads parts in the background
+///
+/// This writer uses multipart upload to stream data to cloud storage as it's
+/// written, rather than buffering the entire file in memory. A background task
+/// handles the actual uploads, allowing writes to continue in parallel.
+///
+/// ## Architecture
+///
+/// ```text
+/// ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
+/// │   write(data)   │      │  Bounded Channel │      │ Background Task │
+/// │       │         │      │   (4 parts max)  │      │                 │
+/// │       ▼         │      │                  │      │  for part in rx │
+/// │  [8MB buffer]   │─────►│  [part queue]    │─────►│    upload(part) │
+/// │       │         │      │                  │      │  end            │
+/// │  send(buffer)   │      │                  │      │  complete()     │
+/// └─────────────────┘      └─────────────────┘      └─────────────────┘
+/// ```
+///
+/// ## Usage
+///
+/// ```no_run
+/// use hail_decoder::io::StreamingCloudWriter;
+///
+/// let mut writer = StreamingCloudWriter::new("gs://bucket/large-file.parquet")?;
+/// // Write data in chunks - uploads happen in background
+/// writer.write_all(&data)?;
+/// // Finish uploads and complete the multipart upload
+/// writer.finish()?;
+/// # Ok::<(), hail_decoder::HailError>(())
+/// ```
+pub struct StreamingCloudWriter {
+    /// Channel to send completed parts to the upload task
+    part_tx: Option<Sender<Bytes>>,
+    /// Current buffer accumulating writes until it reaches part size
+    buffer: Vec<u8>,
+    /// Size threshold for sending a part
+    part_size: usize,
+    /// Handle to the background upload task
+    upload_handle: Option<JoinHandle<std::result::Result<(), String>>>,
+    /// Total bytes written (for reporting)
+    total_bytes: usize,
+}
+
+impl StreamingCloudWriter {
+    /// Create a new streaming cloud writer for the given URL
+    ///
+    /// Immediately starts a background task that will handle multipart uploads.
+    pub fn new(url_str: &str) -> Result<Self> {
+        Self::with_part_size(url_str, DEFAULT_PART_SIZE)
+    }
+
+    /// Create a streaming writer with a custom part size
+    ///
+    /// Part size must be at least 5MB (cloud provider minimum).
+    pub fn with_part_size(url_str: &str, part_size: usize) -> Result<Self> {
+        let part_size = part_size.max(MIN_PART_SIZE);
+
+        let url = Url::parse(url_str)
+            .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
+
+        let (store, path): (Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+            #[cfg(feature = "gcp")]
+            "gs" => {
+                let bucket = url.host_str()
+                    .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
+                let obj_path = url.path().trim_start_matches('/');
+
+                let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
+                    .with_bucket_name(bucket)
+                    .build()
+                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
+
+                (Arc::new(gcs), ObjPath::from(obj_path))
+            }
+            #[cfg(feature = "aws")]
+            "s3" => {
+                let bucket = url.host_str()
+                    .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
+                let obj_path = url.path().trim_start_matches('/');
+
+                let s3 = object_store::aws::AmazonS3Builder::new()
+                    .with_bucket_name(bucket)
+                    .build()
+                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
+
+                (Arc::new(s3), ObjPath::from(obj_path))
+            }
+            scheme => {
+                return Err(HailError::InvalidFormat(format!(
+                    "Unsupported URL scheme for streaming write: {}", scheme
+                )));
+            }
+        };
+
+        Self::from_store(store, path, part_size)
+    }
+
+    /// Create a streaming writer from an existing ObjectStore
+    pub fn from_store(store: Arc<dyn ObjectStore>, path: ObjPath, part_size: usize) -> Result<Self> {
+        let (part_tx, part_rx) = bounded::<Bytes>(UPLOAD_CHANNEL_CAPACITY);
+
+        // Start the multipart upload and spawn the background task
+        let path_clone = path.clone();
+        let upload_handle = std::thread::spawn(move || {
+            IO_RUNTIME.block_on(async move {
+                // Initialize multipart upload
+                let upload = store.put_multipart(&path_clone).await
+                    .map_err(|e| format!("Failed to initiate multipart upload: {}", e))?;
+
+                let mut writer = WriteMultipart::new(upload);
+
+                // Receive and upload parts
+                while let Ok(part_data) = part_rx.recv() {
+                    writer.write(&part_data);
+                }
+
+                // Complete the multipart upload
+                writer.finish().await
+                    .map_err(|e| format!("Failed to complete multipart upload: {}", e))?;
+
+                Ok(())
+            })
+        });
+
+        Ok(StreamingCloudWriter {
+            part_tx: Some(part_tx),
+            buffer: Vec::with_capacity(part_size),
+            part_size,
+            upload_handle: Some(upload_handle),
+            total_bytes: 0,
+        })
+    }
+
+    /// Send the current buffer as a part if it's large enough
+    fn maybe_send_part(&mut self) -> std::io::Result<()> {
+        if self.buffer.len() >= self.part_size {
+            self.send_current_buffer()?;
+        }
+        Ok(())
+    }
+
+    /// Send the current buffer as a part (regardless of size)
+    fn send_current_buffer(&mut self) -> std::io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+
+        let part_data = std::mem::replace(&mut self.buffer, Vec::with_capacity(self.part_size));
+        let part_size = part_data.len();
+
+        if let Some(ref tx) = self.part_tx {
+            tx.send(Bytes::from(part_data)).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    format!("Upload task disconnected: {}", e),
+                )
+            })?;
+            tracing::trace!("StreamingCloudWriter: sent part of {} bytes", part_size);
+        }
+
+        Ok(())
+    }
+
+    /// Finish writing and complete the multipart upload
+    ///
+    /// This sends any remaining buffered data and waits for the background
+    /// upload task to complete.
+    ///
+    /// # Returns
+    /// The total number of bytes uploaded.
+    pub fn finish(mut self) -> Result<usize> {
+        // Send any remaining data
+        self.send_current_buffer().map_err(HailError::Io)?;
+
+        // Drop the sender to signal completion to the upload task
+        self.part_tx = None;
+
+        // Wait for the upload task to finish
+        if let Some(handle) = self.upload_handle.take() {
+            match handle.join() {
+                Ok(Ok(())) => {
+                    tracing::trace!("StreamingCloudWriter: upload complete, {} bytes total", self.total_bytes);
+                }
+                Ok(Err(e)) => {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Upload failed: {}", e),
+                    )));
+                }
+                Err(_) => {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Upload task panicked",
+                    )));
+                }
+            }
+        }
+
+        Ok(self.total_bytes)
+    }
+
+    /// Get the total bytes written so far
+    pub fn bytes_written(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+impl Write for StreamingCloudWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        self.total_bytes += buf.len();
+        self.maybe_send_part()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Don't send partial parts on flush - only on finish or when buffer is full
+        Ok(())
+    }
+}
+
+impl Drop for StreamingCloudWriter {
+    fn drop(&mut self) {
+        // If we're being dropped without finish() being called, try to clean up gracefully
+        if self.part_tx.is_some() {
+            // Drop the sender to signal the upload task to stop
+            self.part_tx = None;
+            // Wait briefly for the task to finish
+            if let Some(handle) = self.upload_handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 }
 
