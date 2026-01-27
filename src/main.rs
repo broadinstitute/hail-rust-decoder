@@ -562,14 +562,14 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 }
 
 fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
-    use hail_decoder::parquet::{build_record_batch, ParquetWriter};
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter, hail_to_parquet_with_options};
 
     let where_filters = parse_export_filters(&args);
     let intervals = parse_export_intervals(&args)?;
 
     println!("{} {} {} {}", "Converting".green(), args.common.input.bright_white(), "to".green(), args.output.bright_white());
 
-    // Open the query engine
+    // Open the query engine to get metadata
     let engine = QueryEngine::open_path(&args.common.input)?;
     let row_type = engine.row_type().clone();
     println!("{} {}", "Partitions:".cyan(), engine.num_partitions().to_string().bright_white());
@@ -585,50 +585,66 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     }
     println!();
 
-    // Create writer and get schema
-    let mut writer = ParquetWriter::new(&args.output, &row_type)?;
-    let arrow_schema = writer.schema().clone();
+    // Use parallel converter for full table exports (no filters/intervals/limit)
+    // This uses producer-consumer pattern with all CPU cores
+    let can_use_parallel = where_filters.is_empty()
+        && intervals.is_none()
+        && args.common.limit.is_none();
 
-    // Use streaming query with filters and intervals
-    let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
-
-    // Apply limit if specified
-    let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
-        Box::new(iterator.take(n))
+    let total_rows = if can_use_parallel {
+        println!("{}", "Using parallel export (all CPU cores)...".dimmed());
+        drop(engine); // Close engine so converter can open its own
+        hail_to_parquet_with_options(&args.common.input, &args.output, true, None)?
     } else {
-        Box::new(iterator)
-    };
+        // Fall back to sequential streaming for filtered exports
+        println!("{}", "Using sequential export (filtered)...".dimmed());
 
-    // Collect rows in batches for efficient parquet writing
-    let batch_size = 10000;
-    let mut batch_rows = Vec::with_capacity(batch_size);
-    let mut total_rows = 0;
+        // Create writer and get schema
+        let mut writer = ParquetWriter::new(&args.output, &row_type)?;
+        let arrow_schema = writer.schema().clone();
 
-    // Progress indicator
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(progress_style_spinner());
+        // Use streaming query with filters and intervals
+        let iterator = engine.query_iter_with_intervals(&where_filters, intervals)?;
 
-    for row_result in iterator {
-        let row = row_result?;
-        batch_rows.push(row);
-        total_rows += 1;
+        // Apply limit if specified
+        let iterator: Box<dyn Iterator<Item = _>> = if let Some(n) = args.common.limit {
+            Box::new(iterator.take(n))
+        } else {
+            Box::new(iterator)
+        };
 
-        if batch_rows.len() >= batch_size {
-            pb.set_message(format!("{} rows processed...", total_rows));
+        // Collect rows in batches for efficient parquet writing
+        let batch_size = 10000;
+        let mut batch_rows = Vec::with_capacity(batch_size);
+        let mut total_rows = 0;
+
+        // Progress indicator
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(progress_style_spinner());
+
+        for row_result in iterator {
+            let row = row_result?;
+            batch_rows.push(row);
+            total_rows += 1;
+
+            if batch_rows.len() >= batch_size {
+                pb.set_message(format!("{} rows processed...", total_rows));
+                let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+                writer.write_batch(&batch)?;
+                batch_rows.clear();
+            }
+        }
+
+        // Write remaining rows
+        if !batch_rows.is_empty() {
             let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
             writer.write_batch(&batch)?;
-            batch_rows.clear();
         }
-    }
 
-    // Write remaining rows
-    if !batch_rows.is_empty() {
-        let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
-        writer.write_batch(&batch)?;
-    }
-
-    pb.finish_and_clear();
-    writer.close()?;
+        pb.finish_and_clear();
+        writer.close()?;
+        total_rows
+    };
 
     // Print summary
     let output_size = std::fs::metadata(&args.output)
