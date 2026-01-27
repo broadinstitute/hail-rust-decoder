@@ -67,6 +67,7 @@ impl ParquetWriter {
 
         let props = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::ZSTD(Default::default()))
+            .set_max_row_group_size(100_000) // Flush every 100K rows to limit memory
             .build();
 
         let writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props))?;

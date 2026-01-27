@@ -18,12 +18,13 @@ http = ["object_store/http"]
 validation = ["dep:jsonschema"]
 clickhouse = ["dep:reqwest"]
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
+benchmark = ["dep:sysinfo"]
 
 # HTTP server binary
 server = ["dep:axum", "dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
 
 # All features
-full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server"]
+full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", "benchmark"]
 
 [dependencies]
 # Compression
@@ -100,6 +101,9 @@ axum-extra = { version = "0.9", features = ["query"], optional = true }
 tower-http = { version = "0.5", features = ["cors", "fs"], optional = true }
 async-stream = { version = "0.3", optional = true }
 tokio-stream = { version = "0.1", optional = true }
+
+# System metrics (benchmark feature)
+sysinfo = { version = "0.32", optional = true }
 
 [[bin]]
 name = "hail-server"

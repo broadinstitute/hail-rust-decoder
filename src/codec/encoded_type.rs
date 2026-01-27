@@ -298,6 +298,110 @@ impl EncodedValue {
             _ => None,
         }
     }
+
+    /// Estimate the in-memory size of this value in bytes.
+    ///
+    /// This provides a rough estimate of how much memory the decoded value occupies.
+    /// Useful for benchmarking and understanding row sizes.
+    pub fn estimated_size_bytes(&self) -> usize {
+        match self {
+            EncodedValue::Null => 0,
+            EncodedValue::Boolean(_) => 1,
+            EncodedValue::Int32(_) => 4,
+            EncodedValue::Int64(_) => 8,
+            EncodedValue::Float32(_) => 4,
+            EncodedValue::Float64(_) => 8,
+            EncodedValue::Binary(bytes) => bytes.len() + std::mem::size_of::<Vec<u8>>(),
+            EncodedValue::Array(elements) => {
+                let header = std::mem::size_of::<Vec<EncodedValue>>();
+                let content: usize = elements.iter().map(|e| e.estimated_size_bytes()).sum();
+                header + content
+            }
+            EncodedValue::Struct(fields) => {
+                let header = std::mem::size_of::<Vec<(String, EncodedValue)>>();
+                let content: usize = fields.iter().map(|(name, value)| {
+                    // String has header + chars, plus the value
+                    std::mem::size_of::<String>() + name.len() + value.estimated_size_bytes()
+                }).sum();
+                header + content
+            }
+        }
+    }
+
+    /// Count the number of fields recursively (for schema complexity metrics).
+    ///
+    /// Returns (total_fields, max_depth, array_count)
+    pub fn schema_stats(&self) -> (usize, usize, usize) {
+        match self {
+            EncodedValue::Null
+            | EncodedValue::Boolean(_)
+            | EncodedValue::Int32(_)
+            | EncodedValue::Int64(_)
+            | EncodedValue::Float32(_)
+            | EncodedValue::Float64(_)
+            | EncodedValue::Binary(_) => (1, 1, 0),
+            EncodedValue::Array(elements) => {
+                if elements.is_empty() {
+                    (1, 1, 1)
+                } else {
+                    // Sample first element for stats
+                    let (fields, depth, arrays) = elements[0].schema_stats();
+                    (fields, depth + 1, arrays + 1)
+                }
+            }
+            EncodedValue::Struct(fields) => {
+                let mut total_fields = 0;
+                let mut max_depth = 0;
+                let mut array_count = 0;
+                for (_, value) in fields {
+                    let (f, d, a) = value.schema_stats();
+                    total_fields += f;
+                    max_depth = max_depth.max(d);
+                    array_count += a;
+                }
+                (total_fields, max_depth + 1, array_count)
+            }
+        }
+    }
+
+    /// Get the size contribution of each top-level field.
+    ///
+    /// Returns a vector of (field_name, size_bytes, type_description).
+    /// For nested structs, shows the total size of that field including all children.
+    pub fn field_sizes(&self) -> Vec<(String, usize, String)> {
+        match self {
+            EncodedValue::Struct(fields) => {
+                fields.iter().map(|(name, value)| {
+                    let size = value.estimated_size_bytes();
+                    let type_desc = value.type_description();
+                    (name.clone(), size, type_desc)
+                }).collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    /// Get a human-readable type description for this value.
+    pub fn type_description(&self) -> String {
+        match self {
+            EncodedValue::Null => "null".to_string(),
+            EncodedValue::Boolean(_) => "bool".to_string(),
+            EncodedValue::Int32(_) => "int32".to_string(),
+            EncodedValue::Int64(_) => "int64".to_string(),
+            EncodedValue::Float32(_) => "float32".to_string(),
+            EncodedValue::Float64(_) => "float64".to_string(),
+            EncodedValue::Binary(b) => format!("string[{}]", b.len()),
+            EncodedValue::Array(elements) => {
+                let inner = elements.first()
+                    .map(|e| e.type_description())
+                    .unwrap_or_else(|| "?".to_string());
+                format!("array<{}>[{}]", inner, elements.len())
+            }
+            EncodedValue::Struct(fields) => {
+                format!("struct[{}]", fields.len())
+            }
+        }
+    }
 }
 
 impl Serialize for EncodedValue {

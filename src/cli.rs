@@ -101,8 +101,20 @@ pub struct ExportParquetArgs {
     #[command(flatten)]
     pub common: CommonExportArgs,
 
-    /// Output Parquet file path
+    /// Output Parquet file path (or directory if --per-partition or --shard-count is used)
     pub output: String,
+
+    /// Write each partition to a separate file in the output directory
+    #[arg(long)]
+    pub per_partition: bool,
+
+    /// Write output as a directory of N Parquet files (groups partitions)
+    #[arg(long, conflicts_with = "per_partition")]
+    pub shard_count: Option<usize>,
+
+    /// Collect and display system metrics during export (CPU, memory, I/O)
+    #[arg(long)]
+    pub benchmark: bool,
 }
 
 impl HasCommonExportArgs for ExportParquetArgs {

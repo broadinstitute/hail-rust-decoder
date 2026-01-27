@@ -29,6 +29,7 @@ cargo build --bin hail-server --features server
 | `clickhouse` | `export clickhouse` command | No |
 | `bigquery` | `export bigquery` command (requires gcp) | No |
 | `server` | `hail-server` HTTP binary | No |
+| `benchmark` | `--benchmark` flag for parquet export (CPU/mem/IO metrics) | No |
 | `full` | All features | No |
 
 ### Examples

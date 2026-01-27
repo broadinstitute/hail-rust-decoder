@@ -118,8 +118,13 @@ pub fn hail_to_parquet_with_options(
         None
     };
 
-    // Create a bounded channel - capacity 32 keeps writer busy without bloating memory
-    let (tx, rx) = crossbeam_channel::bounded::<Result<RecordBatch>>(32);
+    // Create a bounded channel - with streaming batches (4096 rows each), we can buffer more
+    // This allows workers to stay busy while writer catches up
+    let channel_capacity = std::env::var("HAIL_DECODER_CHANNEL_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256);
+    let (tx, rx) = crossbeam_channel::bounded::<Result<RecordBatch>>(channel_capacity);
 
     // Spawn the writer thread
     let writer_handle = thread::spawn(move || -> Result<usize> {
@@ -213,6 +218,220 @@ pub fn hail_to_parquet_with_options(
             Err(e)
         }
     }
+}
+
+/// Convert a Hail table to a directory of Parquet files (sharded).
+///
+/// This function uses true parallel writes - each shard gets its own writer thread,
+/// eliminating the single-writer bottleneck of the channel-based approach.
+///
+/// # Arguments
+///
+/// * `input_path` - Path to the input Hail table (local or cloud)
+/// * `output_dir` - Path for the output directory containing Parquet files
+/// * `show_progress` - Whether to display progress bar
+/// * `shard_count` - Number of output files (None = one file per partition)
+///
+/// # Returns
+///
+/// The total number of rows written across all shards.
+pub fn hail_to_parquet_sharded(
+    input_path: &str,
+    output_dir: &str,
+    show_progress: bool,
+    shard_count: Option<usize>,
+) -> Result<usize> {
+    hail_to_parquet_sharded_with_metrics(input_path, output_dir, show_progress, shard_count, None, None)
+}
+
+/// Convert a Hail table to a directory of Parquet files (sharded) with optional metrics.
+///
+/// Same as `hail_to_parquet_sharded` but accepts atomic counters for benchmark metrics.
+pub fn hail_to_parquet_sharded_with_metrics(
+    input_path: &str,
+    output_dir: &str,
+    show_progress: bool,
+    shard_count: Option<usize>,
+    rows_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+) -> Result<usize> {
+    hail_to_parquet_sharded_full(
+        input_path,
+        output_dir,
+        show_progress,
+        shard_count,
+        rows_counter,
+        partitions_counter,
+        None,
+    )
+}
+
+/// Convert a Hail table to a directory of Parquet files (sharded) with full metrics.
+///
+/// Includes row size sampling for detailed benchmark reports.
+pub fn hail_to_parquet_sharded_full(
+    input_path: &str,
+    output_dir: &str,
+    show_progress: bool,
+    shard_count: Option<usize>,
+    rows_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    row_size_stats: Option<std::sync::Arc<std::sync::Mutex<crate::benchmark::RowSizeStats>>>,
+) -> Result<usize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Create output directory
+    std::fs::create_dir_all(output_dir)?;
+
+    // Open the query engine to read the table
+    let engine = QueryEngine::open_path(input_path)?;
+    let total_partitions = engine.num_partitions();
+    let row_type = engine.row_type().clone();
+
+    // Determine number of shards
+    let num_shards = shard_count.unwrap_or(total_partitions);
+    if num_shards == 0 {
+        return Ok(0);
+    }
+
+    // Setup progress bar tracking partitions (not shards) for better granularity
+    let pb = if show_progress {
+        let pb = ProgressBar::new(total_partitions as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({elapsed} elapsed, {eta} remaining)")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Total rows counter (atomic for thread-safety)
+    let total_rows = AtomicUsize::new(0);
+
+    // Batch size for streaming
+    const BATCH_SIZE: usize = 4096;
+
+    // Pre-calculate partition assignments for each shard
+    // This distributes partitions as evenly as possible across shards
+    let partitions_per_shard: Vec<Vec<usize>> = (0..num_shards)
+        .map(|shard_id| {
+            (0..total_partitions)
+                .filter(|p| p % num_shards == shard_id)
+                .collect()
+        })
+        .collect();
+
+    // References for closures
+    let engine_ref = &engine;
+    let row_type_ref = &row_type;
+    let output_dir_ref = output_dir;
+    let total_rows_ref = &total_rows;
+    let pb_ref = &pb;
+    let rows_counter_ref = &rows_counter;
+    let partitions_counter_ref = &partitions_counter;
+    let row_size_stats_ref = &row_size_stats;
+
+    // Row sampling interval (sample 1 in every N rows)
+    const ROW_SAMPLE_INTERVAL: usize = 1000;
+
+    // Process shards in parallel
+    let result: Result<()> = (0..num_shards).into_par_iter().try_for_each(|shard_id| {
+        let assigned_partitions = &partitions_per_shard[shard_id];
+
+        // Skip empty shards (more shards than partitions)
+        if assigned_partitions.is_empty() {
+            return Ok(());
+        }
+
+        // Create output file for this shard
+        let output_path = format!("{}/part-{:05}.parquet", output_dir_ref, shard_id);
+        let mut writer = crate::parquet::ParquetWriter::new(&output_path, row_type_ref)?;
+        let arrow_schema = writer.schema().clone();
+
+        let mut shard_rows = 0;
+        let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
+        let mut sample_counter = 0usize;
+        let mut first_row_sampled = false;
+
+        // Process all assigned partitions
+        for &partition_idx in assigned_partitions {
+            let iter = engine_ref.scan_partition_iter(partition_idx, &[])?;
+
+            for row_result in iter {
+                let row = row_result?;
+
+                // Sample row sizes periodically
+                if let Some(ref stats_arc) = row_size_stats_ref {
+                    sample_counter += 1;
+                    if sample_counter % ROW_SAMPLE_INTERVAL == 0 || !first_row_sampled {
+                        let size = row.estimated_size_bytes();
+                        let schema_stats = if !first_row_sampled {
+                            first_row_sampled = true;
+                            Some(row.schema_stats())
+                        } else {
+                            None
+                        };
+                        // Get per-field sizes
+                        let field_sizes = row.field_sizes();
+                        if let Ok(mut stats) = stats_arc.lock() {
+                            stats.add_sample(size, schema_stats);
+                            stats.add_field_samples(field_sizes);
+                        }
+                    }
+                }
+
+                batch_rows.push(row);
+
+                if batch_rows.len() >= BATCH_SIZE {
+                    let batch = build_record_batch(&batch_rows, row_type_ref, arrow_schema.clone())?;
+                    writer.write_batch(&batch)?;
+                    shard_rows += batch_rows.len();
+
+                    // Update benchmark metrics counter
+                    if let Some(ref counter) = rows_counter_ref {
+                        counter.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                    }
+
+                    batch_rows.clear();
+                }
+            }
+
+            // Update progress after each partition completes
+            if let Some(ref pb) = pb_ref {
+                pb.inc(1);
+            }
+            if let Some(ref counter) = partitions_counter_ref {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Write remaining rows
+        if !batch_rows.is_empty() {
+            let batch = build_record_batch(&batch_rows, row_type_ref, arrow_schema.clone())?;
+            writer.write_batch(&batch)?;
+            shard_rows += batch_rows.len();
+
+            // Update benchmark metrics counter for remaining rows
+            if let Some(ref counter) = rows_counter_ref {
+                counter.fetch_add(batch_rows.len(), Ordering::Relaxed);
+            }
+        }
+
+        writer.close()?;
+        total_rows_ref.fetch_add(shard_rows, Ordering::Relaxed);
+
+        Ok(())
+    });
+
+    if let Some(pb) = &pb {
+        pb.finish_and_clear();
+    }
+
+    result?;
+    Ok(total_rows.load(Ordering::Relaxed))
 }
 
 /// Get metadata about the conversion without performing it.
