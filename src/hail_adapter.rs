@@ -245,8 +245,13 @@ impl DataSource for HailTableSource {
         self.rvd_spec.part_files.len()
     }
 
-    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
-        self.create_partition_stream(partition_idx, ranges)?.collect()
+    fn scan_partition_stream(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        let stream = self.create_partition_stream(partition_idx, ranges)?;
+        Ok(Box::new(stream))
     }
 
     fn query_stream_with_intervals(

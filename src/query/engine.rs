@@ -195,14 +195,37 @@ impl QueryEngine {
         })
     }
 
-    /// Create a streaming iterator for a single partition
+    /// Stream rows from a single partition
+    ///
+    /// Returns an iterator that yields rows one at a time, avoiding loading
+    /// the entire partition into memory. Use this for parallel processing
+    /// on large tables to prevent OOM.
     ///
     /// # Arguments
     /// * `partition_idx` - The index of the partition to scan
     /// * `ranges` - Key range constraints for filtering rows
     ///
     /// # Returns
-    /// A vector of decoded rows (for compatibility with existing API)
+    /// An iterator over decoded rows
+    pub fn scan_partition_iter(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+    ) -> Result<impl Iterator<Item = Result<EncodedValue>> + '_> {
+        self.source.scan_partition_stream(partition_idx, ranges)
+    }
+
+    /// Scan a single partition and return all rows (batch mode)
+    ///
+    /// This collects all rows into a Vec. For parallel processing on large
+    /// tables, use `scan_partition_iter` instead to avoid OOM.
+    ///
+    /// # Arguments
+    /// * `partition_idx` - The index of the partition to scan
+    /// * `ranges` - Key range constraints for filtering rows
+    ///
+    /// # Returns
+    /// A vector of decoded rows
     pub fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
         self.source.scan_partition(partition_idx, ranges)
     }

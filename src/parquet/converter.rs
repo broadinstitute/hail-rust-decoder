@@ -144,27 +144,51 @@ pub fn hail_to_parquet_with_options(
     let row_type_ref = &row_type;
     let schema_ref = &arrow_schema;
 
+    // Batch size for streaming - accumulate rows before building Arrow batch
+    const BATCH_SIZE: usize = 4096;
+
     let worker_result: Result<()> = (0..num_partitions)
         .into_par_iter()
         .try_for_each_with(tx, |sender, i| -> Result<()> {
-            // Process partition
-            let rows = engine_ref.scan_partition(i, &[])?;
+            // Stream partition rows instead of loading all into memory
+            let iter = engine_ref.scan_partition_iter(i, &[])?;
 
-            // Build Arrow batch
-            let batch = build_record_batch(&rows, row_type_ref, schema_ref.clone())?;
+            // Accumulate rows in batches to avoid OOM
+            let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
 
-            // Update progress
-            if let Some(ref pb) = pb {
-                pb.inc(1);
+            for row_result in iter {
+                let row = row_result?;
+                batch_rows.push(row);
+
+                if batch_rows.len() >= BATCH_SIZE {
+                    // Build and send Arrow batch
+                    let batch = build_record_batch(&batch_rows, row_type_ref, schema_ref.clone())?;
+
+                    if sender.send(Ok(batch)).is_err() {
+                        return Err(crate::HailError::Io(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "Writer thread disconnected",
+                        )));
+                    }
+
+                    batch_rows.clear();
+                }
             }
 
-            // Send to writer (blocks if channel full, providing backpressure)
-            if sender.send(Ok(batch)).is_err() {
-                // Writer thread died (likely due to write error)
-                return Err(crate::HailError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "Writer thread disconnected",
-                )));
+            // Send remaining rows
+            if !batch_rows.is_empty() {
+                let batch = build_record_batch(&batch_rows, row_type_ref, schema_ref.clone())?;
+                if sender.send(Ok(batch)).is_err() {
+                    return Err(crate::HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "Writer thread disconnected",
+                    )));
+                }
+            }
+
+            // Update progress after partition complete
+            if let Some(ref pb) = pb {
+                pb.inc(1);
             }
 
             Ok(())

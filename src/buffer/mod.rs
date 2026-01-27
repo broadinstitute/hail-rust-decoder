@@ -46,7 +46,10 @@ pub use zstd::ZstdBuffer;
 use crate::Result;
 
 /// Trait for all input buffers
-pub trait InputBuffer {
+///
+/// The `Send` bound is required to support parallel partition processing
+/// where each worker thread owns its own buffer.
+pub trait InputBuffer: Send {
     /// Read exactly `buf.len()` bytes into `buf`
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<()>;
 

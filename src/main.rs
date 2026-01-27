@@ -946,20 +946,39 @@ fn run_summary(table_path: &str) -> Result<()> {
     let total_rows = AtomicUsize::new(0);
 
     // Parallel scan using rayon - each thread gets its own StatsAccumulator
+    // Uses streaming to avoid loading entire partitions into memory (prevents OOM)
     let stats = (0..part_count)
         .into_par_iter()
         .fold(
             || StatsAccumulator::new(),
             |mut acc, i| {
-                match engine.scan_partition(i, &[]) {
-                    Ok(rows) => {
-                        total_rows.fetch_add(rows.len(), Ordering::Relaxed);
-                        for row in &rows {
-                            acc.process_row(row);
+                match engine.scan_partition_iter(i, &[]) {
+                    Ok(iter) => {
+                        for row_result in iter {
+                            match row_result {
+                                Ok(row) => {
+                                    total_rows.fetch_add(1, Ordering::Relaxed);
+                                    acc.process_row(&row);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "{} Error reading row in partition {}: {}",
+                                        "Warning:".yellow(),
+                                        i,
+                                        e
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(e) => {
-                        eprintln!("{} Failed to scan partition {}: {}", "Warning:".yellow(), i, e);
+                        eprintln!(
+                            "{} Failed to scan partition {}: {}",
+                            "Warning:".yellow(),
+                            i,
+                            e
+                        );
                     }
                 }
                 pb.inc(1);

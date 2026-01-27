@@ -95,9 +95,11 @@ impl SchemaValidator {
                 }
             }
 
-            let rows = engine.scan_partition(i, &[])?;
+            let iter = engine.scan_partition_iter(i, &[])?;
 
-            for row in rows {
+            for row_result in iter {
+                let row = row_result?;
+
                 // Check limit
                 if let Some(l) = limit {
                     if report.scanned_count >= l {
@@ -470,29 +472,43 @@ impl SchemaValidator {
                 let mut local_report = ValidationReport::default();
                 let max_errors = 10;
 
-                let rows = match engine.scan_partition(partition_idx, &[]) {
-                    Ok(r) => r,
+                // Use reservoir sampling to select rows without loading entire partition
+                let mut reservoir: Vec<(usize, EncodedValue)> = Vec::with_capacity(rows_per_partition);
+                let mut rng = rand::thread_rng();
+                use rand::Rng;
+
+                let iter = match engine.scan_partition_iter(partition_idx, &[]) {
+                    Ok(it) => it,
                     Err(_) => {
                         pb.inc(1);
                         return local_report;
                     }
                 };
-                let rows: Vec<_> = rows.into_iter().collect();
 
-                if rows.is_empty() {
+                // Reservoir sampling loop
+                for (i, row_res) in iter.enumerate() {
+                    let row = match row_res {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+
+                    if reservoir.len() < rows_per_partition {
+                        reservoir.push((i, row));
+                    } else {
+                        let j = rng.gen_range(0..=i);
+                        if j < rows_per_partition {
+                            reservoir[j] = (i, row);
+                        }
+                    }
+                }
+
+                if reservoir.is_empty() {
                     pb.inc(1);
                     return local_report;
                 }
 
-                // Randomly sample rows from this partition
-                let sample_count = std::cmp::min(rows_per_partition, rows.len());
-                let mut indices: Vec<usize> = (0..rows.len()).collect();
-                {
-                    let mut rng = rand::thread_rng();
-                    indices.shuffle(&mut rng);
-                }
-
-                for &row_idx in indices.iter().take(sample_count) {
+                // Validate sampled rows
+                for (row_idx, row) in reservoir {
                     // Check global limits
                     let current_total = total_scanned.fetch_add(1, Ordering::Relaxed);
                     if current_total >= sample_size {
@@ -504,11 +520,10 @@ impl SchemaValidator {
                         break;
                     }
 
-                    let row = &rows[row_idx];
                     local_report.scanned_count += 1;
 
                     // Serialize row to JSON value for validation
-                    let json_val = match serde_json::to_value(row) {
+                    let json_val = match serde_json::to_value(&row) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
@@ -725,24 +740,7 @@ impl SchemaValidator {
             pb.enable_steady_tick(std::time::Duration::from_millis(80));
             pb.set_message(format!("partition {:>4} reading...", partition_idx));
 
-            let rows = match engine.scan_partition(partition_idx, &[]) {
-                Ok(r) => r,
-                Err(e) => {
-                    pb.set_style(idle_style.clone());
-                    pb.set_message(format!("partition {:>4} ERROR: {}", partition_idx, e));
-                    summary_bar.inc(1);
-                    return;
-                }
-            };
-
-            if rows.is_empty() {
-                pb.set_style(idle_style.clone());
-                pb.set_message(format!("partition {:>4} (empty)", partition_idx));
-                summary_bar.inc(1);
-                return;
-            }
-
-            // Check limit
+            // Check limit before processing
             if total_scanned.fetch_add(1, Ordering::Relaxed) >= sample_size {
                 total_scanned.fetch_sub(1, Ordering::Relaxed);
                 pb.set_style(idle_style.clone());
@@ -750,16 +748,51 @@ impl SchemaValidator {
                 return;
             }
 
-            pb.set_message(format!("partition {:>4} validating...", partition_idx));
+            // Use reservoir sampling to select one row from stream
+            let mut selected_row: Option<(usize, EncodedValue)> = None;
+            let mut count = 0;
+            let mut rng = rand::thread_rng();
+            use rand::Rng;
 
-            // Randomly select one row
-            let row_idx = {
-                use rand::Rng;
-                rand::thread_rng().gen_range(0..rows.len())
+            let iter = match engine.scan_partition_iter(partition_idx, &[]) {
+                Ok(it) => it,
+                Err(e) => {
+                    pb.set_style(idle_style.clone());
+                    pb.set_message(format!("partition {:>4} ERROR: {}", partition_idx, e));
+                    summary_bar.inc(1);
+                    // Give back the count since we didn't process one
+                    total_scanned.fetch_sub(1, Ordering::Relaxed);
+                    return;
+                }
             };
 
-            let row = &rows[row_idx];
-            let key_str = extract_keys(row, &key_fields);
+            for (i, row_res) in iter.enumerate() {
+                if let Ok(r) = row_res {
+                    count += 1;
+                    if selected_row.is_none() {
+                        selected_row = Some((i, r));
+                    } else {
+                        // 1/count probability to replace
+                        if rng.gen_range(0..count) == 0 {
+                            selected_row = Some((i, r));
+                        }
+                    }
+                }
+            }
+
+            if selected_row.is_none() {
+                pb.set_style(idle_style.clone());
+                pb.set_message(format!("partition {:>4} (empty)", partition_idx));
+                summary_bar.inc(1);
+                // Give back the count since we didn't process one
+                total_scanned.fetch_sub(1, Ordering::Relaxed);
+                return;
+            }
+
+            pb.set_message(format!("partition {:>4} validating...", partition_idx));
+
+            let (row_idx, row) = selected_row.unwrap();
+            let key_str = extract_keys(&row, &key_fields);
             let key_display = if key_str.is_empty() {
                 format!("row {}", row_idx)
             } else {
@@ -767,7 +800,7 @@ impl SchemaValidator {
             };
 
             // Serialize to JSON
-            let json_val = match serde_json::to_value(row) {
+            let json_val = match serde_json::to_value(&row) {
                 Ok(v) => v,
                 Err(e) => {
                     invalid_count.fetch_add(1, Ordering::Relaxed);

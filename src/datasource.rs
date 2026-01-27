@@ -35,14 +35,34 @@ pub trait DataSource: Send + Sync {
     /// For VCFs, this might be virtual partitions based on genomic regions.
     fn num_partitions(&self) -> usize;
 
-    /// Scan a specific partition and return all matching rows
+    /// Stream rows from a specific partition
     ///
-    /// This is used for parallel processing where each worker handles one partition.
+    /// This is the primary method for parallel partition processing. It returns
+    /// an iterator that yields rows one at a time, avoiding loading entire
+    /// partitions into memory. This is critical for memory-bounded parallel
+    /// processing on large tables.
     ///
     /// # Arguments
     /// * `partition_idx` - The partition index to scan
     /// * `ranges` - Key range constraints for filtering rows
-    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>>;
+    fn scan_partition_stream(
+        &self,
+        partition_idx: usize,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>>;
+
+    /// Scan a specific partition and return all matching rows (batch mode)
+    ///
+    /// This collects all rows from the partition into a Vec. Use this only
+    /// for small partitions or sequential processing. For parallel processing
+    /// on large tables, use `scan_partition_stream` instead to avoid OOM.
+    ///
+    /// # Arguments
+    /// * `partition_idx` - The partition index to scan
+    /// * `ranges` - Key range constraints for filtering rows
+    fn scan_partition(&self, partition_idx: usize, ranges: &[KeyRange]) -> Result<Vec<EncodedValue>> {
+        self.scan_partition_stream(partition_idx, ranges)?.collect()
+    }
 
     /// Stream rows matching the given key ranges
     ///

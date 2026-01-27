@@ -11,18 +11,18 @@ use std::io::Read;
 /// This buffer reads blocks from a stream where each block is prefixed
 /// with a 4-byte little-endian length. It implements `InputBlockBuffer`
 /// to provide complete blocks to the next layer in the buffer stack.
-pub struct StreamBlockBuffer<R: Read> {
+pub struct StreamBlockBuffer<R: Read + Send> {
     reader: R,
 }
 
-impl<R: Read> StreamBlockBuffer<R> {
+impl<R: Read + Send> StreamBlockBuffer<R> {
     /// Create a new stream block buffer
     pub fn new(reader: R) -> Self {
         Self { reader }
     }
 }
 
-impl<R: Read> InputBlockBuffer for StreamBlockBuffer<R> {
+impl<R: Read + Send> InputBlockBuffer for StreamBlockBuffer<R> {
     fn read_block(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
         // Read 4-byte block length (little-endian)
         let mut len_buf = [0u8; 4];

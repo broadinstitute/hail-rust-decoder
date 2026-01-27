@@ -486,15 +486,15 @@ impl DataSource for VcfDataSource {
         }
     }
 
-    fn scan_partition(
+    fn scan_partition_stream(
         &self,
         partition_idx: usize,
         ranges: &[KeyRange],
-    ) -> Result<Vec<EncodedValue>> {
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
         // When indexed, partition_idx maps to a chromosome
         if self.has_index() && !self.contigs.is_empty() {
             if partition_idx >= self.contigs.len() {
-                return Ok(vec![]);
+                return Ok(Box::new(std::iter::empty()));
             }
 
             let contig = &self.contigs[partition_idx];
@@ -508,21 +508,19 @@ impl DataSource for VcfDataSource {
                 && !self.path.starts_with("s3://")
                 && !self.path.starts_with("http");
 
-            let records = if is_local {
+            if is_local {
                 debug!("Scanning partition {} (contig {}) locally", partition_idx, contig);
-                self.indexed_query_local(&region, index, ranges)?
+                self.indexed_query_local(&region, index, ranges)
             } else {
                 debug!("Scanning partition {} (contig {}) remotely", partition_idx, contig);
-                self.indexed_query_remote(&region, index, ranges)?
-            };
-
-            records.collect()
+                self.indexed_query_remote(&region, index, ranges)
+            }
         } else {
             // Fall back to full scan for partition 0 on unindexed files
             if partition_idx != 0 {
-                return Ok(vec![]);
+                return Ok(Box::new(std::iter::empty()));
             }
-            self.query_stream(ranges)?.collect()
+            self.query_stream(ranges)
         }
     }
 

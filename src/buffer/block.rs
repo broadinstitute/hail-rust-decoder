@@ -14,7 +14,9 @@ use crate::Result;
 ///
 /// The `BlockingBuffer` then converts these blocks into a byte stream
 /// by implementing `InputBuffer`.
-pub trait InputBlockBuffer {
+///
+/// The `Send` bound is required to support parallel partition processing.
+pub trait InputBlockBuffer: Send {
     /// Read one complete block into the provided buffer
     ///
     /// # Returns

@@ -77,7 +77,7 @@ impl BufferBuilder<crate::io::BoxedReader> {
     }
 }
 
-impl<R: std::io::Read + 'static> BufferBuilder<R> {
+impl<R: std::io::Read + Send + 'static> BufferBuilder<R> {
     /// Create a buffer builder from any reader
     pub fn from_reader(reader: R) -> Self {
         Self {
@@ -125,7 +125,7 @@ pub struct LEB128BufferStack<R> {
     builder: BufferBuilder<R>,
 }
 
-impl<R: std::io::Read + 'static> LEB128BufferStack<R> {
+impl<R: std::io::Read + Send + 'static> LEB128BufferStack<R> {
     /// Build the complete buffer stack
     ///
     /// Returns LEB128Buffer wrapping the appropriate inner buffers.
@@ -143,7 +143,7 @@ pub struct RawBufferStack<R> {
     builder: BufferBuilder<R>,
 }
 
-impl<R: std::io::Read + 'static> RawBufferStack<R> {
+impl<R: std::io::Read + Send + 'static> RawBufferStack<R> {
     /// Build the buffer stack without LEB128
     ///
     /// Returns a blocking buffer that provides byte-level access to decompressed data.
