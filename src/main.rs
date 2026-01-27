@@ -562,7 +562,7 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 }
 
 fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
-    use hail_decoder::parquet::{build_record_batch, ParquetWriter, hail_to_parquet_with_options, hail_to_parquet_sharded_with_options, hail_to_parquet_sharded_full};
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter, hail_to_parquet_with_options, hail_to_parquet_sharded, hail_to_parquet_sharded_full};
     use hail_decoder::benchmark::{MetricsCollector, InputMetadata};
     use std::time::Duration;
 
@@ -664,10 +664,9 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
                 Some(collector.rows_counter.clone()),
                 Some(collector.partitions_counter.clone()),
                 Some(collector.row_size_stats_handle()),
-                args.buffered_upload,
             )?
         } else {
-            hail_to_parquet_sharded_with_options(&args.common.input, &args.output, true, shard_count, args.buffered_upload)?
+            hail_to_parquet_sharded(&args.common.input, &args.output, true, shard_count)?
         };
         (rows, true)
     } else {

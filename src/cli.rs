@@ -115,15 +115,6 @@ pub struct ExportParquetArgs {
     /// Collect and display system metrics during export (CPU, memory, I/O)
     #[arg(long)]
     pub benchmark: bool,
-
-    /// Buffer entire file before uploading to cloud (faster but more memory)
-    ///
-    /// By default, cloud uploads use streaming multipart upload which has
-    /// bounded memory usage. This flag buffers the entire file in memory
-    /// before uploading, which can be faster for small files but may OOM
-    /// for large shards.
-    #[arg(long)]
-    pub buffered_upload: bool,
 }
 
 impl HasCommonExportArgs for ExportParquetArgs {
