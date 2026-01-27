@@ -1,7 +1,26 @@
 //! Hail to Parquet conversion utilities
 //!
 //! This module provides a reusable function for converting Hail tables to Parquet format.
+//!
+//! ## Cloud Storage Output
+//!
+//! The sharded export functions support writing directly to cloud storage (GCS, S3):
+//!
+//! ```no_run
+//! use hail_decoder::parquet::hail_to_parquet_sharded;
+//!
+//! // Write to GCS
+//! hail_to_parquet_sharded("gs://bucket/input.ht", "gs://bucket/output/", true, None)?;
+//!
+//! // Write to local disk
+//! hail_to_parquet_sharded("gs://bucket/input.ht", "/local/output/", true, None)?;
+//! # Ok::<(), hail_decoder::HailError>(())
+//! ```
+//!
+//! When output is a cloud path, each partition is buffered in memory and uploaded
+//! on completion, providing a truly diskless pipeline.
 
+use crate::io::{is_cloud_path, CloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
 use crate::query::QueryEngine;
 use crate::Result;
@@ -269,6 +288,12 @@ pub fn hail_to_parquet_sharded_with_metrics(
 /// Convert a Hail table to a directory of Parquet files (sharded) with full metrics.
 ///
 /// Includes row size sampling for detailed benchmark reports.
+///
+/// ## Cloud Output Support
+///
+/// When `output_dir` is a cloud path (gs://, s3://), files are written directly
+/// to cloud storage without touching local disk. Each shard is buffered in memory
+/// and uploaded on completion.
 pub fn hail_to_parquet_sharded_full(
     input_path: &str,
     output_dir: &str,
@@ -280,8 +305,12 @@ pub fn hail_to_parquet_sharded_full(
 ) -> Result<usize> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Create output directory
-    std::fs::create_dir_all(output_dir)?;
+    let output_is_cloud = is_cloud_path(output_dir);
+
+    // Create output directory (only for local paths)
+    if !output_is_cloud {
+        std::fs::create_dir_all(output_dir)?;
+    }
 
     // Open the query engine to read the table
     let engine = QueryEngine::open_path(input_path)?;
@@ -346,81 +375,115 @@ pub fn hail_to_parquet_sharded_full(
             return Ok(());
         }
 
-        // Create output file for this shard
-        let output_path = format!("{}/part-{:05}.parquet", output_dir_ref, shard_id);
-        let mut writer = crate::parquet::ParquetWriter::new(&output_path, row_type_ref)?;
-        let arrow_schema = writer.schema().clone();
+        // Create output path for this shard
+        let output_path = if output_is_cloud {
+            // Cloud path: use forward slashes, trim trailing slash
+            let base = output_dir_ref.trim_end_matches('/');
+            format!("{}/part-{:05}.parquet", base, shard_id)
+        } else {
+            format!("{}/part-{:05}.parquet", output_dir_ref, shard_id)
+        };
 
+        // Create appropriate writer based on output location
         let mut shard_rows = 0;
         let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
         let mut sample_counter = 0usize;
         let mut first_row_sampled = false;
 
-        // Process all assigned partitions
-        for &partition_idx in assigned_partitions {
-            let iter = engine_ref.scan_partition_iter(partition_idx, &[])?;
+        // Helper macro to process partitions with any writer type
+        macro_rules! process_partitions {
+            ($writer:expr, $arrow_schema:expr) => {{
+                let mut writer = $writer;
+                let arrow_schema = $arrow_schema;
 
-            for row_result in iter {
-                let row = row_result?;
+                // Process all assigned partitions
+                for &partition_idx in assigned_partitions {
+                    let iter = engine_ref.scan_partition_iter(partition_idx, &[])?;
 
-                // Sample row sizes periodically
-                if let Some(ref stats_arc) = row_size_stats_ref {
-                    sample_counter += 1;
-                    if sample_counter % ROW_SAMPLE_INTERVAL == 0 || !first_row_sampled {
-                        let size = row.estimated_size_bytes();
-                        let schema_stats = if !first_row_sampled {
-                            first_row_sampled = true;
-                            Some(row.schema_stats())
-                        } else {
-                            None
-                        };
-                        // Get per-field sizes
-                        let field_sizes = row.field_sizes();
-                        if let Ok(mut stats) = stats_arc.lock() {
-                            stats.add_sample(size, schema_stats);
-                            stats.add_field_samples(field_sizes);
+                    for row_result in iter {
+                        let row = row_result?;
+
+                        // Sample row sizes periodically
+                        if let Some(ref stats_arc) = row_size_stats_ref {
+                            sample_counter += 1;
+                            if sample_counter % ROW_SAMPLE_INTERVAL == 0 || !first_row_sampled {
+                                let size = row.estimated_size_bytes();
+                                let schema_stats = if !first_row_sampled {
+                                    first_row_sampled = true;
+                                    Some(row.schema_stats())
+                                } else {
+                                    None
+                                };
+                                // Get per-field sizes
+                                let field_sizes = row.field_sizes();
+                                if let Ok(mut stats) = stats_arc.lock() {
+                                    stats.add_sample(size, schema_stats);
+                                    stats.add_field_samples(field_sizes);
+                                }
+                            }
                         }
+
+                        batch_rows.push(row);
+
+                        if batch_rows.len() >= BATCH_SIZE {
+                            let batch = build_record_batch(&batch_rows, row_type_ref, arrow_schema.clone())?;
+                            writer.write_batch(&batch)?;
+                            shard_rows += batch_rows.len();
+
+                            // Update benchmark metrics counter
+                            if let Some(ref counter) = rows_counter_ref {
+                                counter.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                            }
+
+                            batch_rows.clear();
+                        }
+                    }
+
+                    // Update progress after each partition completes
+                    if let Some(ref pb) = pb_ref {
+                        pb.inc(1);
+                    }
+                    if let Some(ref counter) = partitions_counter_ref {
+                        counter.fetch_add(1, Ordering::Relaxed);
                     }
                 }
 
-                batch_rows.push(row);
-
-                if batch_rows.len() >= BATCH_SIZE {
+                // Write remaining rows
+                if !batch_rows.is_empty() {
                     let batch = build_record_batch(&batch_rows, row_type_ref, arrow_schema.clone())?;
                     writer.write_batch(&batch)?;
                     shard_rows += batch_rows.len();
 
-                    // Update benchmark metrics counter
+                    // Update benchmark metrics counter for remaining rows
                     if let Some(ref counter) = rows_counter_ref {
                         counter.fetch_add(batch_rows.len(), Ordering::Relaxed);
                     }
-
-                    batch_rows.clear();
                 }
-            }
 
-            // Update progress after each partition completes
-            if let Some(ref pb) = pb_ref {
-                pb.inc(1);
-            }
-            if let Some(ref counter) = partitions_counter_ref {
-                counter.fetch_add(1, Ordering::Relaxed);
-            }
+                writer
+            }};
         }
 
-        // Write remaining rows
-        if !batch_rows.is_empty() {
-            let batch = build_record_batch(&batch_rows, row_type_ref, arrow_schema.clone())?;
-            writer.write_batch(&batch)?;
-            shard_rows += batch_rows.len();
+        if output_is_cloud {
+            // Cloud output: use CloudWriter
+            let cloud_writer = CloudWriter::new(&output_path)?;
+            let writer = crate::parquet::ParquetWriter::from_writer(cloud_writer, row_type_ref)?;
+            let arrow_schema = writer.schema().clone();
 
-            // Update benchmark metrics counter for remaining rows
-            if let Some(ref counter) = rows_counter_ref {
-                counter.fetch_add(batch_rows.len(), Ordering::Relaxed);
-            }
+            let writer = process_partitions!(writer, arrow_schema);
+
+            // Get the CloudWriter back and finish it (upload to cloud)
+            let cloud_writer = writer.into_inner()?;
+            cloud_writer.finish()?;
+        } else {
+            // Local output: use file
+            let writer = crate::parquet::ParquetWriter::new(&output_path, row_type_ref)?;
+            let arrow_schema = writer.schema().clone();
+
+            let writer = process_partitions!(writer, arrow_schema);
+            writer.close()?;
         }
 
-        writer.close()?;
         total_rows_ref.fetch_add(shard_rows, Ordering::Relaxed);
 
         Ok(())

@@ -62,6 +62,9 @@ thiserror = "1.0"
 rayon = "1.10"
 crossbeam-channel = "0.5"
 
+# Memory mapping for local file optimization
+memmap2 = "0.9"
+
 # Random sampling
 rand = "0.8"
 

@@ -2,8 +2,19 @@
 //!
 //! This module provides a `CloudReader` that fetches data in large chunks from
 //! cloud storage and serves it synchronously through the `std::io::Read` trait.
+//!
+//! ## High-Performance Streaming Architecture
+//!
+//! The `PrefetchingCloudReader` implements a latency-hiding prefetch strategy:
+//! - A background task on the IO runtime fetches chunks ahead of the current read position
+//! - Chunks are pushed into a bounded channel, providing backpressure
+//! - The CPU never waits for network I/O as data is always ready in the channel
+//!
+//! This approach enables streaming from cloud storage (GCS, S3) at near-network speeds
+//! without requiring local disk staging.
 
 use crate::{HailError, Result};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
@@ -14,11 +25,20 @@ use tokio::runtime::Runtime;
 use tracing::trace;
 use url::Url;
 
-/// Default chunk size for cloud reads (8MB)
+/// Default chunk size for cloud reads (8MB) - used by non-prefetching reader
 const DEFAULT_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
+/// Prefetch chunk size (16MB) - larger for high-bandwidth connections
+const PREFETCH_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Number of chunks to prefetch ahead (4 x 16MB = 64MB buffer)
+const PREFETCH_DEPTH: usize = 4;
+
 /// Shared Tokio runtime for IO operations
-static IO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+///
+/// This runtime is used for all async cloud storage operations,
+/// including prefetching reads and uploading writes.
+pub(crate) static IO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     Runtime::new().expect("Failed to create IO runtime")
 });
 
@@ -154,6 +174,254 @@ impl Seek for CloudReader {
     }
 }
 
+/// A high-performance cloud reader that prefetches data in background
+///
+/// This reader spawns a background task that aggressively fetches chunks ahead
+/// of the read position, hiding network latency from the CPU. Data flows through
+/// a bounded channel providing natural backpressure.
+///
+/// # Architecture
+///
+/// ```text
+/// GCS/S3 -> [Background Task] -> [Channel Buffer] -> [Read calls]
+///              (async)             (PREFETCH_DEPTH    (sync)
+///                                   chunks)
+/// ```
+///
+/// The CPU processes data from the channel while the background task fetches
+/// the next chunks, ensuring the CPU never waits for network I/O.
+pub struct PrefetchingCloudReader {
+    /// Channel receiver for prefetched chunks
+    rx: Receiver<std::io::Result<Vec<u8>>>,
+    /// Current chunk being consumed
+    current_chunk: Vec<u8>,
+    /// Position within current chunk
+    chunk_pos: usize,
+    /// Logical file position
+    position: u64,
+    /// Total file size
+    file_size: u64,
+    /// Store and path for seek operations
+    store: Arc<dyn ObjectStore>,
+    path: ObjPath,
+    /// Sender to signal prefetch task to stop (dropped on seek)
+    _cancel_tx: Option<Sender<()>>,
+}
+
+impl PrefetchingCloudReader {
+    /// Create a new prefetching cloud reader
+    ///
+    /// Immediately starts a background task to fetch data from the given offset.
+    pub fn new(store: Arc<dyn ObjectStore>, path: ObjPath, file_size: u64) -> Self {
+        let (rx, cancel_tx) = Self::start_prefetch(store.clone(), path.clone(), 0, file_size);
+
+        PrefetchingCloudReader {
+            rx,
+            current_chunk: Vec::new(),
+            chunk_pos: 0,
+            position: 0,
+            file_size,
+            store,
+            path,
+            _cancel_tx: Some(cancel_tx),
+        }
+    }
+
+    /// Start or restart the prefetch background task
+    fn start_prefetch(
+        store: Arc<dyn ObjectStore>,
+        path: ObjPath,
+        start_offset: u64,
+        file_size: u64,
+    ) -> (Receiver<std::io::Result<Vec<u8>>>, Sender<()>) {
+        let (tx, rx) = bounded(PREFETCH_DEPTH);
+        let (cancel_tx, cancel_rx) = bounded::<()>(1);
+
+        IO_RUNTIME.spawn(async move {
+            let mut offset = start_offset;
+
+            while offset < file_size {
+                // Check for cancellation
+                if cancel_rx.try_recv().is_ok() {
+                    break;
+                }
+
+                let len = std::cmp::min(PREFETCH_CHUNK_SIZE as u64, file_size - offset) as usize;
+                let range = offset as usize..(offset as usize + len);
+
+                trace!("PrefetchingCloudReader: fetching range {}..{}", offset, offset + len as u64);
+                let start_time = std::time::Instant::now();
+
+                let result = store.get_range(&path, range).await;
+
+                trace!("PrefetchingCloudReader: fetch completed in {:?}", start_time.elapsed());
+
+                let chunk_result = result
+                    .map(|b| b.to_vec())
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+
+                // If send fails, receiver was dropped (reader closed)
+                if tx.send(chunk_result).is_err() {
+                    break;
+                }
+
+                offset += len as u64;
+            }
+        });
+
+        (rx, cancel_tx)
+    }
+
+    /// Ensure we have data in current_chunk to read from
+    fn ensure_chunk(&mut self) -> std::io::Result<bool> {
+        // If we have data remaining in current chunk, we're good
+        if self.chunk_pos < self.current_chunk.len() {
+            return Ok(true);
+        }
+
+        // Try to get next chunk from channel
+        match self.rx.recv() {
+            Ok(result) => {
+                self.current_chunk = result?;
+                self.chunk_pos = 0;
+                Ok(!self.current_chunk.is_empty())
+            }
+            Err(_) => {
+                // Channel closed, no more data
+                Ok(false)
+            }
+        }
+    }
+}
+
+impl Read for PrefetchingCloudReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.position >= self.file_size {
+            return Ok(0);
+        }
+
+        if !self.ensure_chunk()? {
+            return Ok(0);
+        }
+
+        let available = self.current_chunk.len() - self.chunk_pos;
+        let to_copy = std::cmp::min(available, buf.len());
+
+        buf[..to_copy].copy_from_slice(&self.current_chunk[self.chunk_pos..self.chunk_pos + to_copy]);
+        self.chunk_pos += to_copy;
+        self.position += to_copy as u64;
+
+        Ok(to_copy)
+    }
+}
+
+impl Seek for PrefetchingCloudReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new_position = match pos {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    self.file_size.saturating_add(offset as u64)
+                } else {
+                    self.file_size.saturating_sub((-offset) as u64)
+                }
+            }
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    self.position.saturating_add(offset as u64)
+                } else {
+                    self.position.saturating_sub((-offset) as u64)
+                }
+            }
+        };
+
+        if new_position != self.position {
+            // Drop old cancel sender to signal prefetch task to stop
+            self._cancel_tx = None;
+
+            // Start new prefetch from the new position
+            let (rx, cancel_tx) = Self::start_prefetch(
+                self.store.clone(),
+                self.path.clone(),
+                new_position,
+                self.file_size,
+            );
+
+            self.rx = rx;
+            self._cancel_tx = Some(cancel_tx);
+            self.current_chunk.clear();
+            self.chunk_pos = 0;
+            self.position = new_position;
+        }
+
+        Ok(self.position)
+    }
+}
+
+/// A memory-mapped reader for local files
+///
+/// This provides zero-copy access to local files by mapping them directly
+/// into the process's virtual address space. The OS handles paging data
+/// in from disk as needed.
+///
+/// This is optimal for local NVMe storage where random access is fast.
+pub struct MmapReader {
+    /// The memory-mapped data
+    mmap: memmap2::Mmap,
+    /// Current read position
+    position: usize,
+}
+
+impl MmapReader {
+    /// Create a new memory-mapped reader for a file
+    pub fn new(file: &File) -> std::io::Result<Self> {
+        // SAFETY: We treat the file as read-only and don't modify it
+        let mmap = unsafe { memmap2::Mmap::map(file)? };
+        Ok(MmapReader { mmap, position: 0 })
+    }
+}
+
+impl Read for MmapReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.mmap.len().saturating_sub(self.position);
+        let to_copy = std::cmp::min(remaining, buf.len());
+
+        if to_copy == 0 {
+            return Ok(0);
+        }
+
+        buf[..to_copy].copy_from_slice(&self.mmap[self.position..self.position + to_copy]);
+        self.position += to_copy;
+        Ok(to_copy)
+    }
+}
+
+impl Seek for MmapReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let len = self.mmap.len() as u64;
+        let new_position = match pos {
+            SeekFrom::Start(offset) => offset as usize,
+            SeekFrom::End(offset) => {
+                if offset >= 0 {
+                    len.saturating_add(offset as u64) as usize
+                } else {
+                    len.saturating_sub((-offset) as u64) as usize
+                }
+            }
+            SeekFrom::Current(offset) => {
+                if offset >= 0 {
+                    (self.position as u64).saturating_add(offset as u64) as usize
+                } else {
+                    (self.position as u64).saturating_sub((-offset) as u64) as usize
+                }
+            }
+        };
+
+        self.position = new_position;
+        Ok(self.position as u64)
+    }
+}
+
 /// Trait combining Read and Seek for seekable readers
 pub trait ReadSeek: Read + Seek {}
 
@@ -171,18 +439,39 @@ pub type BoxedReader = Box<dyn ReadSeek + Send + Sync>;
 /// - `s3://bucket/path` - Amazon S3
 /// - `http://` or `https://` - HTTP(S) URLs
 /// - Local file path - Regular file system access
+///
+/// For cloud paths, uses `PrefetchingCloudReader` for latency-hiding streaming.
+/// For local paths, attempts to use memory-mapping for optimal NVMe performance,
+/// falling back to standard file I/O if mmap fails.
 pub fn get_reader(path: &str) -> Result<BoxedReader> {
     if path.starts_with("gs://") || path.starts_with("s3://") || path.starts_with("http://") || path.starts_with("https://") {
         create_cloud_reader(path)
     } else {
-        // Local file
+        // Local file - try mmap first for optimal NVMe performance
         let file = File::open(path)
             .map_err(|e| HailError::Io(e))?;
-        Ok(Box::new(file))
+
+        // Try memory mapping for zero-copy access
+        match MmapReader::new(&file) {
+            Ok(mmap_reader) => {
+                trace!("Using memory-mapped reader for {}", path);
+                Ok(Box::new(mmap_reader))
+            }
+            Err(e) => {
+                // Fall back to standard file reading if mmap fails
+                trace!("Mmap failed ({}), falling back to standard file reader for {}", e, path);
+                // Re-open the file since we may have consumed it
+                let file = File::open(path).map_err(|e| HailError::Io(e))?;
+                Ok(Box::new(file))
+            }
+        }
     }
 }
 
 /// Create a cloud reader for the given URL
+///
+/// Uses `PrefetchingCloudReader` which spawns a background task to fetch
+/// data ahead of the read position, hiding network latency.
 fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
     let url = Url::parse(url_str)
         .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
@@ -234,7 +523,9 @@ fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
         store.head(&path).await
     }).map_err(|e| HailError::InvalidFormat(format!("Failed to get file metadata: {}", e)))?.size as u64;
 
-    Ok(Box::new(CloudReader::new(store, path, file_size)))
+    // Use PrefetchingCloudReader for latency-hiding streaming
+    trace!("Creating PrefetchingCloudReader for {} ({} bytes)", url_str, file_size);
+    Ok(Box::new(PrefetchingCloudReader::new(store, path, file_size)))
 }
 
 /// Join a base path with a child path, handling both local and cloud paths correctly

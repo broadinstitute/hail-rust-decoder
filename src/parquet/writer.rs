@@ -2,6 +2,16 @@
 //!
 //! This module provides `ParquetWriter`, which converts Hail row data to Parquet format.
 //! It accumulates rows into batches and writes them incrementally to a Parquet file.
+//!
+//! ## Generic Writer Support
+//!
+//! `ParquetWriter<W>` is generic over the output destination:
+//! - `ParquetWriter<File>` for local files
+//! - `ParquetWriter<CloudWriter>` for cloud storage (GCS, S3)
+//! - Any type implementing `Write + Send`
+//!
+//! Use `ParquetWriter::new()` for local files or `ParquetWriter::from_writer()` for
+//! custom destinations.
 
 use crate::codec::{EncodedType, EncodedValue};
 use crate::error::{HailError, Result};
@@ -11,6 +21,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 use std::fs::File;
+use std::io::Write;
 use std::sync::Arc;
 
 /// A writer that converts Hail rows to Parquet format
@@ -18,9 +29,12 @@ use std::sync::Arc;
 /// The writer accumulates rows in memory up to a configurable batch size,
 /// then flushes them to the Parquet file. This provides a balance between
 /// memory usage and I/O efficiency.
-pub struct ParquetWriter {
+///
+/// Generic over the output writer type `W`, allowing writing to local files,
+/// cloud storage, or any other `Write` implementation.
+pub struct ParquetWriter<W: Write + Send> {
     /// The underlying Arrow/Parquet writer
-    writer: ArrowWriter<File>,
+    writer: ArrowWriter<W>,
     /// Column builders for each top-level field
     builders: Vec<ColumnBuilder>,
     /// The Arrow schema
@@ -33,8 +47,8 @@ pub struct ParquetWriter {
     total_rows: usize,
 }
 
-impl ParquetWriter {
-    /// Create a new ParquetWriter
+impl ParquetWriter<File> {
+    /// Create a new ParquetWriter writing to a local file
     ///
     /// # Arguments
     /// * `path` - Output path for the Parquet file
@@ -63,6 +77,39 @@ impl ParquetWriter {
     /// * `batch_size` - Number of rows to accumulate before flushing
     pub fn with_batch_size(path: &str, hail_schema: &EncodedType, batch_size: usize) -> Result<Self> {
         let file = File::create(path)?;
+        Self::from_writer_with_batch_size(file, hail_schema, batch_size)
+    }
+}
+
+impl<W: Write + Send> ParquetWriter<W> {
+    /// Create a ParquetWriter from any Write implementation
+    ///
+    /// This allows writing to cloud storage, memory buffers, or any other
+    /// destination that implements `Write + Send`.
+    ///
+    /// # Arguments
+    /// * `writer` - The output writer (e.g., CloudWriter, File, Vec<u8>)
+    /// * `hail_schema` - The EncodedType describing the row structure
+    ///
+    /// # Example
+    /// ```no_run
+    /// use hail_decoder::codec::EncodedType;
+    /// use hail_decoder::parquet::ParquetWriter;
+    /// use hail_decoder::io::CloudWriter;
+    ///
+    /// let schema = EncodedType::EBaseStruct {
+    ///     required: true,
+    ///     fields: vec![],
+    /// };
+    /// let cloud_writer = CloudWriter::new("gs://bucket/output.parquet").unwrap();
+    /// let writer = ParquetWriter::from_writer(cloud_writer, &schema).unwrap();
+    /// ```
+    pub fn from_writer(writer: W, hail_schema: &EncodedType) -> Result<Self> {
+        Self::from_writer_with_batch_size(writer, hail_schema, 4096)
+    }
+
+    /// Create a ParquetWriter from a writer with a custom batch size
+    pub fn from_writer_with_batch_size(writer: W, hail_schema: &EncodedType, batch_size: usize) -> Result<Self> {
         let arrow_schema = Arc::new(create_schema(hail_schema)?);
 
         let props = WriterProperties::builder()
@@ -70,7 +117,7 @@ impl ParquetWriter {
             .set_max_row_group_size(100_000) // Flush every 100K rows to limit memory
             .build();
 
-        let writer = ArrowWriter::try_new(file, arrow_schema.clone(), Some(props))?;
+        let arrow_writer = ArrowWriter::try_new(writer, arrow_schema.clone(), Some(props))?;
 
         // Initialize builders for each top-level field
         let builders = if let EncodedType::EBaseStruct { fields, .. } = hail_schema {
@@ -85,7 +132,7 @@ impl ParquetWriter {
         };
 
         Ok(Self {
-            writer,
+            writer: arrow_writer,
             builders,
             schema: arrow_schema,
             batch_size,
@@ -192,6 +239,15 @@ impl ParquetWriter {
     /// Get the Arrow schema for this writer
     pub fn schema(&self) -> &Arc<arrow::datatypes::Schema> {
         &self.schema
+    }
+
+    /// Get the underlying writer, consuming the ParquetWriter
+    ///
+    /// This is useful when the writer needs to be finalized separately,
+    /// such as with CloudWriter which requires calling `finish()`.
+    pub fn into_inner(mut self) -> Result<W> {
+        self.flush()?;
+        Ok(self.writer.into_inner()?)
     }
 }
 
