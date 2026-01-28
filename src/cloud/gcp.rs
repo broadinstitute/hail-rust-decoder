@@ -198,11 +198,43 @@ impl CloudProvider for GcpClient {
             ));
         }
 
+        // Auto-create firewall rule for coordinator port if needed
+        if config.with_coordinator {
+            let firewall_name = format!("allow-hail-coord-int-{}", config.name);
+            let network = config.network.as_deref().unwrap_or("default");
+            // Try to create firewall rule (ignore error if it already exists)
+            let _ = Command::new("gcloud")
+                .args([
+                    "compute",
+                    "firewall-rules",
+                    "create",
+                    &firewall_name,
+                    "--network",
+                    network,
+                    "--allow",
+                    "tcp:3000",
+                    "--source-ranges",
+                    "10.0.0.0/8",
+                    "--project",
+                    &config.project_id,
+                    "--quiet",
+                ])
+                .output();
+        }
+
         // Create instances in parallel using rayon
         let results: Vec<Result<()>> = instance_configs
             .into_par_iter()
             .map(|(instance_name, tags)| {
                 let mut cmd = Command::new("gcloud");
+
+                // Use a smaller machine for coordinator (it just routes work)
+                let machine_type = if instance_name.ends_with("-coordinator") {
+                    "e2-standard-2"
+                } else {
+                    &config.machine_type
+                };
+
                 cmd.args([
                     "compute",
                     "instances",
@@ -213,7 +245,7 @@ impl CloudProvider for GcpClient {
                     "--zone",
                     &config.zone,
                     "--machine-type",
-                    &config.machine_type,
+                    machine_type,
                     "--image-family",
                     "ubuntu-2204-lts",
                     "--image-project",
@@ -226,7 +258,8 @@ impl CloudProvider for GcpClient {
                     "cloud-platform", // Allow access to GCS
                 ]);
 
-                if config.spot {
+                // Use Spot for workers if requested, but keep coordinator on standard VM
+                if config.spot && !instance_name.ends_with("-coordinator") {
                     cmd.arg("--provisioning-model=SPOT");
                     cmd.arg("--instance-termination-action=STOP");
                 }

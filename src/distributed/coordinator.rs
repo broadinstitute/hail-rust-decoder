@@ -58,6 +58,10 @@ struct CoordinatorData {
     config: CoordinatorConfig,
     /// Total rows processed (reported by workers)
     total_rows: usize,
+    /// Track retry counts per partition
+    retry_counts: HashMap<usize, usize>,
+    /// Partitions that permanently failed (exceeded max retries)
+    failed_partitions: HashSet<usize>,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -111,6 +115,8 @@ pub async fn run_coordinator(
             timeout_secs,
         },
         total_rows: 0,
+        retry_counts: HashMap::new(),
+        failed_partitions: HashSet::new(),
     }));
 
     // Start background timeout monitor
@@ -121,30 +127,39 @@ pub async fn run_coordinator(
             check_timeouts(&monitor_state, timeout_secs);
 
             // Print periodic status
-            let (pending, processing, completed, total, rows) = {
+            let (pending, processing, completed, failed, total, rows) = {
                 let data = monitor_state.lock().unwrap();
                 (
                     data.pending_partitions.len(),
                     data.processing_partitions.len(),
                     data.completed_partitions.len(),
+                    data.failed_partitions.len(),
                     data.config.total_partitions,
                     data.total_rows,
                 )
             };
 
-            if completed > 0 {
+            if completed > 0 || failed > 0 {
                 println!(
-                    "Progress: {}/{} partitions ({:.1}%), {} rows processed",
+                    "Progress: {}/{} partitions ({:.1}%), {} failed, {} rows processed",
                     completed,
                     total,
                     (completed as f64 / total as f64) * 100.0,
+                    failed,
                     rows
                 );
             }
 
-            // Check if job is complete
-            if completed == total && processing == 0 && pending == 0 {
-                println!("All {} partitions completed! Total rows: {}", total, rows);
+            // Check if job is complete (all partitions either completed or failed)
+            if (completed + failed) == total && processing == 0 && pending == 0 {
+                if failed > 0 {
+                    println!(
+                        "Job finished with {} failed partitions out of {}. Total rows: {}",
+                        failed, total, rows
+                    );
+                } else {
+                    println!("All {} partitions completed! Total rows: {}", total, rows);
+                }
                 println!("Coordinator will exit in 10 seconds...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 std::process::exit(0);
@@ -185,12 +200,24 @@ fn check_timeouts(state: &SharedState, timeout_secs: u64) {
     }
 
     for (part_id, worker) in timed_out {
-        println!(
-            "Partition {} timed out (worker: {}), rescheduling",
-            part_id, worker
-        );
         data.processing_partitions.remove(&part_id);
-        data.pending_partitions.push_front(part_id);
+
+        let retries = data.retry_counts.entry(part_id).or_insert(0);
+        *retries += 1;
+
+        if *retries > 3 {
+            println!(
+                "Partition {} exceeded max retries (worker: {}). Marking as failed.",
+                part_id, worker
+            );
+            data.failed_partitions.insert(part_id);
+        } else {
+            println!(
+                "Partition {} timed out (worker: {}), rescheduling (retry {})",
+                part_id, worker, retries
+            );
+            data.pending_partitions.push_front(part_id);
+        }
     }
 }
 
@@ -295,12 +322,17 @@ async fn get_status(
 ) -> axum::Json<StatusResponse> {
     let data = state.lock().unwrap();
 
+    let failed = data.failed_partitions.len();
+    let completed = data.completed_partitions.len();
+    let is_complete = (completed + failed) == data.config.total_partitions;
+
     axum::Json(StatusResponse {
         pending: data.pending_partitions.len(),
         processing: data.processing_partitions.len(),
-        completed: data.completed_partitions.len(),
+        completed,
         total: data.config.total_partitions,
         total_rows: data.total_rows,
-        is_complete: data.completed_partitions.len() == data.config.total_partitions,
+        failed,
+        is_complete,
     })
 }

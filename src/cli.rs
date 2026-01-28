@@ -383,6 +383,10 @@ pub enum PoolCommands {
         #[arg(long)]
         distributed: bool,
 
+        /// Automatically stop VMs after job completion to save costs
+        #[arg(long)]
+        auto_stop: bool,
+
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -402,6 +406,16 @@ pub enum PoolCommands {
     List {
         /// Name of the pool
         name: String,
+    },
+
+    /// Check status of a distributed job running on the pool
+    Status {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
     },
 }
 
@@ -427,7 +441,7 @@ pub enum ServiceCommands {
         total_partitions: usize,
 
         /// Number of partitions to assign per work request
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "10")]
         batch_size: usize,
 
         /// Timeout in seconds before rescheduling stale work

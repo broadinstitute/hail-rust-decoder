@@ -66,6 +66,8 @@ pub struct StatusResponse {
     pub total: usize,
     /// Total rows processed so far
     pub total_rows: usize,
+    /// Number of partitions that permanently failed (max retries exceeded)
+    pub failed: usize,
     /// Whether the job is complete
     pub is_complete: bool,
 }

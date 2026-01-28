@@ -156,6 +156,60 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(())
     }
 
+    /// Get status of a distributed job running on the pool.
+    pub fn status(&self, name: &str, zone: &str) -> Result<()> {
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances.iter().find(|i| i.name.ends_with("-coordinator"));
+
+        if let Some(coord) = coordinator {
+            println!("Fetching status from {}...", coord.name);
+            let mut cmd = self.provider.get_ssh_command(
+                &coord.name,
+                zone,
+                "curl -s http://localhost:3000/status",
+            );
+            cmd.stdout(std::process::Stdio::piped());
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let json_str = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(status) = serde_json::from_str::<
+                        crate::distributed::message::StatusResponse,
+                    >(&json_str)
+                    {
+                        println!();
+                        println!("{}", "Job Status".bold().underline());
+                        println!(
+                            "  Progress:    {}/{} partitions ({:.1}%)",
+                            status.completed,
+                            status.total,
+                            if status.total > 0 {
+                                (status.completed as f64 / status.total as f64) * 100.0
+                            } else {
+                                0.0
+                            }
+                        );
+                        println!("  Processing:  {} workers active", status.processing);
+                        println!("  Pending:     {} partitions", status.pending);
+                        if status.failed > 0 {
+                            println!(
+                                "  {} {} partitions",
+                                "Failed:".red(),
+                                status.failed
+                            );
+                        }
+                        println!("  Rows:        {}", status.total_rows);
+                        return Ok(());
+                    }
+                }
+            }
+            println!("Could not connect to coordinator service. Is the job running?");
+        } else {
+            println!("No coordinator found for pool '{}'", name);
+        }
+        Ok(())
+    }
+
     /// List instances in a pool.
     pub fn list(&self, name: &str) -> Result<Vec<Instance>> {
         let instances = self.provider.list_instances(name)?;
@@ -202,6 +256,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         zone: &str,
         binary_path: Option<String>,
         distributed: bool,
+        auto_stop: bool,
         command: &[String],
     ) -> Result<()> {
         // 1. Locate the Linux binary
@@ -278,6 +333,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 coordinator.as_ref().unwrap(),
                 &workers,
                 command,
+                auto_stop,
             );
         }
 
@@ -506,6 +562,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         coordinator: &Instance,
         workers: &[Instance],
         command: &[String],
+        auto_stop: bool,
     ) -> Result<()> {
         use crate::query::QueryEngine;
 
@@ -549,14 +606,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             coord_ip
         );
 
-        // Start coordinator service
+        // Start coordinator service and save PID
         let coord_cmd = format!(
             "nohup /usr/local/bin/hail-decoder service start-coordinator \
              --port 3000 \
              --input '{}' \
              --output '{}' \
              --total-partitions {} \
-             > /tmp/coordinator.log 2>&1 &",
+             > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid",
             input_path, output_path, total_partitions
         );
 
@@ -628,11 +685,40 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         println!("{}", "Streaming coordinator logs (Ctrl+C to exit)...".dimmed());
         println!();
 
-        // Stream coordinator logs
-        let mut log_cmd = self
-            .provider
-            .get_ssh_command(&coordinator.name, zone, "tail -f /tmp/coordinator.log");
-        log_cmd.status().map_err(HailError::Io)?;
+        // Stream coordinator logs, exiting when the coordinator process exits
+        let mut log_cmd = self.provider.get_ssh_command(
+            &coordinator.name,
+            zone,
+            "tail -f --pid=$(cat /tmp/coordinator.pid) /tmp/coordinator.log",
+        );
+
+        // This blocks until coordinator exits or user interrupts
+        let _ = log_cmd.status();
+
+        if auto_stop {
+            println!(
+                "{}",
+                "Job finished. Stopping pool instances (--auto-stop)..."
+                    .yellow()
+            );
+            let mut stop_cmd = std::process::Command::new("gcloud");
+            stop_cmd.args(["compute", "instances", "stop"]);
+
+            let mut instance_names = vec![coordinator.name.as_str()];
+            for w in workers {
+                instance_names.push(&w.name);
+            }
+
+            stop_cmd.args(&instance_names);
+            stop_cmd.args(["--zone", zone, "--quiet"]);
+
+            match stop_cmd.status() {
+                Ok(s) if s.success() => {
+                    println!("{} Instances stopped.", "OK".green().bold())
+                }
+                _ => eprintln!("{} Failed to stop instances.", "Error:".red()),
+            }
+        }
 
         Ok(())
     }

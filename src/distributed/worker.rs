@@ -57,6 +57,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
     let work_url = format!("{}/work", config.coordinator_url);
     let complete_url = format!("{}/complete", config.coordinator_url);
 
+    // Cache the QueryEngine between work requests to avoid re-reading metadata
+    let mut cached_engine: Option<(String, QueryEngine)> = None;
+
     loop {
         // Request work from coordinator
         let work_response = match request_work(&client, &work_url, &config.worker_id).await {
@@ -83,7 +86,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 partitions,
                 input_path,
                 output_path,
-                total_partitions,
+                total_partitions: _,
             } => {
                 println!(
                     "Received work: {} partition(s) {:?}",
@@ -93,27 +96,35 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
                 // Process the assigned partitions on a blocking thread
                 // (QueryEngine uses blocking I/O internally)
+                // Pass cached engine in and get it back to avoid re-reading metadata
                 let partitions_clone = partitions.clone();
                 let input_clone = input_path.clone();
                 let output_clone = output_path.clone();
 
-                let rows_processed = match tokio::task::spawn_blocking(move || {
+                let result = tokio::task::spawn_blocking(move || {
                     process_partitions_sync(
+                        cached_engine,
                         &partitions_clone,
                         &input_clone,
                         &output_clone,
                     )
                 })
-                .await
-                {
-                    Ok(Ok(rows)) => rows,
+                .await;
+
+                let rows_processed = match result {
+                    Ok(Ok((rows, engine_back))) => {
+                        cached_engine = engine_back;
+                        rows
+                    }
                     Ok(Err(e)) => {
                         eprintln!("Error processing partitions {:?}: {}", partitions, e);
+                        cached_engine = None;
                         // Don't report completion - let coordinator reassign after timeout
                         continue;
                     }
                     Err(e) => {
                         eprintln!("Task panicked processing partitions {:?}: {}", partitions, e);
+                        cached_engine = None;
                         continue;
                     }
                 };
@@ -205,13 +216,24 @@ async fn report_completion(
 }
 
 /// Process the assigned partitions and write to output (synchronous version).
+/// Accepts an optional cached engine and returns it for reuse across work requests.
 fn process_partitions_sync(
+    cached_engine: Option<(String, QueryEngine)>,
     partitions: &[usize],
     input_path: &str,
     output_path: &str,
-) -> Result<usize> {
-    println!("Opening input: {}", input_path);
-    let engine = QueryEngine::open_path(input_path)?;
+) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    // Reuse cached engine if input path matches, otherwise open a new one
+    let engine = match cached_engine {
+        Some((path, engine)) if path == input_path => {
+            println!("Reusing cached QueryEngine for {}", input_path);
+            engine
+        }
+        _ => {
+            println!("Opening input: {}", input_path);
+            QueryEngine::open_path(input_path)?
+        }
+    };
     let row_type = engine.row_type().clone();
 
     // Create schema for Parquet output
@@ -286,5 +308,5 @@ fn process_partitions_sync(
         );
     }
 
-    Ok(total_rows)
+    Ok((total_rows, Some((input_path.to_string(), engine))))
 }
