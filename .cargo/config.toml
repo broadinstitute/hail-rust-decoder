@@ -9,12 +9,19 @@
 [build]
 rustc-wrapper = "sccache"
 
-# Linux x86_64: use mold for faster linking
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# Linux x86_64: mold linker settings (only used when building ON Linux)
+# When cross-compiling from macOS, zigbuild handles linking automatically
+# [target.x86_64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
-# Linux ARM64: use mold for faster linking
-[target.aarch64-unknown-linux-gnu]
-linker = "clang"
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# Linux ARM64: mold linker settings (only used when building ON Linux)
+# [target.aarch64-unknown-linux-gnu]
+# linker = "clang"
+# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Aliases for common operations
+[alias]
+# Cross-compile for Linux (for GCP VMs)
+# Usage: cargo linux [--release]
+linux = "zigbuild --target x86_64-unknown-linux-gnu"

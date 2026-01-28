@@ -43,6 +43,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: SchemaSubcommands,
     },
+
+    /// Manage a distributed worker pool for parallel processing
+    Pool {
+        #[command(subcommand)]
+        command: PoolCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -63,6 +69,26 @@ pub enum ExportCommands {
     /// Export to BigQuery
     #[cfg(feature = "bigquery")]
     Bigquery(ExportBigqueryArgs),
+}
+
+/// Arguments for distributed processing (partition slicing).
+/// Include these in any command that should support distributed execution.
+#[derive(Args, Clone, Copy, Debug)]
+pub struct PartitioningArgs {
+    /// Worker ID (0-based) for distributed processing
+    #[arg(long, default_value = "0")]
+    pub worker_id: usize,
+
+    /// Total number of workers in the pool
+    #[arg(long, default_value = "1")]
+    pub total_workers: usize,
+}
+
+impl PartitioningArgs {
+    /// Returns true if this is a distributed job (more than one worker).
+    pub fn is_distributed(&self) -> bool {
+        self.total_workers > 1
+    }
 }
 
 /// Common arguments shared by all export commands.
@@ -88,6 +114,10 @@ pub struct CommonExportArgs {
     /// Path to interval file (.bed, .json, or text with chr:start-end lines)
     #[arg(long)]
     pub intervals_file: Option<String>,
+
+    /// Partitioning arguments for distributed processing
+    #[command(flatten)]
+    pub partitioning: PartitioningArgs,
 }
 
 /// Trait that all export argument structs must implement.
@@ -275,4 +305,80 @@ pub struct ValidateArgs {
     /// Show each row ID and validation result in real-time (sequential)
     #[arg(long, short)]
     pub verbose: bool,
+}
+
+/// Subcommands for managing distributed worker pools.
+#[derive(Subcommand)]
+pub enum PoolCommands {
+    /// Create a new worker pool of GCP VMs
+    Create {
+        /// Name of the pool (used for tagging and identification)
+        name: String,
+
+        /// Number of worker VMs to create
+        #[arg(long, default_value = "4")]
+        workers: usize,
+
+        /// GCP machine type (e.g., c3-highcpu-22, c3-highcpu-88)
+        #[arg(long, default_value = "c3-highcpu-22")]
+        machine_type: String,
+
+        /// GCP zone for the VMs
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Use spot/preemptible instances for cost savings
+        #[arg(long)]
+        spot: bool,
+
+        /// GCP project ID (defaults to gcloud config)
+        #[arg(long)]
+        project: Option<String>,
+
+        /// VPC network name (defaults to "default")
+        #[arg(long)]
+        network: Option<String>,
+
+        /// Subnet name (required if network is specified and not using default)
+        #[arg(long)]
+        subnet: Option<String>,
+
+        /// Wait for VMs to be ready (startup script complete)
+        #[arg(long)]
+        wait: bool,
+    },
+
+    /// Submit a job to run on the worker pool
+    Submit {
+        /// Name of the pool to submit to
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/hail-decoder)
+        #[arg(long)]
+        binary: Option<String>,
+
+        /// The command to run on workers (everything after --)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Destroy a worker pool and delete all VMs
+    Destroy {
+        /// Name of the pool to destroy
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+    },
+
+    /// List instances in a worker pool
+    List {
+        /// Name of the pool
+        name: String,
+    },
 }

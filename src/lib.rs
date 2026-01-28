@@ -36,6 +36,7 @@
 //! ```
 
 pub mod buffer;
+pub mod cloud;
 pub mod codec;
 pub mod datasource;
 pub mod error;
@@ -45,6 +46,7 @@ pub mod index;
 pub mod io;
 pub mod metadata;
 pub mod parquet;
+pub mod partitioning;
 pub mod query;
 pub mod schema;
 pub mod summary;

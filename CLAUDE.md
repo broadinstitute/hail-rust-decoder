@@ -45,6 +45,21 @@ cargo build --features gcp,aws,http
 cargo build --features full
 ```
 
+## Cross-Compilation (for GCP distributed processing)
+
+To run distributed jobs on GCP VMs, you need a Linux binary. On macOS:
+
+```bash
+# Install dependencies (one-time)
+brew install zig
+cargo install cargo-zigbuild
+rustup target add x86_64-unknown-linux-gnu
+
+# Build Linux binary
+cargo linux --release
+# Output: target/x86_64-unknown-linux-gnu/release/hail-decoder
+```
+
 ## Commands
 
 - `info` - Show basic table metadata
@@ -58,6 +73,31 @@ cargo build --features full
 - `export bigquery` - Export to BigQuery (requires `bigquery` feature)
 - `export vcf` - Export to VCF format (from MatrixTable-derived tables)
 - `export hail` - Export to Hail table format
+- `pool create` - Create a distributed worker pool on GCP
+- `pool submit` - Submit a job to the worker pool
+- `pool destroy` - Destroy a worker pool
+- `pool list` - List instances in a pool
+
+## Distributed Processing (GCP)
+
+Run parallel exports across multiple GCP VMs:
+
+```bash
+# 1. Build Linux binary
+cargo linux --release
+
+# 2. Create a pool of spot VMs
+hail-decoder pool create my-pool --workers 4 --spot
+
+# 3. Submit a distributed job
+hail-decoder pool submit my-pool -- \
+    export parquet gs://bucket/input.ht gs://bucket/output/ --shard-count 100
+
+# 4. Clean up
+hail-decoder pool destroy my-pool
+```
+
+Requires `gcloud` CLI configured with appropriate project/credentials.
 
 ## ClickHouse
 

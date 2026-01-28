@@ -11,7 +11,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// Input table metadata for the benchmark report
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct InputMetadata {
     /// Path to the input table
     pub path: String,
@@ -26,7 +26,7 @@ pub struct InputMetadata {
 }
 
 /// Per-field size statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct FieldSizeStats {
     /// Field name
     pub name: String,
@@ -67,7 +67,7 @@ impl FieldSizeStats {
 }
 
 /// Statistics about row sizes (collected via sampling)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct RowSizeStats {
     /// Number of rows sampled
     pub sample_count: usize,
@@ -159,7 +159,7 @@ impl RowSizeStats {
 }
 
 /// A single snapshot of system metrics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct MetricsSample {
     /// Timestamp (seconds since start)
     pub elapsed_secs: f64,
@@ -186,7 +186,7 @@ pub struct MetricsSample {
 }
 
 /// Summary statistics from a benchmark run
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize)]
 pub struct BenchmarkReport {
     /// Total duration
     pub duration: Duration,
@@ -510,6 +510,48 @@ impl BenchmarkReport {
         println!("{}", "Recommendations:".green());
         for rec in self.scaling_recommendations() {
             println!("  {} {}", "-".cyan(), rec);
+        }
+    }
+
+    /// Merge another report into this one (aggregating cluster totals).
+    ///
+    /// Used by the pool coordinator to combine results from multiple workers.
+    pub fn merge(&mut self, other: BenchmarkReport) {
+        // Sum totals
+        self.total_rows += other.total_rows;
+        self.total_partitions += other.total_partitions;
+
+        // Sum output sizes if available
+        match (self.output_size_bytes, other.output_size_bytes) {
+            (Some(s1), Some(s2)) => self.output_size_bytes = Some(s1 + s2),
+            (None, Some(s2)) => self.output_size_bytes = Some(s2),
+            _ => {}
+        }
+
+        // Append samples for aggregate CPU/memory stats
+        self.samples.extend(other.samples);
+
+        // Duration is max (wall clock time for cluster job)
+        self.duration = std::cmp::max(self.duration, other.duration);
+
+        // Sum CPU cores (cluster total)
+        self.num_cpus += other.num_cpus;
+    }
+
+    /// Create an empty report for aggregation.
+    pub fn empty() -> Self {
+        Self {
+            duration: std::time::Duration::default(),
+            samples: vec![],
+            total_rows: 0,
+            total_partitions: 0,
+            num_cpus: 0,
+            input_metadata: None,
+            output_path: None,
+            output_size_bytes: None,
+            disk_space_available: None,
+            disk_space_total: None,
+            row_size_stats: None,
         }
     }
 }

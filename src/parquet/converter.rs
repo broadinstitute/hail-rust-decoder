@@ -22,6 +22,7 @@
 
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
+use crate::partitioning::PartitionAllocator;
 use crate::query::QueryEngine;
 use crate::Result;
 use arrow::record_batch::RecordBatch;
@@ -260,7 +261,16 @@ pub fn hail_to_parquet_sharded(
     show_progress: bool,
     shard_count: Option<usize>,
 ) -> Result<usize> {
-    hail_to_parquet_sharded_with_metrics(input_path, output_dir, show_progress, shard_count, None, None)
+    hail_to_parquet_sharded_full(
+        input_path,
+        output_dir,
+        show_progress,
+        shard_count,
+        None,
+        None,
+        None,
+        None, // No allocator - single worker mode
+    )
 }
 
 /// Convert a Hail table to a directory of Parquet files (sharded) with optional metrics.
@@ -282,6 +292,7 @@ pub fn hail_to_parquet_sharded_with_metrics(
         rows_counter,
         partitions_counter,
         None,
+        None, // No allocator - single worker mode
     )
 }
 
@@ -294,6 +305,19 @@ pub fn hail_to_parquet_sharded_with_metrics(
 /// When `output_dir` is a cloud path (gs://, s3://), files are written directly
 /// to cloud storage without touching local disk. Each shard is buffered in memory
 /// and uploaded on completion.
+///
+/// ## Distributed Processing
+///
+/// When `allocator` is provided, this worker only processes shards assigned to it.
+/// This enables distributing work across multiple VMs without coordination:
+///
+/// ```bash
+/// # Worker 0 of 4 processes shards 0, 4, 8, ...
+/// hail-decoder export parquet input.ht output/ --worker-id 0 --total-workers 4
+///
+/// # Worker 1 of 4 processes shards 1, 5, 9, ...
+/// hail-decoder export parquet input.ht output/ --worker-id 1 --total-workers 4
+/// ```
 pub fn hail_to_parquet_sharded_full(
     input_path: &str,
     output_dir: &str,
@@ -302,6 +326,7 @@ pub fn hail_to_parquet_sharded_full(
     rows_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     row_size_stats: Option<std::sync::Arc<std::sync::Mutex<crate::benchmark::RowSizeStats>>>,
+    allocator: Option<PartitionAllocator>,
 ) -> Result<usize> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -323,12 +348,54 @@ pub fn hail_to_parquet_sharded_full(
         return Ok(0);
     }
 
+    // Determine which shards this worker owns (for distributed processing)
+    let owned_shards: Vec<usize> = if let Some(ref alloc) = allocator {
+        alloc.get_owned_indices(num_shards)
+    } else {
+        (0..num_shards).collect()
+    };
+
+    // If this worker has no shards to process, return early
+    if owned_shards.is_empty() {
+        if show_progress {
+            eprintln!(
+                "Worker {}/{} has no shards to process (total shards: {})",
+                allocator.map(|a| a.worker_id).unwrap_or(0),
+                allocator.map(|a| a.total_workers).unwrap_or(1),
+                num_shards
+            );
+        }
+        return Ok(0);
+    }
+
+    // Count partitions this worker will process (for progress bar)
+    let owned_partition_count: usize = owned_shards
+        .iter()
+        .map(|&shard_id| {
+            (0..total_partitions)
+                .filter(|p| p % num_shards == shard_id)
+                .count()
+        })
+        .sum();
+
     // Setup progress bar tracking partitions (not shards) for better granularity
     let pb = if show_progress {
-        let pb = ProgressBar::new(total_partitions as u64);
+        let pb = ProgressBar::new(owned_partition_count as u64);
+        let worker_info = if allocator.is_some() {
+            format!(
+                " [worker {}/{}]",
+                allocator.map(|a| a.worker_id).unwrap_or(0),
+                allocator.map(|a| a.total_workers).unwrap_or(1)
+            )
+        } else {
+            String::new()
+        };
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} partitions ({elapsed} elapsed, {eta} remaining)")
+                .template(&format!(
+                    "{{spinner:.green}} [{{bar:40.cyan/blue}}] {{pos}}/{{len}} partitions{} ({{elapsed}} elapsed, {{eta}} remaining)",
+                    worker_info
+                ))
                 .unwrap()
                 .progress_chars("#>-"),
         );
@@ -366,8 +433,8 @@ pub fn hail_to_parquet_sharded_full(
     // Row sampling interval (sample 1 in every N rows)
     const ROW_SAMPLE_INTERVAL: usize = 1000;
 
-    // Process shards in parallel
-    let result: Result<()> = (0..num_shards).into_par_iter().try_for_each(|shard_id| {
+    // Process shards in parallel (only the shards this worker owns)
+    let result: Result<()> = owned_shards.into_par_iter().try_for_each(|shard_id| {
         let assigned_partitions = &partitions_per_shard[shard_id];
 
         // Skip empty shards (more shards than partitions)

@@ -9,7 +9,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, QueryArgs};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, PoolCommands, QueryArgs};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -48,6 +48,7 @@ fn main() -> Result<()> {
             SchemaSubcommands::Validate(args) => run_validate(args)?,
             SchemaSubcommands::Generate(args) => run_generate_schema(&args.table, args.output.as_deref())?,
         },
+        Commands::Pool { command } => run_pool_command(command)?,
     }
 
     Ok(())
@@ -562,12 +563,24 @@ fn encoded_value_to_json(value: &EncodedValue) -> String {
 }
 
 fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
-    use hail_decoder::parquet::{build_record_batch, ParquetWriter, hail_to_parquet_with_options, hail_to_parquet_sharded, hail_to_parquet_sharded_full};
+    use hail_decoder::parquet::{build_record_batch, ParquetWriter, hail_to_parquet_with_options, hail_to_parquet_sharded_full};
+    use hail_decoder::partitioning::PartitionAllocator;
     use hail_decoder::benchmark::{MetricsCollector, InputMetadata};
     use std::time::Duration;
 
     let where_filters = parse_export_filters(&args);
     let intervals = parse_export_intervals(&args)?;
+
+    // Validate partitioning args
+    if args.common.partitioning.worker_id >= args.common.partitioning.total_workers {
+        eprintln!(
+            "{} Worker ID ({}) must be less than total workers ({})",
+            "Error:".red().bold(),
+            args.common.partitioning.worker_id,
+            args.common.partitioning.total_workers
+        );
+        std::process::exit(1);
+    }
 
     // Determine if sharded export is requested
     let use_sharded = args.per_partition || args.shard_count.is_some();
@@ -598,11 +611,25 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     } else if let Some(n) = args.shard_count {
         println!("{} {} files", "Output shards:".cyan(), n.to_string().bright_white());
     }
+    if args.common.partitioning.is_distributed() {
+        println!(
+            "{} worker {}/{}",
+            "Distributed mode:".cyan(),
+            args.common.partitioning.worker_id.to_string().bright_white(),
+            args.common.partitioning.total_workers.to_string().bright_white()
+        );
+    }
     println!();
 
     // Check for incompatible options with sharded export
     if use_sharded && (!where_filters.is_empty() || intervals.is_some() || args.common.limit.is_some()) {
         eprintln!("{} Sharded export (--per-partition or --shard-count) does not support --where, --interval, or --limit", "Error:".red().bold());
+        std::process::exit(1);
+    }
+
+    // Distributed mode requires sharded export
+    if args.common.partitioning.is_distributed() && !use_sharded {
+        eprintln!("{} Distributed mode (--worker-id, --total-workers) requires --per-partition or --shard-count", "Error:".red().bold());
         std::process::exit(1);
     }
 
@@ -651,8 +678,26 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
     let (total_rows, is_directory) = if use_sharded {
         // Use sharded export (one file per shard, true parallelism)
         let shard_count = if args.per_partition { None } else { args.shard_count };
-        println!("{}", "Using sharded parallel export (all CPU cores)...".dimmed());
+        if args.common.partitioning.is_distributed() {
+            println!("{}", format!(
+                "Using sharded parallel export (worker {}/{})...",
+                args.common.partitioning.worker_id,
+                args.common.partitioning.total_workers
+            ).dimmed());
+        } else {
+            println!("{}", "Using sharded parallel export (all CPU cores)...".dimmed());
+        }
         drop(engine); // Close engine so converter can open its own
+
+        // Create allocator for distributed processing
+        let allocator = if args.common.partitioning.is_distributed() {
+            Some(PartitionAllocator::new(
+                args.common.partitioning.worker_id,
+                args.common.partitioning.total_workers,
+            ))
+        } else {
+            None
+        };
 
         let rows = if let Some(ref collector) = metrics_collector {
             // Pass counters to the sharded export for metrics tracking
@@ -664,9 +709,19 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
                 Some(collector.rows_counter.clone()),
                 Some(collector.partitions_counter.clone()),
                 Some(collector.row_size_stats_handle()),
+                allocator,
             )?
         } else {
-            hail_to_parquet_sharded(&args.common.input, &args.output, true, shard_count)?
+            hail_to_parquet_sharded_full(
+                &args.common.input,
+                &args.output,
+                true,
+                shard_count,
+                None,
+                None,
+                None,
+                allocator,
+            )?
         };
         (rows, true)
     } else {
@@ -1611,6 +1666,66 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
     println!("{}", "Export complete!".green().bold());
     println!("  {} {}", "Rows exported:".cyan(), rows_written.to_string().bright_white());
     println!("  {} {}:{}.{}", "BigQuery table:".cyan(), project, dataset, table);
+
+    Ok(())
+}
+
+/// Run pool management commands
+fn run_pool_command(command: PoolCommands) -> Result<()> {
+    use hail_decoder::cloud::gcp::GcpClient;
+    use hail_decoder::cloud::pool::PoolManager;
+    use hail_decoder::cloud::PoolConfig;
+
+    let client = GcpClient::new();
+    let manager = PoolManager::new(client);
+
+    match command {
+        PoolCommands::Create {
+            name,
+            workers,
+            machine_type,
+            zone,
+            spot,
+            project,
+            network,
+            subnet,
+            wait,
+        } => {
+            // Resolve project ID
+            let project_id = if let Some(p) = project {
+                p
+            } else {
+                GcpClient::new().get_current_project()?
+            };
+
+            let config = PoolConfig {
+                name,
+                worker_count: workers,
+                machine_type,
+                zone,
+                spot,
+                project_id,
+                network,
+                subnet,
+            };
+
+            manager.create(&config, wait)?;
+        }
+        PoolCommands::Submit {
+            name,
+            zone,
+            binary,
+            command,
+        } => {
+            manager.submit(&name, &zone, binary, &command)?;
+        }
+        PoolCommands::Destroy { name, zone } => {
+            manager.destroy(&name, &zone)?;
+        }
+        PoolCommands::List { name } => {
+            manager.list(&name)?;
+        }
+    }
 
     Ok(())
 }
