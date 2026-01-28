@@ -20,6 +20,7 @@
 //! When output is a cloud path, each partition is buffered in memory and uploaded
 //! on completion, providing a truly diskless pipeline.
 
+use crate::cloud::ProgressUpdate;
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
 use crate::partitioning::PartitionAllocator;
@@ -269,7 +270,8 @@ pub fn hail_to_parquet_sharded(
         None,
         None,
         None,
-        None, // No allocator - single worker mode
+        None,  // No allocator - single worker mode
+        false, // No JSON progress
     )
 }
 
@@ -292,7 +294,8 @@ pub fn hail_to_parquet_sharded_with_metrics(
         rows_counter,
         partitions_counter,
         None,
-        None, // No allocator - single worker mode
+        None,  // No allocator - single worker mode
+        false, // No JSON progress
     )
 }
 
@@ -327,6 +330,7 @@ pub fn hail_to_parquet_sharded_full(
     partitions_counter: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     row_size_stats: Option<std::sync::Arc<std::sync::Mutex<crate::benchmark::RowSizeStats>>>,
     allocator: Option<PartitionAllocator>,
+    progress_json: bool,
 ) -> Result<usize> {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -378,15 +382,16 @@ pub fn hail_to_parquet_sharded_full(
         })
         .sum();
 
+    // Get worker info for progress reporting
+    let worker_id = allocator.map(|a| a.worker_id).unwrap_or(0);
+    let total_workers = allocator.map(|a| a.total_workers).unwrap_or(1);
+
     // Setup progress bar tracking partitions (not shards) for better granularity
-    let pb = if show_progress {
+    // Skip visual progress bar when using JSON progress mode
+    let pb = if show_progress && !progress_json {
         let pb = ProgressBar::new(owned_partition_count as u64);
         let worker_info = if allocator.is_some() {
-            format!(
-                " [worker {}/{}]",
-                allocator.map(|a| a.worker_id).unwrap_or(0),
-                allocator.map(|a| a.total_workers).unwrap_or(1)
-            )
+            format!(" [worker {}/{}]", worker_id, total_workers)
         } else {
             String::new()
         };
@@ -403,6 +408,12 @@ pub fn hail_to_parquet_sharded_full(
     } else {
         None
     };
+
+    // Start time for JSON progress reporting
+    let start_time = std::time::Instant::now();
+
+    // Counter for completed partitions (for JSON progress)
+    let completed_partitions = std::sync::atomic::AtomicUsize::new(0);
 
     // Total rows counter (atomic for thread-safety)
     let total_rows = AtomicUsize::new(0);
@@ -429,6 +440,8 @@ pub fn hail_to_parquet_sharded_full(
     let rows_counter_ref = &rows_counter;
     let partitions_counter_ref = &partitions_counter;
     let row_size_stats_ref = &row_size_stats;
+    let completed_partitions_ref = &completed_partitions;
+    let start_time_ref = &start_time;
 
     // Row sampling interval (sample 1 in every N rows)
     const ROW_SAMPLE_INTERVAL: usize = 1000;
@@ -512,6 +525,21 @@ pub fn hail_to_parquet_sharded_full(
                     }
                     if let Some(ref counter) = partitions_counter_ref {
                         counter.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    // Emit JSON progress if enabled
+                    if progress_json {
+                        let done = completed_partitions_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        let rows = total_rows_ref.load(Ordering::Relaxed) + shard_rows;
+                        let elapsed = start_time_ref.elapsed().as_secs_f64();
+                        let update = ProgressUpdate::new(
+                            worker_id,
+                            done,
+                            owned_partition_count,
+                            rows,
+                            elapsed,
+                        );
+                        println!("{}", update.to_json_line());
                     }
                 }
 

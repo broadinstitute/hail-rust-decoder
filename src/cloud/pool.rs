@@ -8,14 +8,16 @@
 //! - Cleaning up resources
 
 use crate::benchmark::BenchmarkReport;
-use crate::cloud::{CloudProvider, Instance, PoolConfig};
+use crate::cloud::{CloudProvider, Instance, PoolConfig, ProgressUpdate};
 use crate::HailError;
 use crate::Result;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
 use rayon::prelude::*;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 /// Manages distributed worker pools for parallel processing.
@@ -33,7 +35,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     ///
     /// Provisions `config.worker_count` VMs in parallel.
     /// If `wait` is true, polls until all VMs have completed their startup scripts.
-    pub fn create(&self, config: &PoolConfig, wait: bool) -> Result<()> {
+    /// Automatically builds Linux binary if on macOS (unless `skip_build` is true).
+    pub fn create(&self, config: &PoolConfig, wait: bool, skip_build: bool) -> Result<()> {
+        // Build Linux binary first (needed for deployment)
+        if !skip_build {
+            Self::build_linux_binary()?;
+        } else {
+            println!("{}", "Skipping binary build (--skip-build)".dimmed());
+        }
+
         println!(
             "{} pool '{}' with {} workers ({}, {})...",
             "Creating".green(),
@@ -183,11 +193,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// 2. Upload the binary to all workers in parallel
     /// 3. Execute the command on each worker with partition slicing
     /// 4. Stream logs and aggregate benchmark results
+    ///
+    /// If `distributed` is true, uses coordinator/worker pattern for resilient
+    /// distributed processing with automatic retry on Spot instance preemption.
     pub fn submit(
         &self,
         name: &str,
         zone: &str,
         binary_path: Option<String>,
+        distributed: bool,
         command: &[String],
     ) -> Result<()> {
         // 1. Locate the Linux binary
@@ -213,35 +227,110 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             )));
         }
 
-        let total_workers = running.len();
+        // Separate coordinator from workers
+        let (coordinators, workers): (Vec<_>, Vec<_>) = running
+            .into_iter()
+            .partition(|i| i.name.ends_with("-coordinator"));
+
+        let coordinator = coordinators.into_iter().next();
+        let total_workers = workers.len();
+
+        if distributed && coordinator.is_none() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "Distributed mode requires a coordinator node. Pool '{}' has none.\n\
+                     Create with: hail-decoder pool create {} --with-coordinator",
+                    name, name
+                ),
+            )));
+        }
+
         println!(
-            "{} {} running workers",
+            "{} {} running worker(s){}",
             "Found".green(),
-            total_workers.to_string().bright_white()
+            total_workers.to_string().bright_white(),
+            if let Some(ref c) = coordinator {
+                format!(", 1 coordinator ({})", c.name.cyan())
+            } else {
+                String::new()
+            }
         );
 
-        // 3. Deploy binary to all workers in parallel
-        println!("{}", "Deploying binary to workers...".dimmed());
-        self.deploy_binary(&binary, &running, zone)?;
-        println!("{} Binary deployed to all workers.", "OK".green().bold());
+        // 3. Deploy binary to all nodes in parallel
+        let all_nodes: Vec<_> = if let Some(ref c) = coordinator {
+            let mut nodes = workers.clone();
+            nodes.push(c.clone());
+            nodes
+        } else {
+            workers.clone()
+        };
 
-        // 4. Submit jobs
-        println!("{}", "Submitting jobs...".dimmed());
+        println!("{}", "Deploying binary to nodes...".dimmed());
+        self.deploy_binary(&binary, &all_nodes, zone)?;
+        println!("{} Binary deployed to all nodes.", "OK".green().bold());
+
+        // 4. Branch based on distributed mode
+        if distributed {
+            return self.submit_distributed(
+                name,
+                zone,
+                coordinator.as_ref().unwrap(),
+                &workers,
+                command,
+            );
+        }
+
+        // Legacy mode: submit jobs with progress tracking
+        println!("{}", "Submitting jobs (legacy mode)...".dimmed());
         let base_args = command.join(" ");
         let start_time = Instant::now();
+
+        // Setup multi-progress display
+        let multi_progress = MultiProgress::new();
+        let progress_style = ProgressStyle::default_bar()
+            .template("{prefix:.cyan} [{bar:30.cyan/blue}] {pos}/{len} partitions ({eta})")
+            .unwrap()
+            .progress_chars("█▓░");
+
+        // Create progress bars for each worker (initially with length 0, updated on first progress)
+        let worker_bars: Vec<ProgressBar> = (0..total_workers)
+            .map(|i| {
+                let pb = multi_progress.add(ProgressBar::new(0));
+                pb.set_style(progress_style.clone());
+                pb.set_prefix(format!("worker-{}", i));
+                pb
+            })
+            .collect();
+
+        // Total progress bar
+        let total_bar = multi_progress.add(ProgressBar::new(0));
+        total_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("{prefix:.green.bold} [{bar:30.green/white}] {pos}/{len} partitions | {msg}")
+                .unwrap()
+                .progress_chars("█▓░"),
+        );
+        total_bar.set_prefix("TOTAL");
+
+        // Atomic counters for aggregate tracking
+        let total_rows = Arc::new(AtomicUsize::new(0));
+        let total_partitions_done = Arc::new(AtomicUsize::new(0));
+        let total_partitions_expected = Arc::new(AtomicUsize::new(0));
 
         // Channel for receiving results from workers
         let (tx, rx) = mpsc::channel();
 
-        // Spawn threads for each worker
-        let handles: Vec<_> = running
+        // Spawn threads for each worker (legacy mode uses workers list)
+        let handles: Vec<_> = workers
             .iter()
             .enumerate()
             .map(|(worker_id, inst)| {
                 let inst_name = inst.name.clone();
                 let inst_zone = inst.zone.clone();
+                // Add --progress-json flag for machine-readable progress
                 let args = format!(
-                    "{} --worker-id {} --total-workers {}",
+                    "{} --worker-id {} --total-workers {} --progress-json",
                     base_args, worker_id, total_workers
                 );
                 let tx = tx.clone();
@@ -271,29 +360,77 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut aggregate_report = BenchmarkReport::empty();
         let mut completed = 0;
         let mut errors = 0;
+        let mut worker_partition_totals: Vec<usize> = vec![0; total_workers];
 
         for msg in rx {
             match msg {
                 WorkerMessage::Log { worker_id, line } => {
-                    println!("[worker-{}] {}", worker_id, line.dimmed());
+                    // Use suspend to avoid interfering with progress bars
+                    multi_progress.suspend(|| {
+                        println!("[worker-{}] {}", worker_id, line.dimmed());
+                    });
+                }
+                WorkerMessage::Progress { worker_id, update } => {
+                    // Update worker's progress bar
+                    if worker_id < worker_bars.len() {
+                        let pb = &worker_bars[worker_id];
+                        // Set total on first update (partitions_total might not be known initially)
+                        if pb.length() != Some(update.partitions_total as u64) {
+                            pb.set_length(update.partitions_total as u64);
+                            // Track totals for overall progress
+                            let old_total = worker_partition_totals[worker_id];
+                            worker_partition_totals[worker_id] = update.partitions_total;
+                            total_partitions_expected.fetch_add(
+                                update.partitions_total.saturating_sub(old_total),
+                                Ordering::Relaxed,
+                            );
+                            // Update total bar length
+                            total_bar.set_length(
+                                total_partitions_expected.load(Ordering::Relaxed) as u64,
+                            );
+                        }
+                        pb.set_position(update.partitions_done as u64);
+                    }
+
+                    // Update totals
+                    total_rows.store(
+                        total_rows.load(Ordering::Relaxed).max(update.rows),
+                        Ordering::Relaxed,
+                    );
+                    total_partitions_done.store(
+                        worker_bars.iter().map(|pb| pb.position() as usize).sum(),
+                        Ordering::Relaxed,
+                    );
+                    total_bar.set_position(total_partitions_done.load(Ordering::Relaxed) as u64);
+
+                    // Update throughput message
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    let rows = total_rows.load(Ordering::Relaxed);
+                    if elapsed > 0.0 && rows > 0 {
+                        total_bar.set_message(format!("{:.0} rows/sec", rows as f64 / elapsed));
+                    }
                 }
                 WorkerMessage::Report { worker_id, report } => {
-                    println!(
-                        "[worker-{}] {} Processed {} rows, {} partitions",
-                        worker_id,
-                        "Done:".green(),
-                        report.total_rows,
-                        report.total_partitions
-                    );
+                    // Mark worker's bar as finished
+                    if worker_id < worker_bars.len() {
+                        worker_bars[worker_id].finish_with_message("done");
+                    }
                     aggregate_report.merge(report);
                     completed += 1;
                 }
                 WorkerMessage::Error { worker_id, message } => {
-                    eprintln!("[worker-{}] {} {}", worker_id, "Error:".red(), message);
+                    if worker_id < worker_bars.len() {
+                        worker_bars[worker_id].abandon_with_message("error");
+                    }
+                    multi_progress.suspend(|| {
+                        eprintln!("[worker-{}] {} {}", worker_id, "Error:".red(), message);
+                    });
                     errors += 1;
                 }
                 WorkerMessage::Complete { worker_id } => {
-                    println!("[worker-{}] {}", worker_id, "Finished".green());
+                    if worker_id < worker_bars.len() {
+                        worker_bars[worker_id].finish_with_message("done");
+                    }
                     completed += 1;
                 }
             }
@@ -303,6 +440,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         for handle in handles {
             let _ = handle.join();
         }
+
+        // Finish total bar
+        total_bar.finish_with_message("complete");
 
         let elapsed = start_time.elapsed();
 
@@ -351,6 +491,152 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(())
     }
 
+    /// Submit a distributed job using the coordinator/worker pattern.
+    ///
+    /// This method:
+    /// 1. Parses the command to extract input/output paths
+    /// 2. Calculates total partitions from the input table
+    /// 3. Starts the coordinator service on the coordinator VM
+    /// 4. Starts worker services on all worker VMs
+    /// 5. Streams coordinator logs for progress monitoring
+    fn submit_distributed(
+        &self,
+        _pool_name: &str,
+        zone: &str,
+        coordinator: &Instance,
+        workers: &[Instance],
+        command: &[String],
+    ) -> Result<()> {
+        use crate::query::QueryEngine;
+
+        println!("{}", "Preparing distributed job...".dimmed());
+
+        // Parse input/output from command
+        // Expected format: export parquet <input> <output> [args...]
+        if command.len() < 4 || command.get(0).map(|s| s.as_str()) != Some("export") {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Distributed mode currently only supports 'export parquet <input> <output>'\n\
+                 Example: pool submit mypool --distributed -- export parquet gs://bucket/input.ht gs://bucket/output/",
+            )));
+        }
+
+        let input_path = &command[2];
+        let output_path = &command[3];
+
+        // Calculate total partitions by reading metadata locally
+        println!("Reading metadata from {}...", input_path.bright_white());
+        let engine = QueryEngine::open_path(input_path)?;
+        let total_partitions = engine.num_partitions();
+        println!(
+            "  {} {} partitions to process",
+            "Found".green(),
+            total_partitions.to_string().bright_white()
+        );
+        drop(engine);
+
+        // Get coordinator's internal IP
+        let coord_ip = coordinator.ip().ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Coordinator {} has no internal IP", coordinator.name),
+            ))
+        })?;
+
+        println!(
+            "Starting coordinator on {} ({})...",
+            coordinator.name.cyan(),
+            coord_ip
+        );
+
+        // Start coordinator service
+        let coord_cmd = format!(
+            "nohup /usr/local/bin/hail-decoder service start-coordinator \
+             --port 3000 \
+             --input '{}' \
+             --output '{}' \
+             --total-partitions {} \
+             > /tmp/coordinator.log 2>&1 &",
+            input_path, output_path, total_partitions
+        );
+
+        let status = self
+            .provider
+            .get_ssh_command(&coordinator.name, zone, &coord_cmd)
+            .status()
+            .map_err(HailError::Io)?;
+
+        if !status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to start coordinator service",
+            )));
+        }
+
+        // Give coordinator a moment to bind its port
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Start workers in parallel
+        println!(
+            "Starting {} worker(s)...",
+            workers.len().to_string().bright_white()
+        );
+
+        let worker_results: Vec<Result<()>> = workers
+            .par_iter()
+            .map(|worker| {
+                let worker_cmd = format!(
+                    "nohup /usr/local/bin/hail-decoder service start-worker \
+                     --url http://{}:3000 \
+                     --worker-id {} \
+                     > /tmp/worker.log 2>&1 &",
+                    coord_ip, worker.name
+                );
+
+                let status = self
+                    .provider
+                    .get_ssh_command(&worker.name, zone, &worker_cmd)
+                    .status()
+                    .map_err(HailError::Io)?;
+
+                if !status.success() {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to start worker on {}", worker.name),
+                    )));
+                }
+
+                println!("  {} started on {}", "Worker".dimmed(), worker.name.cyan());
+                Ok(())
+            })
+            .collect();
+
+        // Check for any startup failures
+        for result in worker_results {
+            result?;
+        }
+
+        println!();
+        println!(
+            "{} Distributed job submitted!",
+            "OK".green().bold()
+        );
+        println!("  {} {}", "Coordinator:".cyan(), coordinator.name);
+        println!("  {} {}", "Workers:".cyan(), workers.len());
+        println!("  {} {}", "Total partitions:".cyan(), total_partitions);
+        println!();
+        println!("{}", "Streaming coordinator logs (Ctrl+C to exit)...".dimmed());
+        println!();
+
+        // Stream coordinator logs
+        let mut log_cmd = self
+            .provider
+            .get_ssh_command(&coordinator.name, zone, "tail -f /tmp/coordinator.log");
+        log_cmd.status().map_err(HailError::Io)?;
+
+        Ok(())
+    }
+
     /// Deploy binary to all workers in parallel.
     fn deploy_binary(&self, binary: &Path, instances: &[Instance], zone: &str) -> Result<()> {
         instances.par_iter().try_for_each(|inst| {
@@ -392,11 +678,21 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 if let Ok(l) = line {
-                    // Check if line is a JSON benchmark report
-                    if l.trim().starts_with('{') && l.contains("\"total_rows\"") {
-                        if let Ok(report) = serde_json::from_str::<BenchmarkReport>(&l) {
-                            let _ = tx.send(WorkerMessage::Report { worker_id, report });
-                            continue;
+                    // Check if line is JSON
+                    if l.trim().starts_with('{') {
+                        // Try to parse as progress update first
+                        if l.contains("\"type\":\"progress\"") {
+                            if let Ok(update) = serde_json::from_str::<ProgressUpdate>(&l) {
+                                let _ = tx.send(WorkerMessage::Progress { worker_id, update });
+                                continue;
+                            }
+                        }
+                        // Try to parse as benchmark report
+                        if l.contains("\"total_rows\"") {
+                            if let Ok(report) = serde_json::from_str::<BenchmarkReport>(&l) {
+                                let _ = tx.send(WorkerMessage::Report { worker_id, report });
+                                continue;
+                            }
                         }
                     }
                     // Otherwise send as log line
@@ -417,6 +713,75 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         }
 
         let _ = tx.send(WorkerMessage::Complete { worker_id });
+        Ok(())
+    }
+
+    /// Build the Linux binary for deployment to workers.
+    ///
+    /// On macOS, uses `cargo linux` (cargo-zigbuild) to cross-compile.
+    /// On Linux, uses regular `cargo build`.
+    fn build_linux_binary() -> Result<()> {
+        let is_macos = cfg!(target_os = "macos");
+
+        if is_macos {
+            println!("{}", "Building Linux binary (cross-compiling)...".dimmed());
+
+            // Use shell to set ulimit first (fixes "too many open files" during linking)
+            // cargo linux is an alias for cargo-zigbuild
+            let status = std::process::Command::new("sh")
+                .args(["-c", "ulimit -n 8192 2>/dev/null; cargo linux --release"])
+                .status()
+                .map_err(|e| {
+                    HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "Failed to run 'cargo linux'. Is cargo-zigbuild installed?\n\
+                             Install with: cargo install cargo-zigbuild\n\
+                             Error: {}",
+                            e
+                        ),
+                    ))
+                })?;
+
+            if !status.success() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to build Linux binary. Check cargo output above.",
+                )));
+            }
+
+            // Verify the binary was created
+            let binary_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/hail-decoder");
+            if !binary_path.exists() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Linux binary not found at: {}", binary_path.display()),
+                )));
+            }
+
+            println!(
+                "{} Linux binary built: {}",
+                "OK".green().bold(),
+                binary_path.display().to_string().dimmed()
+            );
+        } else {
+            println!("{}", "Building release binary...".dimmed());
+
+            let status = std::process::Command::new("cargo")
+                .args(["build", "--release", "--bin", "hail-decoder"])
+                .status()
+                .map_err(HailError::Io)?;
+
+            if !status.success() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to build release binary",
+                )));
+            }
+
+            println!("{} Release binary built", "OK".green().bold());
+        }
+
         Ok(())
     }
 
@@ -462,6 +827,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 enum WorkerMessage {
     /// A log line from the worker
     Log { worker_id: usize, line: String },
+    /// A progress update from the worker
+    Progress {
+        worker_id: usize,
+        update: ProgressUpdate,
+    },
     /// A benchmark report from the worker
     Report {
         worker_id: usize,

@@ -179,12 +179,29 @@ impl CloudProvider for GcpClient {
         self.check_gcloud_installed()?;
         let script = super::startup::generate_startup_script();
 
-        // Create instances in parallel using rayon
-        let results: Vec<Result<()>> = (0..config.worker_count)
-            .into_par_iter()
-            .map(|i| {
-                let instance_name = format!("{}-worker-{}", config.name, i);
+        // Build list of instances to create: coordinator (optional) + workers
+        let mut instance_configs: Vec<(String, String)> = Vec::new();
 
+        // Add coordinator if requested
+        if config.with_coordinator {
+            instance_configs.push((
+                format!("{}-coordinator", config.name),
+                format!("hail-decoder-coordinator,pool-{},role-coordinator", config.name),
+            ));
+        }
+
+        // Add workers
+        for i in 0..config.worker_count {
+            instance_configs.push((
+                format!("{}-worker-{}", config.name, i),
+                format!("hail-decoder-worker,pool-{},role-worker", config.name),
+            ));
+        }
+
+        // Create instances in parallel using rayon
+        let results: Vec<Result<()>> = instance_configs
+            .into_par_iter()
+            .map(|(instance_name, tags)| {
                 let mut cmd = Command::new("gcloud");
                 cmd.args([
                     "compute",
@@ -202,7 +219,7 @@ impl CloudProvider for GcpClient {
                     "--image-project",
                     "ubuntu-os-cloud",
                     "--tags",
-                    &format!("hail-decoder-worker,pool-{}", config.name),
+                    &tags,
                     "--metadata",
                     &format!("startup-script={}", script),
                     "--scopes",

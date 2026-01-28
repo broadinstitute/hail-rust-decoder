@@ -49,6 +49,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+
+    /// Run distributed service components (coordinator or worker)
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -118,6 +124,10 @@ pub struct CommonExportArgs {
     /// Partitioning arguments for distributed processing
     #[command(flatten)]
     pub partitioning: PartitioningArgs,
+
+    /// Output progress as JSON lines (for distributed job coordination)
+    #[arg(long, hide = true)]
+    pub progress_json: bool,
 }
 
 /// Trait that all export argument structs must implement.
@@ -346,6 +356,14 @@ pub enum PoolCommands {
         /// Wait for VMs to be ready (startup script complete)
         #[arg(long)]
         wait: bool,
+
+        /// Skip automatic Linux binary build (use existing binary)
+        #[arg(long)]
+        skip_build: bool,
+
+        /// Create a dedicated coordinator node for distributed processing
+        #[arg(long)]
+        with_coordinator: bool,
     },
 
     /// Submit a job to run on the worker pool
@@ -360,6 +378,10 @@ pub enum PoolCommands {
         /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/hail-decoder)
         #[arg(long)]
         binary: Option<String>,
+
+        /// Use distributed coordinator/worker pattern (requires --with-coordinator on create)
+        #[arg(long)]
+        distributed: bool,
 
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
@@ -380,5 +402,51 @@ pub enum PoolCommands {
     List {
         /// Name of the pool
         name: String,
+    },
+}
+
+/// Subcommands for running distributed service components.
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    /// Start the coordinator server (manages work distribution)
+    StartCoordinator {
+        /// Port to listen on
+        #[arg(long, default_value = "3000")]
+        port: u16,
+
+        /// Path to input Hail table
+        #[arg(long)]
+        input: String,
+
+        /// Path to output directory
+        #[arg(long)]
+        output: String,
+
+        /// Total number of partitions to process
+        #[arg(long)]
+        total_partitions: usize,
+
+        /// Number of partitions to assign per work request
+        #[arg(long, default_value = "1")]
+        batch_size: usize,
+
+        /// Timeout in seconds before rescheduling stale work
+        #[arg(long, default_value = "600")]
+        timeout: u64,
+    },
+
+    /// Start a worker process (connects to coordinator for work)
+    StartWorker {
+        /// Coordinator URL (e.g., http://10.0.0.5:3000)
+        #[arg(long)]
+        url: String,
+
+        /// Unique worker ID
+        #[arg(long)]
+        worker_id: String,
+
+        /// Poll interval in milliseconds when waiting for work
+        #[arg(long, default_value = "2000")]
+        poll_interval: u64,
     },
 }

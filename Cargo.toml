@@ -16,12 +16,12 @@ http = ["object_store/http"]
 
 # Optional commands
 validation = ["dep:jsonschema"]
-clickhouse = ["dep:reqwest"]
+clickhouse = []  # reqwest is now always included for distributed workers
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
 benchmark = ["dep:sysinfo"]
 
-# HTTP server binary
-server = ["dep:axum", "dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
+# HTTP server binary (axum is always included for distributed coordinator)
+server = ["dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
 
 # All features
 full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", "benchmark"]
@@ -90,16 +90,19 @@ uuid = { version = "1.0", features = ["v4"] }
 # JSON Schema validation (validation feature)
 jsonschema = { version = "0.27", default-features = false, optional = true }
 
-# HTTP Client for ClickHouse export (clickhouse feature)
-reqwest = { version = "0.11", features = ["blocking"], optional = true }
+# HTTP Client for distributed worker and ClickHouse export
+# Use rustls for TLS to avoid OpenSSL cross-compilation issues
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # Google Cloud for BigQuery export (bigquery feature)
 google-cloud-bigquery = { version = "0.13", optional = true }
 google-cloud-storage = { version = "0.22", optional = true }
 google-cloud-auth = { version = "0.19", optional = true }
 
-# HTTP Server (server feature)
-axum = { version = "0.7", optional = true }
+# HTTP Server for distributed coordinator (and optional hail-server)
+axum = "0.7"
+
+# Additional HTTP server features (server feature)
 axum-extra = { version = "0.9", features = ["query"], optional = true }
 tower-http = { version = "0.5", features = ["cors", "fs"], optional = true }
 async-stream = { version = "0.3", optional = true }

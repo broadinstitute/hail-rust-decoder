@@ -9,7 +9,7 @@
 mod cli;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, PoolCommands, QueryArgs};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -49,6 +49,7 @@ fn main() -> Result<()> {
             SchemaSubcommands::Generate(args) => run_generate_schema(&args.table, args.output.as_deref())?,
         },
         Commands::Pool { command } => run_pool_command(command)?,
+        Commands::Service { command } => run_service_command(command)?,
     }
 
     Ok(())
@@ -710,6 +711,7 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
                 Some(collector.partitions_counter.clone()),
                 Some(collector.row_size_stats_handle()),
                 allocator,
+                args.common.progress_json,
             )?
         } else {
             hail_to_parquet_sharded_full(
@@ -721,6 +723,7 @@ fn run_export_parquet(args: ExportParquetArgs) -> Result<()> {
                 None,
                 None,
                 allocator,
+                args.common.progress_json,
             )?
         };
         (rows, true)
@@ -1690,6 +1693,8 @@ fn run_pool_command(command: PoolCommands) -> Result<()> {
             network,
             subnet,
             wait,
+            skip_build,
+            with_coordinator,
         } => {
             // Resolve project ID
             let project_id = if let Some(p) = project {
@@ -1707,17 +1712,19 @@ fn run_pool_command(command: PoolCommands) -> Result<()> {
                 project_id,
                 network,
                 subnet,
+                with_coordinator,
             };
 
-            manager.create(&config, wait)?;
+            manager.create(&config, wait, skip_build)?;
         }
         PoolCommands::Submit {
             name,
             zone,
             binary,
+            distributed,
             command,
         } => {
-            manager.submit(&name, &zone, binary, &command)?;
+            manager.submit(&name, &zone, binary, distributed, &command)?;
         }
         PoolCommands::Destroy { name, zone } => {
             manager.destroy(&name, &zone)?;
@@ -1728,4 +1735,48 @@ fn run_pool_command(command: PoolCommands) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Run service commands (coordinator or worker)
+fn run_service_command(command: ServiceCommands) -> Result<()> {
+    use hail_decoder::distributed::{coordinator, worker};
+
+    // Create a runtime for the async service components
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(hail_decoder::HailError::Io)?;
+
+    match command {
+        ServiceCommands::StartCoordinator {
+            port,
+            input,
+            output,
+            total_partitions,
+            batch_size,
+            timeout,
+        } => {
+            rt.block_on(coordinator::run_coordinator(
+                port,
+                input,
+                output,
+                total_partitions,
+                batch_size,
+                timeout,
+            ))
+        }
+        ServiceCommands::StartWorker {
+            url,
+            worker_id,
+            poll_interval,
+        } => {
+            let config = worker::WorkerConfig {
+                coordinator_url: url,
+                worker_id,
+                poll_interval_ms: poll_interval,
+                connect_timeout_secs: 30,
+            };
+            rt.block_on(worker::run_worker(config))
+        }
+    }
 }

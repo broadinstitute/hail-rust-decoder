@@ -30,6 +30,8 @@ pub struct PoolConfig {
     pub network: Option<String>,
     /// Subnet name (required for custom networks)
     pub subnet: Option<String>,
+    /// Create a dedicated coordinator node for distributed processing
+    pub with_coordinator: bool,
 }
 
 /// Information about a cloud instance.
@@ -100,4 +102,50 @@ pub trait CloudProvider {
     /// The caller is responsible for spawning and managing I/O.
     /// This allows streaming stdout/stderr for real-time progress.
     fn get_ssh_command(&self, instance: &str, zone: &str, command: &str) -> Command;
+}
+
+/// Progress update message sent from worker to coordinator.
+///
+/// Workers emit this as a JSON line to stdout when `--progress-json` is enabled.
+/// The coordinator parses these to update aggregate progress display.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProgressUpdate {
+    /// Message type discriminator
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    /// Worker ID (from --worker-id)
+    pub worker_id: usize,
+    /// Number of partitions completed
+    pub partitions_done: usize,
+    /// Total partitions assigned to this worker
+    pub partitions_total: usize,
+    /// Number of rows processed so far
+    pub rows: usize,
+    /// Elapsed time in seconds
+    pub elapsed_secs: f64,
+}
+
+impl ProgressUpdate {
+    /// Create a new progress update.
+    pub fn new(
+        worker_id: usize,
+        partitions_done: usize,
+        partitions_total: usize,
+        rows: usize,
+        elapsed_secs: f64,
+    ) -> Self {
+        Self {
+            msg_type: "progress".to_string(),
+            worker_id,
+            partitions_done,
+            partitions_total,
+            rows,
+            elapsed_secs,
+        }
+    }
+
+    /// Serialize to a JSON line (no trailing newline).
+    pub fn to_json_line(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
 }
