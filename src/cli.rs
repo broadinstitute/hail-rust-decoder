@@ -395,6 +395,10 @@ pub enum PoolCommands {
         #[arg(long)]
         auto_stop: bool,
 
+        /// Skip binary deployment (assumes binary already deployed via pool create or update-binary)
+        #[arg(long)]
+        skip_binary: bool,
+
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
         command: Vec<String>,

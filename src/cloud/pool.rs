@@ -787,15 +787,21 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         binary_path: Option<String>,
         distributed: bool,
         auto_stop: bool,
+        skip_binary_deploy: bool,
         command: &[String],
     ) -> Result<()> {
-        // 1. Locate the Linux binary
-        let binary = self.locate_binary(binary_path)?;
-        println!(
-            "{} {}",
-            "Binary:".cyan(),
-            binary.display().to_string().bright_white()
-        );
+        // 1. Locate the Linux binary (only needed if deploying)
+        let binary = if skip_binary_deploy {
+            None
+        } else {
+            let b = self.locate_binary(binary_path)?;
+            println!(
+                "{} {}",
+                "Binary:".cyan(),
+                b.display().to_string().bright_white()
+            );
+            Some(b)
+        };
 
         // 2. Get running instances
         println!("{}", "Fetching instance list...".dimmed());
@@ -842,79 +848,82 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         );
 
-        // 3. Deploy binary - use different strategies based on mode
-        if distributed {
-            // Distributed mode: upload to coordinator only, workers pull from coordinator
-            let coord = coordinator.as_ref().unwrap();
-            let coord_ip = coord.ip().ok_or_else(|| {
-                HailError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Coordinator {} has no internal IP", coord.name),
-                ))
-            })?;
-
-            // Deploy binary to coordinator
-            println!("{}", "Deploying binary to coordinator...".dimmed());
-            self.deploy_binary(&binary, &[coord.clone()], zone)?;
-            println!(
-                "{} Binary deployed to coordinator.",
-                "OK".green().bold()
-            );
-
-            // Ensure coordinator is running (so /api/binary is available)
-            // Check if already running from pool create --with-coordinator
-            let coord_running = self.check_coordinator_status(coord, zone);
-            if !coord_running {
-                // Start coordinator in idle mode just to serve the binary
-                println!(
-                    "{}",
-                    "Starting coordinator service to serve binary...".dimmed()
-                );
-                let coord_cmd =
-                    "nohup /usr/local/bin/hail-decoder service start-coordinator \
-                     --port 3000 \
-                     > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
-                let status = self
-                    .provider
-                    .get_ssh_command(&coord.name, zone, coord_cmd)
-                    .status()
-                    .map_err(HailError::Io)?;
-
-                if !status.success() {
-                    return Err(HailError::Io(std::io::Error::new(
+        // 3. Deploy binary - skip if already deployed (e.g., via pool create or update-binary)
+        if !skip_binary_deploy {
+            let binary = binary.as_ref().unwrap();
+            if distributed {
+                // Distributed mode: upload to coordinator only, workers pull from coordinator
+                let coord = coordinator.as_ref().unwrap();
+                let coord_ip = coord.ip().ok_or_else(|| {
+                    HailError::Io(std::io::Error::new(
                         std::io::ErrorKind::Other,
-                        "Failed to start coordinator service for binary serving",
-                    )));
+                        format!("Coordinator {} has no internal IP", coord.name),
+                    ))
+                })?;
+
+                // Deploy binary to coordinator
+                println!("{}", "Deploying binary to coordinator...".dimmed());
+                self.deploy_binary(binary, &[coord.clone()], zone)?;
+                println!(
+                    "{} Binary deployed to coordinator.",
+                    "OK".green().bold()
+                );
+
+                // Ensure coordinator is running (so /api/binary is available)
+                // Check if already running from pool create --with-coordinator
+                let coord_running = self.check_coordinator_status(coord, zone);
+                if !coord_running {
+                    // Start coordinator in idle mode just to serve the binary
+                    println!(
+                        "{}",
+                        "Starting coordinator service to serve binary...".dimmed()
+                    );
+                    let coord_cmd =
+                        "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                         --port 3000 \
+                         > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
+                    let status = self
+                        .provider
+                        .get_ssh_command(&coord.name, zone, coord_cmd)
+                        .status()
+                        .map_err(HailError::Io)?;
+
+                    if !status.success() {
+                        return Err(HailError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Failed to start coordinator service for binary serving",
+                        )));
+                    }
+
+                    // Wait for coordinator to be ready
+                    std::thread::sleep(std::time::Duration::from_secs(2));
                 }
 
-                // Wait for coordinator to be ready
-                std::thread::sleep(std::time::Duration::from_secs(2));
-            }
-
-            // Have workers pull binary from coordinator over GCP internal network
-            println!(
-                "{}",
-                "Workers pulling binary from coordinator...".dimmed()
-            );
-            self.propagate_binary_from_coordinator(coord_ip, &workers, zone)?;
-            println!(
-                "{} Binary propagated to {} workers.",
-                "OK".green().bold(),
-                workers.len()
-            );
-        } else {
-            // Non-distributed mode: upload to all nodes via SCP
-            let all_nodes: Vec<_> = if let Some(ref c) = coordinator {
-                let mut nodes = workers.clone();
-                nodes.push(c.clone());
-                nodes
+                // Have workers pull binary from coordinator over GCP internal network
+                println!(
+                    "{}",
+                    "Workers pulling binary from coordinator...".dimmed()
+                );
+                self.propagate_binary_from_coordinator(coord_ip, &workers, zone)?;
+                println!(
+                    "{} Binary propagated to {} workers.",
+                    "OK".green().bold(),
+                    workers.len()
+                );
             } else {
-                workers.clone()
-            };
+                // Non-distributed mode: upload to all nodes via SCP
+                let all_nodes: Vec<_> = if let Some(ref c) = coordinator {
+                    let mut nodes = workers.clone();
+                    nodes.push(c.clone());
+                    nodes
+                } else {
+                    workers.clone()
+                };
 
-            println!("{}", "Deploying binary to nodes...".dimmed());
-            self.deploy_binary(&binary, &all_nodes, zone)?;
-            println!("{} Binary deployed to all nodes.", "OK".green().bold());
+                println!("{}", "Deploying binary to nodes...".dimmed());
+                self.deploy_binary(binary, &all_nodes, zone)?;
+                println!("{} Binary deployed to all nodes.", "OK".green().bold());
+            }
         }
 
         // 4. Branch based on distributed mode for job submission
@@ -1474,8 +1483,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Use shell to set ulimit first (fixes "too many open files" during linking)
             // cargo linux is an alias for cargo-zigbuild
+            // Suppress compiler warnings (already seen during local build) with RUSTFLAGS
             let status = std::process::Command::new("sh")
-                .args(["-c", "ulimit -n 8192 2>/dev/null; cargo linux --release"])
+                .args(["-c", "ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release"])
                 .status()
                 .map_err(|e| {
                     HailError::Io(std::io::Error::new(
