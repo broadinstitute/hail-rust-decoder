@@ -177,24 +177,33 @@ impl Default for GcpClient {
 impl CloudProvider for GcpClient {
     fn create_pool(&self, config: &PoolConfig) -> Result<()> {
         self.check_gcloud_installed()?;
-        let script = super::startup::generate_startup_script();
+
+        // Generate startup scripts
+        let worker_script = super::startup::generate_startup_script();
+        let coordinator_script = config.wireguard.as_ref().map(|wg| {
+            super::startup::generate_coordinator_startup_script(wg)
+        });
 
         // Build list of instances to create: coordinator (optional) + workers
-        let mut instance_configs: Vec<(String, String)> = Vec::new();
+        let mut instance_configs: Vec<(String, String, String)> = Vec::new(); // (name, tags, script)
 
         // Add coordinator if requested
         if config.with_coordinator {
+            // Use WireGuard script for coordinator if configured, otherwise standard script
+            let coord_script = coordinator_script.clone().unwrap_or_else(|| worker_script.clone());
             instance_configs.push((
                 format!("{}-coordinator", config.name),
                 format!("hail-decoder-coordinator,pool-{},role-coordinator", config.name),
+                coord_script,
             ));
         }
 
-        // Add workers
+        // Add workers (always use standard script)
         for i in 0..config.worker_count {
             instance_configs.push((
                 format!("{}-worker-{}", config.name, i),
                 format!("hail-decoder-worker,pool-{},role-worker", config.name),
+                worker_script.clone(),
             ));
         }
 
@@ -225,7 +234,7 @@ impl CloudProvider for GcpClient {
         // Create instances in parallel using rayon
         let results: Vec<Result<()>> = instance_configs
             .into_par_iter()
-            .map(|(instance_name, tags)| {
+            .map(|(instance_name, tags, startup_script)| {
                 let mut cmd = Command::new("gcloud");
 
                 // Use a smaller machine for coordinator (it just routes work)
@@ -253,9 +262,9 @@ impl CloudProvider for GcpClient {
                     "--tags",
                     &tags,
                     "--metadata",
-                    &format!("startup-script={}", script),
+                    &format!("startup-script={}", startup_script),
                     "--scopes",
-                    "cloud-platform", // Allow access to GCS
+                    "cloud-platform", // Allow access to GCS and Secret Manager
                 ]);
 
                 // Use Spot for workers if requested, but keep coordinator on standard VM

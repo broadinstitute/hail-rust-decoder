@@ -713,26 +713,25 @@ async fn serve_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/dashboard.html"))
 }
 
-/// Handler for GET /api/binary - serve the coordinator's own executable.
+/// Handler for GET /api/binary - serve the hail-decoder binary.
 ///
 /// This endpoint allows workers to download the hail-decoder binary directly
 /// from the coordinator over the fast GCP internal network, instead of each
 /// worker receiving it via slow SCP from the client machine.
+///
+/// We serve from the fixed install path rather than current_exe() because:
+/// - current_exe() returns /proc/self/exe which becomes stale when binary is replaced
+/// - The fixed path always points to the latest uploaded binary
+const BINARY_INSTALL_PATH: &str = "/usr/local/bin/hail-decoder";
+
 async fn serve_binary() -> impl axum::response::IntoResponse {
     use axum::http::{header, StatusCode};
     use axum::response::Response;
+    use std::path::Path;
 
-    // Get the path to our own executable
-    let exe_path = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Failed to get current executable path: {}", e);
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Failed to locate binary: {}", e)))
-                .unwrap();
-        }
-    };
+    // Use the fixed install path - this always points to the latest binary
+    // even after updates (unlike /proc/self/exe which becomes "(deleted)")
+    let exe_path = Path::new(BINARY_INSTALL_PATH);
 
     // Open the file
     let file = match tokio::fs::File::open(&exe_path).await {

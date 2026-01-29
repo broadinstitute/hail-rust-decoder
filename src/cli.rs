@@ -10,6 +10,10 @@ use clap::{Args, Parser, Subcommand};
     long_about = None
 )]
 pub struct Cli {
+    /// Path to configuration file (default: ~/.config/hail-decoder/config.toml)
+    #[arg(long, global = true)]
+    pub config: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -321,31 +325,35 @@ pub struct ValidateArgs {
 #[derive(Subcommand)]
 pub enum PoolCommands {
     /// Create a new worker pool of GCP VMs
+    ///
+    /// If a pool profile with the same name exists in the config file,
+    /// its settings will be used as defaults. CLI arguments override config.
     Create {
         /// Name of the pool (used for tagging and identification)
+        /// If a profile with this name exists in config, its settings are used as defaults
         name: String,
 
-        /// Number of worker VMs to create
-        #[arg(long, default_value = "4")]
-        workers: usize,
+        /// Number of worker VMs to create (default: 4, or from config profile)
+        #[arg(long)]
+        workers: Option<usize>,
 
-        /// GCP machine type (e.g., c3-highcpu-22, c3-highcpu-88)
-        #[arg(long, default_value = "c3-highcpu-22")]
-        machine_type: String,
+        /// GCP machine type (default: c3-highcpu-22, or from config profile)
+        #[arg(long)]
+        machine_type: Option<String>,
 
-        /// GCP zone for the VMs
-        #[arg(long, default_value = "us-central1-a")]
-        zone: String,
+        /// GCP zone for the VMs (default: us-central1-a, or from config)
+        #[arg(long)]
+        zone: Option<String>,
 
         /// Use spot/preemptible instances for cost savings
         #[arg(long)]
-        spot: bool,
+        spot: Option<bool>,
 
-        /// GCP project ID (defaults to gcloud config)
+        /// GCP project ID (defaults to gcloud config or config file)
         #[arg(long)]
         project: Option<String>,
 
-        /// VPC network name (defaults to "default")
+        /// VPC network name (defaults to "default" or config file)
         #[arg(long)]
         network: Option<String>,
 

@@ -7,6 +7,7 @@
 //! - export: Export data to other formats (Parquet, ClickHouse, BigQuery)
 
 mod cli;
+mod config;
 
 use clap::Parser;
 use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, PoolCommands, QueryArgs, ServiceCommands};
@@ -30,6 +31,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Load configuration from file
+    let config = config::Config::load_from_path(cli.config.as_deref());
+
     match cli.command {
         Commands::Info { path } => show_info(&path)?,
         Commands::Summary { path } => run_summary(&path)?,
@@ -48,7 +52,7 @@ fn main() -> Result<()> {
             SchemaSubcommands::Validate(args) => run_validate(args)?,
             SchemaSubcommands::Generate(args) => run_generate_schema(&args.table, args.output.as_deref())?,
         },
-        Commands::Pool { command } => run_pool_command(command)?,
+        Commands::Pool { command } => run_pool_command(command, &config)?,
         Commands::Service { command } => run_service_command(command)?,
     }
 
@@ -1674,7 +1678,7 @@ fn run_export_bigquery(args: cli::ExportBigqueryArgs) -> Result<()> {
 }
 
 /// Run pool management commands
-fn run_pool_command(command: PoolCommands) -> Result<()> {
+fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Result<()> {
     use hail_decoder::cloud::gcp::GcpClient;
     use hail_decoder::cloud::pool::PoolManager;
     use hail_decoder::cloud::PoolConfig;
@@ -1696,26 +1700,82 @@ fn run_pool_command(command: PoolCommands) -> Result<()> {
             skip_build,
             with_coordinator,
         } => {
-            // Resolve project ID
-            let project_id = if let Some(p) = project {
-                p
-            } else {
-                GcpClient::new().get_current_project()?
+            // Try to load pool profile from config (if exists)
+            let profile = app_config.get_pool(&name);
+
+            // Resolve values: CLI args > profile > defaults
+            let resolved_workers = workers
+                .or_else(|| profile.as_ref().map(|p| p.workers))
+                .unwrap_or(4);
+            let resolved_machine_type = machine_type
+                .or_else(|| profile.as_ref().map(|p| p.machine_type.clone()))
+                .unwrap_or_else(|| "c3-highcpu-22".to_string());
+            let resolved_zone = zone
+                .or_else(|| profile.as_ref().map(|p| p.zone.clone()))
+                .or_else(|| app_config.defaults.zone.clone())
+                .unwrap_or_else(|| "us-central1-a".to_string());
+            let resolved_spot = spot
+                .or_else(|| profile.as_ref().map(|p| p.spot))
+                .unwrap_or(false);
+            let resolved_network = network
+                .or_else(|| profile.as_ref().and_then(|p| p.network.clone()))
+                .or_else(|| app_config.defaults.network.clone());
+            let resolved_subnet = subnet
+                .or_else(|| profile.as_ref().and_then(|p| p.subnet.clone()))
+                .or_else(|| app_config.defaults.subnet.clone());
+
+            // Resolve project ID: CLI > config > gcloud default
+            let project_id = project
+                .or_else(|| profile.as_ref().and_then(|p| p.project.clone()))
+                .or_else(|| app_config.defaults.project.clone())
+                .map(Ok)
+                .unwrap_or_else(|| GcpClient::new().get_current_project())?;
+
+            // Convert WireGuard config from config module to cloud module
+            // Resolve env: prefixes (for USB-sourced secrets) at this point
+            let wireguard = match profile.as_ref().and_then(|p| p.wireguard.as_ref()) {
+                Some(wg) => {
+                    // Resolve env:VAR_NAME references from environment
+                    let resolved = wg.resolve_env_vars().map_err(|e| {
+                        hail_decoder::HailError::Io(std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            e,
+                        ))
+                    })?;
+                    Some(hail_decoder::cloud::WireGuardConfig {
+                        endpoint: resolved.endpoint,
+                        client_address: resolved.client_address,
+                        allowed_ips: resolved.allowed_ips,
+                        peer_public_key: resolved.peer_public_key,
+                        client_private_key: resolved.client_private_key,
+                    })
+                }
+                None => None,
             };
 
-            let config = PoolConfig {
+            // Resolve with_coordinator: CLI flag > config profile > auto-enable if WireGuard
+            let resolved_with_coordinator = with_coordinator
+                || profile.as_ref().map(|p| p.with_coordinator).unwrap_or(false)
+                || wireguard.is_some();
+
+            if wireguard.is_some() && !with_coordinator && !profile.as_ref().map(|p| p.with_coordinator).unwrap_or(false) {
+                println!("{} WireGuard config found, enabling coordinator node", "Note:".cyan());
+            }
+
+            let pool_config = PoolConfig {
                 name,
-                worker_count: workers,
-                machine_type,
-                zone,
-                spot,
+                worker_count: resolved_workers,
+                machine_type: resolved_machine_type,
+                zone: resolved_zone,
+                spot: resolved_spot,
                 project_id,
-                network,
-                subnet,
-                with_coordinator,
+                network: resolved_network,
+                subnet: resolved_subnet,
+                with_coordinator: resolved_with_coordinator,
+                wireguard,
             };
 
-            manager.create(&config, wait, skip_build)?;
+            manager.create(&pool_config, wait, skip_build)?;
         }
         PoolCommands::Submit {
             name,

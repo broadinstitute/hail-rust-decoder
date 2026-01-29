@@ -11,6 +11,24 @@ use crate::Result;
 use std::path::Path;
 use std::process::Command;
 
+/// WireGuard VPN configuration for the coordinator node.
+///
+/// Values can be raw strings or secret references with `secret:` prefix.
+/// Secret references are resolved at VM boot time using Google Secret Manager.
+#[derive(Debug, Clone)]
+pub struct WireGuardConfig {
+    /// WireGuard server endpoint (host:port)
+    pub endpoint: String,
+    /// Client IP address with CIDR (e.g., "10.10.0.50/32")
+    pub client_address: String,
+    /// Allowed IPs to route through VPN (e.g., "10.10.0.0/24")
+    pub allowed_ips: String,
+    /// Server's public key (can be `secret:name` for GSM lookup)
+    pub peer_public_key: String,
+    /// Client's private key (should be `secret:name` for security)
+    pub client_private_key: String,
+}
+
 /// Configuration for a worker pool.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -32,6 +50,8 @@ pub struct PoolConfig {
     pub subnet: Option<String>,
     /// Create a dedicated coordinator node for distributed processing
     pub with_coordinator: bool,
+    /// WireGuard configuration for coordinator (optional)
+    pub wireguard: Option<WireGuardConfig>,
 }
 
 /// Information about a cloud instance.

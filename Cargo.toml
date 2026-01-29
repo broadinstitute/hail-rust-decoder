@@ -118,6 +118,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # XDG directory support
 dirs = "5.0"
 
+# TOML config file parsing
+toml = "0.8"
+
 [[bin]]
 name = "hail-server"
 path = "src/bin/hail-server.rs"
