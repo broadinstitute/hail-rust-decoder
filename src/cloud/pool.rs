@@ -787,21 +787,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         binary_path: Option<String>,
         distributed: bool,
         auto_stop: bool,
-        skip_binary_deploy: bool,
+        force_redeploy: bool,
         command: &[String],
     ) -> Result<()> {
-        // 1. Locate the Linux binary (only needed if deploying)
-        let binary = if skip_binary_deploy {
-            None
-        } else {
-            let b = self.locate_binary(binary_path)?;
-            println!(
-                "{} {}",
-                "Binary:".cyan(),
-                b.display().to_string().bright_white()
-            );
-            Some(b)
-        };
+        // 1. Locate the Linux binary (will check if needed after seeing coordinator status)
+        let binary = self.locate_binary(binary_path).ok();
 
         // 2. Get running instances
         println!("{}", "Fetching instance list...".dimmed());
@@ -848,9 +838,35 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         );
 
-        // 3. Deploy binary - skip if already deployed (e.g., via pool create or update-binary)
-        if !skip_binary_deploy {
-            let binary = binary.as_ref().unwrap();
+        // 3. Deploy binary - auto-skip if coordinator is already running (binary was deployed earlier)
+        let should_deploy = if distributed {
+            let coord = coordinator.as_ref().unwrap();
+            let coord_running = self.check_coordinator_status(coord, zone);
+            if coord_running && !force_redeploy {
+                // Coordinator already running = binary already deployed
+                println!(
+                    "{} Coordinator already running, skipping binary deployment",
+                    "Note:".cyan()
+                );
+                println!(
+                    "{}",
+                    "      (use --redeploy-binary or 'pool update-binary' to redeploy)".dimmed()
+                );
+                false
+            } else {
+                true // Deploy if coordinator not running, or if force_redeploy
+            }
+        } else {
+            true // Non-distributed always deploys
+        };
+
+        if should_deploy {
+            let binary = binary.as_ref().ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Linux binary not found. Build with: cargo linux --release",
+                ))
+            })?;
             if distributed {
                 // Distributed mode: upload to coordinator only, workers pull from coordinator
                 let coord = coordinator.as_ref().unwrap();
@@ -869,35 +885,30 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     "OK".green().bold()
                 );
 
-                // Ensure coordinator is running (so /api/binary is available)
-                // Check if already running from pool create --with-coordinator
-                let coord_running = self.check_coordinator_status(coord, zone);
-                if !coord_running {
-                    // Start coordinator in idle mode just to serve the binary
-                    println!(
-                        "{}",
-                        "Starting coordinator service to serve binary...".dimmed()
-                    );
-                    let coord_cmd =
-                        "nohup /usr/local/bin/hail-decoder service start-coordinator \
-                         --port 3000 \
-                         > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
-                    let status = self
-                        .provider
-                        .get_ssh_command(&coord.name, zone, coord_cmd)
-                        .status()
-                        .map_err(HailError::Io)?;
+                // Start coordinator service (so /api/binary is available)
+                println!(
+                    "{}",
+                    "Starting coordinator service to serve binary...".dimmed()
+                );
+                let coord_cmd =
+                    "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                     --port 3000 \
+                     > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
+                let status = self
+                    .provider
+                    .get_ssh_command(&coord.name, zone, coord_cmd)
+                    .status()
+                    .map_err(HailError::Io)?;
 
-                    if !status.success() {
-                        return Err(HailError::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Failed to start coordinator service for binary serving",
-                        )));
-                    }
-
-                    // Wait for coordinator to be ready
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                if !status.success() {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Failed to start coordinator service for binary serving",
+                    )));
                 }
+
+                // Wait for coordinator to be ready
+                std::thread::sleep(std::time::Duration::from_secs(2));
 
                 // Have workers pull binary from coordinator over GCP internal network
                 println!(

@@ -1783,10 +1783,10 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             binary,
             distributed,
             auto_stop,
-            skip_binary,
+            redeploy_binary,
             command,
         } => {
-            manager.submit(&name, &zone, binary, distributed, auto_stop, skip_binary, &command)?;
+            manager.submit(&name, &zone, binary, distributed, auto_stop, redeploy_binary, &command)?;
         }
         PoolCommands::Destroy { name, zone, metrics_bucket } => {
             manager.destroy(&name, &zone, metrics_bucket.as_deref())?;

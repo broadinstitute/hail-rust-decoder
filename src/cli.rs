@@ -395,9 +395,9 @@ pub enum PoolCommands {
         #[arg(long)]
         auto_stop: bool,
 
-        /// Skip binary deployment (assumes binary already deployed via pool create or update-binary)
+        /// Force binary redeployment even if coordinator is already running
         #[arg(long)]
-        skip_binary: bool,
+        redeploy_binary: bool,
 
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
