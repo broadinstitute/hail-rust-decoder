@@ -111,6 +111,9 @@ tokio-stream = { version = "0.1", optional = true }
 # System metrics (always included for worker telemetry)
 sysinfo = "0.32"
 
+# SQLite for metrics persistence (coordinator dashboard)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 [[bin]]
 name = "hail-server"
 path = "src/bin/hail-server.rs"

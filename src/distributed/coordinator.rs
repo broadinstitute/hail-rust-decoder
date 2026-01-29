@@ -13,6 +13,7 @@ use crate::distributed::message::{
     HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, StatusResponse,
     TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
+use crate::distributed::metrics_db::MetricsDb;
 use crate::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
@@ -111,6 +112,8 @@ struct CoordinatorData {
     job_start_time: Instant,
     /// Whether the coordinator is idle (waiting for job submission via /api/job)
     idle: bool,
+    /// SQLite database for persistent metrics storage
+    metrics_db: MetricsDb,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -162,6 +165,15 @@ pub async fn run_coordinator(
     println!("  Batch size: {}", batch_size);
     println!("  Timeout: {}s", timeout_secs);
 
+    // Initialize SQLite database for metrics persistence
+    let metrics_db = MetricsDb::open("/tmp/hail-coordinator-metrics.db").map_err(|e| {
+        crate::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to open metrics database: {}", e),
+        ))
+    })?;
+    println!("  Metrics DB: /tmp/hail-coordinator-metrics.db");
+
     let state = Arc::new(Mutex::new(CoordinatorData {
         pending_partitions: (0..total_partitions).collect(),
         processing_partitions: HashMap::new(),
@@ -180,6 +192,7 @@ pub async fn run_coordinator(
         worker_registry: HashMap::new(),
         job_start_time: Instant::now(),
         idle,
+        metrics_db,
     }));
 
     // Start background timeout monitor
@@ -487,11 +500,16 @@ async fn handle_heartbeat(
         if w.status == WorkerStatus::SuspectedDead {
             w.status = WorkerStatus::Active;
         }
-        // Store telemetry snapshot
-        w.metrics_history.push_back(req.telemetry);
+        // Store telemetry snapshot in memory (for quick access to latest)
+        w.metrics_history.push_back(req.telemetry.clone());
         if w.metrics_history.len() > MAX_METRICS_HISTORY {
             w.metrics_history.pop_front();
         }
+    }
+
+    // Persist to SQLite (fire-and-forget, don't block on DB errors)
+    if let Err(e) = data.metrics_db.insert_snapshot(&req.worker_id, &req.telemetry) {
+        eprintln!("Warning: failed to persist metrics to DB: {}", e);
     }
 
     axum::Json(HeartbeatResponse { acknowledged: true })
@@ -552,6 +570,12 @@ async fn submit_job(
     data.retry_counts.clear();
     data.total_rows = 0;
     data.job_start_time = Instant::now();
+    data.worker_registry.clear();
+
+    // Clear metrics database for new job
+    if let Err(e) = data.metrics_db.clear() {
+        eprintln!("Warning: failed to clear metrics DB: {}", e);
+    }
 
     // Mark as no longer idle
     data.idle = false;
@@ -650,12 +674,29 @@ async fn get_dashboard_metrics(
 ) -> axum::Json<DashboardMetrics> {
     let data = state.lock().unwrap();
 
-    let workers: Vec<WorkerMetricsSeries> = data
-        .worker_registry
+    // Get all worker IDs from the database (includes historical workers)
+    let worker_ids = match data.metrics_db.get_worker_ids() {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!("Warning: failed to get worker IDs from DB: {}", e);
+            // Fall back to in-memory registry
+            data.worker_registry.keys().cloned().collect()
+        }
+    };
+
+    let workers: Vec<WorkerMetricsSeries> = worker_ids
         .iter()
-        .map(|(id, w)| WorkerMetricsSeries {
-            worker_id: id.clone(),
-            snapshots: w.metrics_history.iter().cloned().collect(),
+        .map(|id| {
+            // Query all snapshots from DB for this worker
+            let snapshots = data
+                .metrics_db
+                .get_worker_snapshots(id)
+                .unwrap_or_else(|_| Vec::new());
+
+            WorkerMetricsSeries {
+                worker_id: id.clone(),
+                snapshots,
+            }
         })
         .collect();
 
