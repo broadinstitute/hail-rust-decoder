@@ -9,10 +9,10 @@
 //! A background task monitors for timed-out workers and reschedules their work.
 
 use crate::distributed::message::{
-    CompleteRequest, CompleteResponse, DashboardMetrics, DashboardSummary, DashboardWorker,
-    ExportMetricsRequest, ExportMetricsResponse, HeartbeatRequest, HeartbeatResponse,
-    JobConfigRequest, JobConfigResponse, StatusResponse, TelemetrySnapshot, WorkRequest,
-    WorkResponse, WorkerMetricsSeries,
+    CancelRequest, CancelResponse, CompleteRequest, CompleteResponse, DashboardMetrics,
+    DashboardSummary, DashboardWorker, ExportMetricsRequest, ExportMetricsResponse,
+    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, StatusResponse,
+    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::Result;
@@ -37,6 +37,8 @@ pub struct CoordinatorConfig {
     pub batch_size: usize,
     /// Timeout before rescheduling work (seconds)
     pub timeout_secs: u64,
+    /// Timeout for stuck jobs making no progress (seconds)
+    pub stuck_timeout_secs: u64,
 }
 
 impl Default for CoordinatorConfig {
@@ -48,6 +50,7 @@ impl Default for CoordinatorConfig {
             total_partitions: 0,
             batch_size: 1, // Default to 1 partition per request for fine-grained retry
             timeout_secs: 600, // 10 minutes
+            stuck_timeout_secs: 600, // 10 minutes for stuck job detection
         }
     }
 }
@@ -113,6 +116,8 @@ struct CoordinatorData {
     worker_registry: HashMap<String, WorkerState>,
     /// When the job started
     job_start_time: Instant,
+    /// Last time progress was made (job start or last partition completion)
+    last_progress_time: Instant,
     /// Whether the coordinator is idle (waiting for job submission via /api/job)
     idle: bool,
     /// SQLite database for persistent metrics storage
@@ -188,12 +193,14 @@ pub async fn run_coordinator(
             total_partitions,
             batch_size,
             timeout_secs,
+            stuck_timeout_secs: 600, // Default 10 minutes
         },
         total_rows: 0,
         retry_counts: HashMap::new(),
         failed_partitions: HashSet::new(),
         worker_registry: HashMap::new(),
         job_start_time: Instant::now(),
+        last_progress_time: Instant::now(),
         idle,
         metrics_db,
     }));
@@ -205,6 +212,13 @@ pub async fn run_coordinator(
             tokio::time::sleep(Duration::from_secs(30)).await;
             check_timeouts(&monitor_state, timeout_secs);
             check_worker_liveness(&monitor_state);
+
+            // Check for stuck jobs (R3)
+            let stuck_timeout = {
+                let data = monitor_state.lock().unwrap();
+                data.config.stuck_timeout_secs
+            };
+            check_stuck_job(&monitor_state, stuck_timeout);
 
             // Print periodic status
             let (pending, processing, completed, failed, total, rows, is_idle) = {
@@ -264,6 +278,7 @@ pub async fn run_coordinator(
         .route("/api/dashboard/workers", get(get_dashboard_workers))
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
         .route("/api/job", post(submit_job))
+        .route("/api/cancel", post(cancel_job))
         .route("/api/binary", get(serve_binary))
         .route("/api/export-metrics", post(export_metrics))
         .with_state(state);
@@ -281,6 +296,35 @@ pub async fn run_coordinator(
         .map_err(|e| crate::HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
     Ok(())
+}
+
+/// Check if the job is stuck (no progress for N minutes) and auto-cancel if needed.
+fn check_stuck_job(state: &SharedState, timeout_secs: u64) {
+    let mut data = state.lock().unwrap();
+
+    // Only check if job is running
+    if data.idle {
+        return;
+    }
+
+    // Only consider it stuck if ZERO partitions have completed
+    // (if some completed but now it's stalled, that's different - likely worker issues handled by timeouts)
+    if !data.completed_partitions.is_empty() {
+        return;
+    }
+
+    let elapsed = data.last_progress_time.elapsed();
+    if elapsed.as_secs() > timeout_secs {
+        println!(
+            "Job stuck (0 progress for {}s). Auto-cancelling.",
+            elapsed.as_secs()
+        );
+
+        // Reset state
+        data.pending_partitions.clear();
+        data.processing_partitions.clear();
+        data.idle = true;
+    }
 }
 
 /// Check for timed-out work and reschedule.
@@ -416,6 +460,8 @@ async fn complete_work(
     for &part_id in &req.partitions {
         if data.processing_partitions.remove(&part_id).is_some() {
             data.completed_partitions.insert(part_id);
+            // Update progress timestamp (R3)
+            data.last_progress_time = Instant::now();
         } else {
             // Partition wasn't in processing (maybe timed out and reassigned)
             // Still mark as complete if not already
@@ -527,12 +573,35 @@ async fn submit_job(
 ) -> axum::Json<JobConfigResponse> {
     let mut data = state.lock().unwrap();
 
-    // Only accept job if coordinator is idle
-    if !data.idle {
+    // R1: Check if workers are available
+    let active_workers = data
+        .worker_registry
+        .values()
+        .filter(|w| w.status != WorkerStatus::SuspectedDead)
+        .count();
+
+    // Allow if we have workers OR if force is used (force bypasses worker check too for testing)
+    if active_workers == 0 && !req.force {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
-            error: Some("Coordinator already has a job running".to_string()),
+            error: Some(
+                "No active workers connected. Scale up workers first or use --force.".to_string(),
+            ),
         });
+    }
+
+    // R4: Handle running jobs
+    if !data.idle {
+        if !req.force {
+            return axum::Json(JobConfigResponse {
+                acknowledged: false,
+                error: Some(
+                    "Coordinator already has a job running. Use --force to supersede.".to_string(),
+                ),
+            });
+        }
+        println!("Superseding running job (--force)...");
+        // Clear existing state will happen below
     }
 
     // Validate request
@@ -575,7 +644,11 @@ async fn submit_job(
     data.retry_counts.clear();
     data.total_rows = 0;
     data.job_start_time = Instant::now();
-    data.worker_registry.clear();
+    data.last_progress_time = Instant::now();
+
+    // Don't clear worker registry on resubmission/superseding, as we want to keep connected workers
+    // Only clear if this is a fresh start and we want to purge stale workers
+    // data.worker_registry.clear();
 
     // Clear metrics database for new job
     if let Err(e) = data.metrics_db.clear() {
@@ -593,6 +666,34 @@ async fn submit_job(
     axum::Json(JobConfigResponse {
         acknowledged: true,
         error: None,
+    })
+}
+
+/// Handler for POST /api/cancel - cancel the running job.
+async fn cancel_job(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    axum::Json(req): axum::Json<CancelRequest>,
+) -> axum::Json<CancelResponse> {
+    let mut data = state.lock().unwrap();
+
+    if data.idle {
+        return axum::Json(CancelResponse {
+            success: false,
+            message: "No job is currently running".to_string(),
+        });
+    }
+
+    // Reset job state
+    data.pending_partitions.clear();
+    data.processing_partitions.clear();
+    data.idle = true;
+
+    let reason = req.reason.unwrap_or_else(|| "User request".to_string());
+    println!("Job cancelled: {}", reason);
+
+    axum::Json(CancelResponse {
+        success: true,
+        message: format!("Job cancelled: {}", reason),
     })
 }
 

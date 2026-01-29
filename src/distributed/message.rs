@@ -185,6 +185,9 @@ pub struct JobConfigRequest {
     /// Number of partitions per work request (optional, defaults to coordinator's batch_size)
     #[serde(default)]
     pub batch_size: Option<usize>,
+    /// Force submission even if a job is already running (supersede)
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Response to a job submission request.
@@ -195,6 +198,22 @@ pub struct JobConfigResponse {
     /// Error message if job was rejected
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Request to cancel the current job.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CancelRequest {
+    /// Optional reason for cancellation
+    pub reason: Option<String>,
+}
+
+/// Response to cancellation request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CancelResponse {
+    /// Whether cancellation was successful
+    pub success: bool,
+    /// Status message
+    pub message: String,
 }
 
 /// Request to export metrics database to GCS.

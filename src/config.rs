@@ -80,7 +80,9 @@ pub struct ClickHouseDefaults {
 pub struct PoolProfile {
     /// GCP machine type (e.g., "c3-highcpu-22")
     pub machine_type: Option<String>,
-    /// Number of worker VMs
+    /// Number of workers to create initially (default: 0)
+    pub starting_workers: Option<usize>,
+    /// Target number of workers for autoscaling (default: 4)
     pub workers: Option<usize>,
     /// Use spot/preemptible instances
     pub spot: Option<bool>,
@@ -260,6 +262,7 @@ impl Config {
                     .machine_type
                     .clone()
                     .unwrap_or_else(|| "c3-highcpu-22".to_string()),
+                starting_workers: profile.starting_workers.unwrap_or(0),
                 workers: profile.workers.unwrap_or(4),
                 spot: profile.spot.unwrap_or(false),
                 zone: profile
@@ -284,7 +287,9 @@ pub struct ResolvedPoolConfig {
     pub name: String,
     /// Machine type
     pub machine_type: String,
-    /// Number of workers
+    /// Number of workers to create initially (default: 0)
+    pub starting_workers: usize,
+    /// Target number of workers for autoscaling (default: 4)
     pub workers: usize,
     /// Use spot instances
     pub spot: bool,
@@ -357,6 +362,7 @@ project = "my-project"
 zone = "us-east1-b"
 
 [pools.test]
+starting_workers = 2
 workers = 8
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -364,10 +370,23 @@ workers = 8
 
         assert_eq!(resolved.name, "test");
         assert_eq!(resolved.machine_type, "c3-highcpu-22"); // default
-        assert_eq!(resolved.workers, 8);
+        assert_eq!(resolved.starting_workers, 2);
+        assert_eq!(resolved.workers, 8); // autoscale target
         assert!(!resolved.spot); // default
         assert_eq!(resolved.zone, "us-east1-b"); // from defaults
         assert_eq!(resolved.project, Some("my-project".to_string()));
+    }
+
+    #[test]
+    fn test_resolved_pool_config_defaults() {
+        let toml = r#"
+[pools.minimal]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let resolved = config.get_pool("minimal").unwrap();
+
+        assert_eq!(resolved.starting_workers, 0); // default: coordinator-only
+        assert_eq!(resolved.workers, 4); // default autoscale target
     }
 
     #[test]

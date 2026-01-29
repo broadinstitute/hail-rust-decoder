@@ -186,6 +186,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         input_path: &str,
         output_path: &str,
         total_partitions: usize,
+        force: bool,
     ) -> Result<bool> {
         use crate::distributed::message::{JobConfigRequest, JobConfigResponse};
 
@@ -194,6 +195,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             output_path: output_path.to_string(),
             total_partitions,
             batch_size: None, // Use coordinator's default
+            force,
         };
 
         let json_payload = serde_json::to_string(&request)
@@ -516,6 +518,50 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 );
             }
         }
+    }
+
+    /// Cancel a distributed job running on the pool.
+    pub fn cancel(&self, name: &str, zone: &str) -> Result<()> {
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances.iter().find(|i| i.name.ends_with("-coordinator"));
+
+        if let Some(coord) = coordinator {
+            println!("Sending cancel request to {}...", coord.name);
+
+            use crate::distributed::message::{CancelRequest, CancelResponse};
+            let request = CancelRequest {
+                reason: Some("CLI cancel command".to_string()),
+            };
+            let json_payload = serde_json::to_string(&request).unwrap();
+
+            let cmd_str = format!(
+                "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/cancel",
+                json_payload
+            );
+
+            let mut cmd = self
+                .provider
+                .get_ssh_command(&coord.name, zone, &cmd_str);
+            cmd.stdout(std::process::Stdio::piped());
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(response) = serde_json::from_str::<CancelResponse>(&stdout) {
+                        if response.success {
+                            println!("{} {}", "Success:".green().bold(), response.message);
+                        } else {
+                            println!("{} {}", "Failed:".red().bold(), response.message);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            println!("Failed to communicate with coordinator");
+        } else {
+            println!("No coordinator found for pool '{}'", name);
+        }
+        Ok(())
     }
 
     /// Get status of a distributed job running on the pool.
@@ -1057,6 +1103,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         distributed: bool,
         auto_stop: bool,
         force_redeploy: bool,
+        force: bool,
         autoscale: bool,
         config: Option<&crate::cloud::ScalingConfig>,
         command: &[String],
@@ -1091,6 +1138,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             distributed,
             auto_stop,
             force_redeploy,
+            force,
             command,
         );
 
@@ -1120,6 +1168,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         distributed: bool,
         auto_stop: bool,
         force_redeploy: bool,
+        force: bool,
         command: &[String],
     ) -> Result<()> {
         // 1. Locate the Linux binary (will check if needed after seeing coordinator status)
@@ -1291,6 +1340,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 &workers,
                 command,
                 auto_stop,
+                force,
             );
         }
 
@@ -1521,6 +1571,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         workers: &[Instance],
         command: &[String],
         auto_stop: bool,
+        force: bool,
     ) -> Result<()> {
         use crate::query::QueryEngine;
 
@@ -1571,7 +1622,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Submit job via API
             println!("{}", "Submitting job via API...".dimmed());
-            if !self.submit_job_via_api(coordinator, zone, input_path, output_path, total_partitions)? {
+            if !self.submit_job_via_api(
+                coordinator,
+                zone,
+                input_path,
+                output_path,
+                total_partitions,
+                force,
+            )? {
                 return Err(HailError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "Failed to submit job to coordinator via API",

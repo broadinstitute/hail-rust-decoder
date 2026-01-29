@@ -403,6 +403,10 @@ pub enum PoolCommands {
         #[arg(long)]
         autoscale: bool,
 
+        /// Force submission even if a job is already running (supersedes it)
+        #[arg(long)]
+        force: bool,
+
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
         command: Vec<String>,
@@ -476,6 +480,16 @@ pub enum PoolCommands {
         /// Skip automatic Linux binary build (use existing binary)
         #[arg(long)]
         skip_build: bool,
+    },
+
+    /// Cancel a running job on the pool
+    Cancel {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
     },
 }
 

@@ -1704,9 +1704,10 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             let profile = app_config.get_pool(&name);
 
             // Resolve values: CLI args > profile > defaults
+            // starting_workers defaults to 0 (coordinator-only pool)
             let resolved_workers = workers
-                .or_else(|| profile.as_ref().map(|p| p.workers))
-                .unwrap_or(4);
+                .or_else(|| profile.as_ref().map(|p| p.starting_workers))
+                .unwrap_or(0);
             let resolved_machine_type = machine_type
                 .or_else(|| profile.as_ref().map(|p| p.machine_type.clone()))
                 .unwrap_or_else(|| "c3-highcpu-22".to_string());
@@ -1784,6 +1785,7 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             distributed,
             auto_stop,
             redeploy_binary,
+            force,
             autoscale,
             command,
         } => {
@@ -1806,6 +1808,7 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
                 distributed,
                 auto_stop,
                 redeploy_binary,
+                force,
                 autoscale,
                 scaling_config.as_ref(),
                 &command,
@@ -1856,6 +1859,9 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             skip_build,
         } => {
             manager.update_binary(&name, &zone, binary, skip_build)?;
+        }
+        PoolCommands::Cancel { name, zone } => {
+            manager.cancel(&name, &zone)?;
         }
     }
 
