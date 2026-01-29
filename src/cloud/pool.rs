@@ -301,8 +301,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// Destroy a worker pool.
     ///
     /// Deletes all VMs tagged with the pool name.
-    /// Automatically downloads metrics database from coordinator before deletion.
-    pub fn destroy(&self, name: &str, zone: &str) -> Result<()> {
+    /// If `metrics_bucket` is provided, exports metrics to GCS before deletion.
+    /// Otherwise, attempts to download metrics via SSH (may timeout).
+    pub fn destroy(&self, name: &str, zone: &str, metrics_bucket: Option<&str>) -> Result<()> {
         println!("{} pool '{}'...", "Destroying".red(), name.bright_white());
 
         // First list to show what we're deleting
@@ -317,9 +318,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             println!("   - {}", inst.name.dimmed());
         }
 
-        // Try to download metrics database from coordinator before destroying
+        // Try to export/download metrics database from coordinator before destroying
         if let Some(coordinator) = instances.iter().find(|i| i.name.ends_with("-coordinator")) {
-            self.download_metrics_db(name, &coordinator.name, zone);
+            if let Some(bucket) = metrics_bucket {
+                // Export to GCS via API (fast and reliable)
+                self.export_metrics_to_gcs(name, coordinator, zone, bucket);
+            } else {
+                // Fall back to SSH download (may timeout)
+                self.download_metrics_db(name, &coordinator.name, zone);
+            }
         }
 
         self.provider.destroy_pool(name, zone)?;
@@ -327,6 +334,109 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         println!("{} Pool '{}' destroyed.", "OK".green().bold(), name);
 
         Ok(())
+    }
+
+    /// Export metrics database to GCS via coordinator API.
+    /// Best-effort: failures are logged but don't block pool destruction.
+    fn export_metrics_to_gcs(
+        &self,
+        pool_name: &str,
+        coordinator: &Instance,
+        zone: &str,
+        bucket_path: &str,
+    ) {
+        use crate::distributed::message::{ExportMetricsRequest, ExportMetricsResponse};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Generate timestamp for unique filename
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Build the destination path
+        let bucket_path = bucket_path.trim_end_matches('/');
+        let destination = format!("{}/{}-{}-metrics.db", bucket_path, pool_name, timestamp);
+
+        println!(
+            "{} Exporting metrics to GCS...",
+            "Saving:".cyan()
+        );
+
+        let request = ExportMetricsRequest {
+            destination: destination.clone(),
+        };
+
+        let json_payload = match serde_json::to_string(&request) {
+            Ok(j) => j,
+            Err(e) => {
+                println!(
+                    "   {} Failed to serialize request: {}",
+                    "Warning:".yellow(),
+                    e
+                );
+                return;
+            }
+        };
+
+        // Call the API via SSH curl
+        let curl_cmd = format!(
+            "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/export-metrics",
+            json_payload.replace('\'', "'\\''")
+        );
+
+        let mut cmd = self.provider.get_ssh_command(&coordinator.name, zone, &curl_cmd);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let output = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                println!(
+                    "   {} Failed to call export API: {}",
+                    "Warning:".yellow(),
+                    e
+                );
+                return;
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "   {} Export API call failed: {}",
+                "Warning:".yellow(),
+                stderr.trim()
+            );
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        match serde_json::from_str::<ExportMetricsResponse>(&stdout) {
+            Ok(response) => {
+                if response.success {
+                    println!(
+                        "   {} Metrics exported to {}",
+                        "OK".green().bold(),
+                        response.path.unwrap_or(destination).bright_white()
+                    );
+                } else {
+                    println!(
+                        "   {} {}",
+                        "Warning:".yellow(),
+                        response.error.unwrap_or_else(|| "Unknown error".to_string())
+                    );
+                }
+            }
+            Err(e) => {
+                println!(
+                    "   {} Failed to parse response: {} (raw: {})",
+                    "Warning:".yellow(),
+                    e,
+                    stdout.trim()
+                );
+            }
+        }
     }
 
     /// Download metrics database from coordinator VM.
@@ -492,6 +602,174 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(instances)
     }
 
+    /// Update the binary on a running pool.
+    ///
+    /// This will:
+    /// 1. Build the Linux binary (unless skip_build is true)
+    /// 2. Upload the binary to the coordinator
+    /// 3. Ensure coordinator is running (to serve /api/binary)
+    /// 4. Have all workers pull the new binary from the coordinator
+    ///
+    /// This is useful for updating code on a long-running pool without
+    /// destroying and recreating it.
+    pub fn update_binary(
+        &self,
+        name: &str,
+        zone: &str,
+        binary_path: Option<String>,
+        skip_build: bool,
+    ) -> Result<()> {
+        // Build Linux binary first (unless skipped)
+        if !skip_build {
+            Self::build_linux_binary()?;
+        } else {
+            println!("{}", "Skipping binary build (--skip-build)".dimmed());
+        }
+
+        // Locate the binary
+        let binary = self.locate_binary(binary_path)?;
+        println!(
+            "{} {}",
+            "Binary:".cyan(),
+            binary.display().to_string().bright_white()
+        );
+
+        // Get running instances
+        println!("{}", "Fetching instance list...".dimmed());
+        let instances = self.provider.list_instances(name)?;
+        let running: Vec<_> = instances.into_iter().filter(|i| i.is_running()).collect();
+
+        if running.is_empty() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "No running instances found for pool '{}'. Is the pool running?",
+                    name
+                ),
+            )));
+        }
+
+        // Separate coordinator from workers
+        let (coordinators, workers): (Vec<_>, Vec<_>) = running
+            .into_iter()
+            .partition(|i| i.name.ends_with("-coordinator"));
+
+        let coordinator = coordinators.into_iter().next().ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "No coordinator found for pool '{}'. This command requires a coordinator.\n\
+                     Create pool with: hail-decoder pool create {} --with-coordinator",
+                    name, name
+                ),
+            ))
+        })?;
+
+        let coord_ip = coordinator.ip().ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Coordinator {} has no internal IP", coordinator.name),
+            ))
+        })?;
+
+        println!(
+            "{} coordinator: {} ({}), {} workers",
+            "Found".green(),
+            coordinator.name.cyan(),
+            coord_ip,
+            workers.len().to_string().bright_white()
+        );
+
+        // Check if coordinator is running (we'll need to restart it)
+        let coord_was_running = self.check_coordinator_status(&coordinator, zone);
+
+        // Stop coordinator if running (so we can update the binary)
+        if coord_was_running {
+            println!(
+                "{}",
+                "Stopping coordinator service for update...".dimmed()
+            );
+            let stop_cmd = "pkill -f 'hail-decoder service start-coordinator' || true";
+            let _ = self
+                .provider
+                .get_ssh_command(&coordinator.name, zone, stop_cmd)
+                .status();
+
+            // Give it a moment to stop
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        // Deploy binary to coordinator
+        println!("{}", "Uploading binary to coordinator...".dimmed());
+        self.deploy_binary(&binary, &[coordinator.clone()], zone)?;
+        println!(
+            "{} Binary uploaded to coordinator.",
+            "OK".green().bold()
+        );
+
+        // Start/restart coordinator service (to serve /api/binary and new dashboard)
+        println!(
+            "{}",
+            "Starting coordinator service with new binary...".dimmed()
+        );
+        let coord_cmd =
+            "nohup /usr/local/bin/hail-decoder service start-coordinator \
+             --port 3000 \
+             > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
+        let status = self
+            .provider
+            .get_ssh_command(&coordinator.name, zone, coord_cmd)
+            .status()
+            .map_err(HailError::Io)?;
+
+        if !status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to start coordinator service",
+            )));
+        }
+
+        // Wait for coordinator to be ready
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Verify coordinator is back up
+        if !self.check_coordinator_status(&coordinator, zone) {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Coordinator failed to start after binary update. Check /tmp/coordinator.log",
+            )));
+        }
+        println!(
+            "{} Coordinator restarted with new binary.",
+            "OK".green().bold()
+        );
+
+        // Have workers pull binary from coordinator
+        if workers.is_empty() {
+            println!("{}", "No workers to update.".yellow());
+        } else {
+            println!(
+                "{}",
+                format!("Workers pulling binary from coordinator ({})...", coord_ip).dimmed()
+            );
+            self.propagate_binary_from_coordinator(coord_ip, &workers, zone)?;
+            println!(
+                "{} Binary updated on {} workers.",
+                "OK".green().bold(),
+                workers.len()
+            );
+        }
+
+        println!();
+        println!(
+            "{} Binary updated on pool '{}'",
+            "Done!".green().bold(),
+            name.bright_white()
+        );
+
+        Ok(())
+    }
+
     /// Submit a job to the worker pool.
     ///
     /// This will:
@@ -564,20 +842,82 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         );
 
-        // 3. Deploy binary to all nodes in parallel
-        let all_nodes: Vec<_> = if let Some(ref c) = coordinator {
-            let mut nodes = workers.clone();
-            nodes.push(c.clone());
-            nodes
+        // 3. Deploy binary - use different strategies based on mode
+        if distributed {
+            // Distributed mode: upload to coordinator only, workers pull from coordinator
+            let coord = coordinator.as_ref().unwrap();
+            let coord_ip = coord.ip().ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Coordinator {} has no internal IP", coord.name),
+                ))
+            })?;
+
+            // Deploy binary to coordinator
+            println!("{}", "Deploying binary to coordinator...".dimmed());
+            self.deploy_binary(&binary, &[coord.clone()], zone)?;
+            println!(
+                "{} Binary deployed to coordinator.",
+                "OK".green().bold()
+            );
+
+            // Ensure coordinator is running (so /api/binary is available)
+            // Check if already running from pool create --with-coordinator
+            let coord_running = self.check_coordinator_status(coord, zone);
+            if !coord_running {
+                // Start coordinator in idle mode just to serve the binary
+                println!(
+                    "{}",
+                    "Starting coordinator service to serve binary...".dimmed()
+                );
+                let coord_cmd =
+                    "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                     --port 3000 \
+                     > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
+                let status = self
+                    .provider
+                    .get_ssh_command(&coord.name, zone, coord_cmd)
+                    .status()
+                    .map_err(HailError::Io)?;
+
+                if !status.success() {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "Failed to start coordinator service for binary serving",
+                    )));
+                }
+
+                // Wait for coordinator to be ready
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+
+            // Have workers pull binary from coordinator over GCP internal network
+            println!(
+                "{}",
+                "Workers pulling binary from coordinator...".dimmed()
+            );
+            self.propagate_binary_from_coordinator(coord_ip, &workers, zone)?;
+            println!(
+                "{} Binary propagated to {} workers.",
+                "OK".green().bold(),
+                workers.len()
+            );
         } else {
-            workers.clone()
-        };
+            // Non-distributed mode: upload to all nodes via SCP
+            let all_nodes: Vec<_> = if let Some(ref c) = coordinator {
+                let mut nodes = workers.clone();
+                nodes.push(c.clone());
+                nodes
+            } else {
+                workers.clone()
+            };
 
-        println!("{}", "Deploying binary to nodes...".dimmed());
-        self.deploy_binary(&binary, &all_nodes, zone)?;
-        println!("{} Binary deployed to all nodes.", "OK".green().bold());
+            println!("{}", "Deploying binary to nodes...".dimmed());
+            self.deploy_binary(&binary, &all_nodes, zone)?;
+            println!("{} Binary deployed to all nodes.", "OK".green().bold());
+        }
 
-        // 4. Branch based on distributed mode
+        // 4. Branch based on distributed mode for job submission
         if distributed {
             return self.submit_distributed(
                 name,
@@ -999,7 +1339,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(())
     }
 
-    /// Deploy binary to all workers in parallel.
+    /// Deploy binary to instances via SCP upload.
     fn deploy_binary(&self, binary: &Path, instances: &[Instance], zone: &str) -> Result<()> {
         instances.par_iter().try_for_each(|inst| {
             // Upload to /tmp first (user writable)
@@ -1023,6 +1363,50 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
 
             println!("   {} {}", "Deployed to".dimmed(), inst.name.cyan());
+            Ok(())
+        })
+    }
+
+    /// Have workers pull the binary from the coordinator over GCP internal network.
+    ///
+    /// This is much faster than uploading to each worker via SCP from the client machine,
+    /// since it leverages the high-bandwidth GCP internal network.
+    fn propagate_binary_from_coordinator(
+        &self,
+        coordinator_ip: &str,
+        workers: &[Instance],
+        zone: &str,
+    ) -> Result<()> {
+        workers.par_iter().try_for_each(|worker| {
+            // Download binary from coordinator and install it
+            let curl_cmd = format!(
+                "curl -sL --retry 3 --retry-delay 2 http://{}:3000/api/binary -o /tmp/hail-decoder && \
+                 chmod +x /tmp/hail-decoder && \
+                 sudo mv /tmp/hail-decoder /usr/local/bin/hail-decoder",
+                coordinator_ip
+            );
+
+            let status = self
+                .provider
+                .get_ssh_command(&worker.name, zone, &curl_cmd)
+                .status()
+                .map_err(HailError::Io)?;
+
+            if !status.success() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "Failed to pull binary from coordinator on {}",
+                        worker.name
+                    ),
+                )));
+            }
+
+            println!(
+                "   {} {} (from coordinator)",
+                "Deployed to".dimmed(),
+                worker.name.cyan()
+            );
             Ok(())
         })
     }

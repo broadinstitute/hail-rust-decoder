@@ -101,6 +101,7 @@ google-cloud-auth = { version = "0.19", optional = true }
 
 # HTTP Server for distributed coordinator (and optional hail-server)
 axum = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 
 # Additional HTTP server features (server feature)
 axum-extra = { version = "0.9", features = ["query"], optional = true }

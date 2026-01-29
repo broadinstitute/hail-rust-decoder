@@ -1727,14 +1727,22 @@ fn run_pool_command(command: PoolCommands) -> Result<()> {
         } => {
             manager.submit(&name, &zone, binary, distributed, auto_stop, &command)?;
         }
-        PoolCommands::Destroy { name, zone } => {
-            manager.destroy(&name, &zone)?;
+        PoolCommands::Destroy { name, zone, metrics_bucket } => {
+            manager.destroy(&name, &zone, metrics_bucket.as_deref())?;
         }
         PoolCommands::List { name } => {
             manager.list(&name)?;
         }
         PoolCommands::Status { name, zone } => {
             manager.status(&name, &zone)?;
+        }
+        PoolCommands::UpdateBinary {
+            name,
+            zone,
+            binary,
+            skip_build,
+        } => {
+            manager.update_binary(&name, &zone, binary, skip_build)?;
         }
     }
 

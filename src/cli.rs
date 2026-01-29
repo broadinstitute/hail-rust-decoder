@@ -400,6 +400,10 @@ pub enum PoolCommands {
         /// GCP zone where the pool is located
         #[arg(long, default_value = "us-central1-a")]
         zone: String,
+
+        /// GCS bucket path to export metrics database before destruction (e.g., gs://my-bucket/metrics/)
+        #[arg(long)]
+        metrics_bucket: Option<String>,
     },
 
     /// List instances in a worker pool
@@ -416,6 +420,24 @@ pub enum PoolCommands {
         /// GCP zone where the pool is located
         #[arg(long, default_value = "us-central1-a")]
         zone: String,
+    },
+
+    /// Update the binary on a running pool (upload to coordinator, workers pull)
+    UpdateBinary {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/hail-decoder)
+        #[arg(long)]
+        binary: Option<String>,
+
+        /// Skip automatic Linux binary build (use existing binary)
+        #[arg(long)]
+        skip_build: bool,
     },
 }
 

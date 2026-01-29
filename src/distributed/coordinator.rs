@@ -10,15 +10,18 @@
 
 use crate::distributed::message::{
     CompleteRequest, CompleteResponse, DashboardMetrics, DashboardSummary, DashboardWorker,
-    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, StatusResponse,
-    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
+    ExportMetricsRequest, ExportMetricsResponse, HeartbeatRequest, HeartbeatResponse,
+    JobConfigRequest, JobConfigResponse, StatusResponse, TelemetrySnapshot, WorkRequest,
+    WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::Result;
+use axum::body::Body;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio_util::io::ReaderStream;
 
 /// Configuration for the coordinator.
 pub struct CoordinatorConfig {
@@ -261,6 +264,8 @@ pub async fn run_coordinator(
         .route("/api/dashboard/workers", get(get_dashboard_workers))
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
         .route("/api/job", post(submit_job))
+        .route("/api/binary", get(serve_binary))
+        .route("/api/export-metrics", post(export_metrics))
         .with_state(state);
 
     println!("Dashboard available at http://0.0.0.0:{}/dashboard", port);
@@ -706,4 +711,152 @@ async fn get_dashboard_metrics(
 /// Handler for GET /dashboard - serve the embedded dashboard HTML.
 async fn serve_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/dashboard.html"))
+}
+
+/// Handler for GET /api/binary - serve the coordinator's own executable.
+///
+/// This endpoint allows workers to download the hail-decoder binary directly
+/// from the coordinator over the fast GCP internal network, instead of each
+/// worker receiving it via slow SCP from the client machine.
+async fn serve_binary() -> impl axum::response::IntoResponse {
+    use axum::http::{header, StatusCode};
+    use axum::response::Response;
+
+    // Get the path to our own executable
+    let exe_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("Failed to get current executable path: {}", e);
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("Failed to locate binary: {}", e)))
+                .unwrap();
+        }
+    };
+
+    // Open the file
+    let file = match tokio::fs::File::open(&exe_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open binary file {}: {}", exe_path.display(), e);
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("Failed to open binary: {}", e)))
+                .unwrap();
+        }
+    };
+
+    // Get file metadata for Content-Length
+    let metadata = match file.metadata().await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Failed to get binary metadata: {}", e);
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("Failed to read binary metadata: {}", e)))
+                .unwrap();
+        }
+    };
+
+    let file_size = metadata.len();
+
+    // Create a stream from the file
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    println!(
+        "Serving binary {} ({} bytes) to worker",
+        exe_path.display(),
+        file_size
+    );
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, file_size)
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"hail-decoder\"",
+        )
+        .body(body)
+        .unwrap()
+}
+
+/// Handler for POST /api/export-metrics - export metrics database to GCS.
+///
+/// This endpoint reads the SQLite metrics database and uploads it to a GCS path.
+/// Used by `pool destroy --metrics-bucket` to save metrics before deleting VMs.
+async fn export_metrics(
+    axum::Json(req): axum::Json<ExportMetricsRequest>,
+) -> axum::Json<ExportMetricsResponse> {
+    use crate::io::CloudWriter;
+    use std::io::Write;
+
+    const METRICS_DB_PATH: &str = "/tmp/hail-coordinator-metrics.db";
+
+    // Read the metrics database file
+    let db_contents = match std::fs::read(METRICS_DB_PATH) {
+        Ok(contents) => contents,
+        Err(e) => {
+            return axum::Json(ExportMetricsResponse {
+                success: false,
+                path: None,
+                error: Some(format!("Failed to read metrics database: {}", e)),
+            });
+        }
+    };
+
+    if db_contents.is_empty() {
+        return axum::Json(ExportMetricsResponse {
+            success: false,
+            path: None,
+            error: Some("Metrics database is empty".to_string()),
+        });
+    }
+
+    // Create cloud writer and upload
+    let destination = req.destination.trim_end_matches('/');
+    let upload_path = if destination.ends_with(".db") {
+        destination.to_string()
+    } else {
+        format!("{}/metrics.db", destination)
+    };
+
+    let mut writer = match CloudWriter::new(&upload_path) {
+        Ok(w) => w,
+        Err(e) => {
+            return axum::Json(ExportMetricsResponse {
+                success: false,
+                path: None,
+                error: Some(format!("Failed to create cloud writer: {}", e)),
+            });
+        }
+    };
+
+    if let Err(e) = writer.write_all(&db_contents) {
+        return axum::Json(ExportMetricsResponse {
+            success: false,
+            path: None,
+            error: Some(format!("Failed to write metrics data: {}", e)),
+        });
+    }
+
+    match writer.finish() {
+        Ok(bytes) => {
+            println!(
+                "Exported metrics database ({} bytes) to {}",
+                bytes, upload_path
+            );
+            axum::Json(ExportMetricsResponse {
+                success: true,
+                path: Some(upload_path),
+                error: None,
+            })
+        }
+        Err(e) => axum::Json(ExportMetricsResponse {
+            success: false,
+            path: None,
+            error: Some(format!("Failed to upload metrics: {}", e)),
+        }),
+    }
 }

@@ -197,6 +197,26 @@ pub struct JobConfigResponse {
     pub error: Option<String>,
 }
 
+/// Request to export metrics database to GCS.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExportMetricsRequest {
+    /// GCS path to upload the metrics database (e.g., gs://bucket/path/metrics.db)
+    pub destination: String,
+}
+
+/// Response to metrics export request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExportMetricsResponse {
+    /// Whether the export was successful
+    pub success: bool,
+    /// Path where metrics were uploaded
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Error message if export failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Dashboard info about a single worker.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DashboardWorker {
