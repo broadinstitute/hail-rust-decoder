@@ -18,7 +18,7 @@ http = ["object_store/http"]
 validation = ["dep:jsonschema"]
 clickhouse = []  # reqwest is now always included for distributed workers
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
-benchmark = ["dep:sysinfo"]
+benchmark = []  # sysinfo is now always included
 
 # HTTP server binary (axum is always included for distributed coordinator)
 server = ["dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
@@ -108,8 +108,8 @@ tower-http = { version = "0.5", features = ["cors", "fs"], optional = true }
 async-stream = { version = "0.3", optional = true }
 tokio-stream = { version = "0.1", optional = true }
 
-# System metrics (benchmark feature)
-sysinfo = { version = "0.32", optional = true }
+# System metrics (always included for worker telemetry)
+sysinfo = "0.32"
 
 [[bin]]
 name = "hail-server"

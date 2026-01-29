@@ -2,14 +2,20 @@
 //!
 //! The worker connects to a coordinator, requests work, processes partitions,
 //! and reports completion. It loops until receiving an Exit response.
+//!
+//! Includes a background telemetry loop that sends heartbeats with system
+//! metrics to the coordinator for the dashboard UI.
 
-use crate::distributed::message::{CompleteRequest, WorkRequest, WorkResponse};
+use crate::distributed::message::{
+    CompleteRequest, HeartbeatRequest, TelemetrySnapshot, WorkRequest, WorkResponse,
+};
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
 use crate::query::QueryEngine;
 use crate::Result;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Configuration for a worker.
 pub struct WorkerConfig {
@@ -34,6 +40,20 @@ impl Default for WorkerConfig {
     }
 }
 
+/// Shared state between the main worker loop and the telemetry background task.
+struct TelemetryState {
+    /// Total rows processed so far
+    total_rows: AtomicUsize,
+    /// Currently active partition (usize::MAX = none)
+    active_partition: AtomicUsize,
+    /// Total partitions completed
+    partitions_completed: AtomicUsize,
+    /// Signal to stop the telemetry loop
+    stop: AtomicBool,
+}
+
+const NO_ACTIVE_PARTITION: usize = usize::MAX;
+
 /// Run the worker loop.
 ///
 /// This function blocks until the coordinator signals job completion.
@@ -56,6 +76,22 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
     let work_url = format!("{}/work", config.coordinator_url);
     let complete_url = format!("{}/complete", config.coordinator_url);
+
+    // Shared telemetry state between main loop and background heartbeat task
+    let telemetry_state = Arc::new(TelemetryState {
+        total_rows: AtomicUsize::new(0),
+        active_partition: AtomicUsize::new(NO_ACTIVE_PARTITION),
+        partitions_completed: AtomicUsize::new(0),
+        stop: AtomicBool::new(false),
+    });
+
+    // Spawn background telemetry heartbeat loop
+    let heartbeat_handle = spawn_telemetry_loop(
+        client.clone(),
+        config.coordinator_url.clone(),
+        config.worker_id.clone(),
+        telemetry_state.clone(),
+    );
 
     // Cache the QueryEngine between work requests to avoid re-reading metadata
     let mut cached_engine: Option<(String, QueryEngine)> = None;
@@ -80,6 +116,9 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 break;
             }
             WorkResponse::Wait => {
+                telemetry_state
+                    .active_partition
+                    .store(NO_ACTIVE_PARTITION, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
             }
             WorkResponse::Task {
@@ -94,12 +133,20 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     partitions
                 );
 
+                // Update telemetry: mark first partition as active
+                if let Some(&first) = partitions.first() {
+                    telemetry_state
+                        .active_partition
+                        .store(first, Ordering::Relaxed);
+                }
+
                 // Process the assigned partitions on a blocking thread
                 // (QueryEngine uses blocking I/O internally)
                 // Pass cached engine in and get it back to avoid re-reading metadata
                 let partitions_clone = partitions.clone();
                 let input_clone = input_path.clone();
                 let output_clone = output_path.clone();
+                let ts = telemetry_state.clone();
 
                 let result = tokio::task::spawn_blocking(move || {
                     process_partitions_sync(
@@ -107,6 +154,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                         &partitions_clone,
                         &input_clone,
                         &output_clone,
+                        Some(&ts),
                     )
                 })
                 .await;
@@ -129,6 +177,14 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     }
                 };
 
+                // Update telemetry counters
+                telemetry_state
+                    .active_partition
+                    .store(NO_ACTIVE_PARTITION, Ordering::Relaxed);
+                telemetry_state
+                    .partitions_completed
+                    .fetch_add(partitions.len(), Ordering::Relaxed);
+
                 // Report completion
                 if let Err(e) = report_completion(
                     &client,
@@ -150,6 +206,10 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
             }
         }
     }
+
+    // Stop telemetry background task
+    telemetry_state.stop.store(true, Ordering::Relaxed);
+    let _ = heartbeat_handle.await;
 
     Ok(())
 }
@@ -215,6 +275,99 @@ async fn report_completion(
     Ok(())
 }
 
+/// Spawn a background task that periodically sends heartbeats with telemetry to the coordinator.
+fn spawn_telemetry_loop(
+    client: reqwest::Client,
+    coordinator_url: String,
+    worker_id: String,
+    state: Arc<TelemetryState>,
+) -> tokio::task::JoinHandle<()> {
+    let heartbeat_url = format!("{}/heartbeat", coordinator_url);
+    let start_time = Instant::now();
+
+    // Initialize sysinfo for system metrics (CPU, memory)
+    let sys = std::sync::Mutex::new({
+        use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+        let mut sys = System::new_with_specifics(
+            RefreshKind::new()
+                .with_cpu(CpuRefreshKind::new().with_cpu_usage())
+                .with_memory(MemoryRefreshKind::new().with_ram()),
+        );
+        // Initial refresh to establish baseline
+        sys.refresh_all();
+        sys
+    });
+
+    let mut prev_rows: usize = 0;
+    let mut prev_time = start_time;
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            if state.stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let total_rows = state.total_rows.load(Ordering::Relaxed);
+            let active_part = state.active_partition.load(Ordering::Relaxed);
+            let parts_done = state.partitions_completed.load(Ordering::Relaxed);
+
+            let now = Instant::now();
+            let dt = now.duration_since(prev_time).as_secs_f64();
+            let rows_per_sec = if dt > 0.0 {
+                (total_rows.saturating_sub(prev_rows)) as f64 / dt
+            } else {
+                0.0
+            };
+            prev_rows = total_rows;
+            prev_time = now;
+
+            let timestamp_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+
+            // Collect system metrics
+            let (cpu, mem_used, mem_total) = {
+                use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind};
+                let mut s = sys.lock().unwrap();
+                s.refresh_specifics(
+                    RefreshKind::new()
+                        .with_cpu(CpuRefreshKind::new().with_cpu_usage())
+                        .with_memory(MemoryRefreshKind::new().with_ram()),
+                );
+                let cpu_avg = s.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
+                    / s.cpus().len().max(1) as f32;
+                (Some(cpu_avg), Some(s.used_memory()), Some(s.total_memory()))
+            };
+
+            let snapshot = TelemetrySnapshot {
+                timestamp_ms,
+                cpu_percent: cpu,
+                memory_used_bytes: mem_used,
+                memory_total_bytes: mem_total,
+                rows_per_sec,
+                total_rows,
+                active_partition: if active_part == NO_ACTIVE_PARTITION {
+                    None
+                } else {
+                    Some(active_part)
+                },
+                partitions_completed: parts_done,
+            };
+
+            let req = HeartbeatRequest {
+                worker_id: worker_id.clone(),
+                telemetry: snapshot,
+            };
+
+            // Best-effort: don't let heartbeat failures block the worker
+            let _ = client.post(&heartbeat_url).json(&req).send().await;
+        }
+    })
+}
+
 /// Process the assigned partitions and write to output (synchronous version).
 /// Accepts an optional cached engine and returns it for reuse across work requests.
 fn process_partitions_sync(
@@ -222,6 +375,7 @@ fn process_partitions_sync(
     partitions: &[usize],
     input_path: &str,
     output_path: &str,
+    telemetry: Option<&TelemetryState>,
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
     // Reuse cached engine if input path matches, otherwise open a new one
     let engine = match cached_engine {
@@ -246,6 +400,12 @@ fn process_partitions_sync(
 
     // Process each partition
     for &partition_id in partitions {
+        // Update telemetry: mark this partition as active
+        if let Some(ts) = telemetry {
+            ts.active_partition
+                .store(partition_id, Ordering::Relaxed);
+        }
+
         // Determine the shard file name based on partition ID
         // In distributed mode, we write one file per partition
         let output_file = if output_is_cloud {
@@ -274,6 +434,10 @@ fn process_partitions_sync(
                         let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
                         writer.write_batch(&batch)?;
                         partition_rows += batch_rows.len();
+                        // Update telemetry row count
+                        if let Some(ts) = telemetry {
+                            ts.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                        }
                         batch_rows.clear();
                     }
                 }
@@ -283,6 +447,10 @@ fn process_partitions_sync(
                     let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
                     writer.write_batch(&batch)?;
                     partition_rows += batch_rows.len();
+                    // Update telemetry row count
+                    if let Some(ts) = telemetry {
+                        ts.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                    }
                 }
 
                 writer

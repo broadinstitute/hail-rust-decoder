@@ -36,6 +36,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// Provisions `config.worker_count` VMs in parallel.
     /// If `wait` is true, polls until all VMs have completed their startup scripts.
     /// Automatically builds Linux binary if on macOS (unless `skip_build` is true).
+    /// If `with_coordinator` is true, also starts the coordinator in idle mode.
     pub fn create(&self, config: &PoolConfig, wait: bool, skip_build: bool) -> Result<()> {
         // Build Linux binary first (needed for deployment)
         if !skip_build {
@@ -61,7 +62,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             config.name
         );
 
-        if wait {
+        // Always wait for pool ready when with_coordinator, so we can deploy and start
+        let should_wait = wait || config.with_coordinator;
+
+        if should_wait {
             println!("{}", "Waiting for VMs to be ready...".dimmed());
             self.wait_for_pool_ready(&config.name, &config.zone, 300)?;
             println!("{} All workers are ready.", "OK".green().bold());
@@ -71,7 +75,170 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             );
         }
 
+        // If with_coordinator, deploy binary and start coordinator in idle mode
+        if config.with_coordinator {
+            self.start_idle_coordinator(&config.name, &config.zone, skip_build)?;
+        }
+
         Ok(())
+    }
+
+    /// Deploy binary and start coordinator in idle mode.
+    fn start_idle_coordinator(&self, pool_name: &str, zone: &str, _skip_build: bool) -> Result<()> {
+        // Get coordinator instance
+        let instances = self.provider.list_instances(pool_name)?;
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"))
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "No coordinator instance found for pool '{}'. Pool was not created with --with-coordinator?",
+                        pool_name
+                    ),
+                ))
+            })?;
+
+        // Locate binary
+        let binary = self.locate_binary(None)?;
+        println!(
+            "{} Deploying binary to coordinator...",
+            "Setup:".cyan()
+        );
+
+        // Deploy to coordinator only
+        self.deploy_binary(&binary, &[coordinator.clone()], zone)?;
+
+        // Start coordinator in idle mode (no job args)
+        println!(
+            "{} Starting coordinator in idle mode on {}...",
+            "Setup:".cyan(),
+            coordinator.name.cyan()
+        );
+
+        let coord_cmd = format!(
+            "nohup /usr/local/bin/hail-decoder service start-coordinator \
+             --port 3000 \
+             > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid"
+        );
+
+        let status = self
+            .provider
+            .get_ssh_command(&coordinator.name, zone, &coord_cmd)
+            .status()
+            .map_err(HailError::Io)?;
+
+        if !status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to start coordinator service in idle mode",
+            )));
+        }
+
+        // Give it a moment to start
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Verify it's running
+        let coord_ip = coordinator.ip().unwrap_or("localhost");
+        println!(
+            "{} Coordinator started in idle mode",
+            "OK".green().bold()
+        );
+        println!(
+            "  Dashboard: http://{}:3000/dashboard",
+            coord_ip
+        );
+        println!(
+            "  Submit jobs with: hail-decoder pool submit {} --distributed -- <command>",
+            pool_name
+        );
+
+        Ok(())
+    }
+
+    /// Check if coordinator service is already running and reachable.
+    fn check_coordinator_status(&self, coordinator: &Instance, zone: &str) -> bool {
+        // Try to reach the coordinator's /status endpoint via SSH
+        let mut cmd = self.provider.get_ssh_command(
+            &coordinator.name,
+            zone,
+            "curl -s --connect-timeout 2 http://localhost:3000/status",
+        );
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Check if it looks like a valid JSON response
+                return stdout.contains("\"pending\"") || stdout.contains("\"completed\"");
+            }
+        }
+        false
+    }
+
+    /// Submit job configuration to an already-running coordinator via its API.
+    fn submit_job_via_api(
+        &self,
+        coordinator: &Instance,
+        zone: &str,
+        input_path: &str,
+        output_path: &str,
+        total_partitions: usize,
+    ) -> Result<bool> {
+        use crate::distributed::message::{JobConfigRequest, JobConfigResponse};
+
+        let request = JobConfigRequest {
+            input_path: input_path.to_string(),
+            output_path: output_path.to_string(),
+            total_partitions,
+            batch_size: None, // Use coordinator's default
+        };
+
+        let json_payload = serde_json::to_string(&request)
+            .map_err(|e| HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to serialize job config: {}", e),
+            )))?;
+
+        // Submit via curl through SSH
+        let curl_cmd = format!(
+            "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/job",
+            json_payload.replace('\'', "'\\''") // Escape single quotes for shell
+        );
+
+        let mut cmd = self.provider.get_ssh_command(&coordinator.name, zone, &curl_cmd);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let output = cmd.output().map_err(HailError::Io)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Failed to submit job via API: {}", stderr);
+            return Ok(false);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        // Parse response
+        match serde_json::from_str::<JobConfigResponse>(&stdout) {
+            Ok(response) => {
+                if response.acknowledged {
+                    Ok(true)
+                } else {
+                    if let Some(err) = response.error {
+                        eprintln!("Coordinator rejected job: {}", err);
+                    }
+                    Ok(false)
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to parse coordinator response: {} (raw: {})", e, stdout);
+                Ok(false)
+            }
+        }
     }
 
     /// Wait for all instances in a pool to complete their startup scripts.
@@ -552,9 +719,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// This method:
     /// 1. Parses the command to extract input/output paths
     /// 2. Calculates total partitions from the input table
-    /// 3. Starts the coordinator service on the coordinator VM
-    /// 4. Starts worker services on all worker VMs
-    /// 5. Streams coordinator logs for progress monitoring
+    /// 3. Checks if coordinator is already running (idle mode), submits via API
+    /// 4. Or starts the coordinator service on the coordinator VM (legacy)
+    /// 5. Starts worker services on all worker VMs
+    /// 6. Streams coordinator logs for progress monitoring
     fn submit_distributed(
         &self,
         _pool_name: &str,
@@ -600,38 +768,61 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             ))
         })?;
 
-        println!(
-            "Starting coordinator on {} ({})...",
-            coordinator.name.cyan(),
-            coord_ip
-        );
+        // Check if coordinator is already running (started in idle mode during pool create)
+        let coordinator_already_running = self.check_coordinator_status(coordinator, zone);
 
-        // Start coordinator service and save PID
-        let coord_cmd = format!(
-            "nohup /usr/local/bin/hail-decoder service start-coordinator \
-             --port 3000 \
-             --input '{}' \
-             --output '{}' \
-             --total-partitions {} \
-             > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid",
-            input_path, output_path, total_partitions
-        );
+        if coordinator_already_running {
+            println!(
+                "{} Coordinator already running on {} ({})",
+                "Found".green(),
+                coordinator.name.cyan(),
+                coord_ip
+            );
 
-        let status = self
-            .provider
-            .get_ssh_command(&coordinator.name, zone, &coord_cmd)
-            .status()
-            .map_err(HailError::Io)?;
+            // Submit job via API
+            println!("{}", "Submitting job via API...".dimmed());
+            if !self.submit_job_via_api(coordinator, zone, input_path, output_path, total_partitions)? {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to submit job to coordinator via API",
+                )));
+            }
+            println!("{} Job submitted via API", "OK".green().bold());
+        } else {
+            // Legacy mode: start coordinator fresh
+            println!(
+                "Starting coordinator on {} ({})...",
+                coordinator.name.cyan(),
+                coord_ip
+            );
 
-        if !status.success() {
-            return Err(HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to start coordinator service",
-            )));
+            // Start coordinator service and save PID
+            let coord_cmd = format!(
+                "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                 --port 3000 \
+                 --input '{}' \
+                 --output '{}' \
+                 --total-partitions {} \
+                 > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid",
+                input_path, output_path, total_partitions
+            );
+
+            let status = self
+                .provider
+                .get_ssh_command(&coordinator.name, zone, &coord_cmd)
+                .status()
+                .map_err(HailError::Io)?;
+
+            if !status.success() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to start coordinator service",
+                )));
+            }
+
+            // Give coordinator a moment to bind its port
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
-
-        // Give coordinator a moment to bind its port
-        std::thread::sleep(std::time::Duration::from_secs(2));
 
         // Start workers in parallel
         println!(

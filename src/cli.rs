@@ -428,17 +428,17 @@ pub enum ServiceCommands {
         #[arg(long, default_value = "3000")]
         port: u16,
 
-        /// Path to input Hail table
+        /// Path to input Hail table (optional, can be set later via POST /api/job)
         #[arg(long)]
-        input: String,
+        input: Option<String>,
 
-        /// Path to output directory
+        /// Path to output directory (optional, can be set later via POST /api/job)
         #[arg(long)]
-        output: String,
+        output: Option<String>,
 
-        /// Total number of partitions to process
+        /// Total number of partitions to process (optional, can be set later via POST /api/job)
         #[arg(long)]
-        total_partitions: usize,
+        total_partitions: Option<usize>,
 
         /// Number of partitions to assign per work request
         #[arg(long, default_value = "10")]

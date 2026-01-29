@@ -1760,11 +1760,13 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
             batch_size,
             timeout,
         } => {
+            // If no job parameters provided, start in idle mode (0 partitions)
+            // Job can be submitted later via POST /api/job
             rt.block_on(coordinator::run_coordinator(
                 port,
-                input,
-                output,
-                total_partitions,
+                input.unwrap_or_default(),
+                output.unwrap_or_default(),
+                total_partitions.unwrap_or(0),
                 batch_size,
                 timeout,
             ))

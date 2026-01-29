@@ -9,7 +9,9 @@
 //! A background task monitors for timed-out workers and reschedules their work.
 
 use crate::distributed::message::{
-    CompleteRequest, CompleteResponse, StatusResponse, WorkRequest, WorkResponse,
+    CompleteRequest, CompleteResponse, DashboardMetrics, DashboardSummary, DashboardWorker,
+    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, StatusResponse,
+    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -46,6 +48,47 @@ impl Default for CoordinatorConfig {
     }
 }
 
+/// Maximum number of telemetry snapshots to keep per worker.
+const MAX_METRICS_HISTORY: usize = 300; // ~10 min at 2s intervals
+
+/// Seconds without a heartbeat before a worker is considered suspect.
+const WORKER_SUSPECT_TIMEOUT_SECS: u64 = 30;
+
+/// Current status of a worker.
+#[derive(Debug, Clone, PartialEq)]
+enum WorkerStatus {
+    /// Worker is actively sending heartbeats
+    Active,
+    /// Worker is idle (requested work, got Wait)
+    Idle,
+    /// Worker has not sent a heartbeat recently
+    SuspectedDead,
+}
+
+impl WorkerStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            WorkerStatus::Active => "active",
+            WorkerStatus::Idle => "idle",
+            WorkerStatus::SuspectedDead => "suspected_dead",
+        }
+    }
+}
+
+/// Tracked state for a single worker.
+struct WorkerState {
+    /// Last time we heard from this worker (heartbeat or work request)
+    last_seen: Instant,
+    /// Current status
+    status: WorkerStatus,
+    /// Recent telemetry snapshots (newest last)
+    metrics_history: VecDeque<TelemetrySnapshot>,
+    /// Total rows reported completed by this worker
+    total_rows: usize,
+    /// Total partitions completed by this worker
+    partitions_completed: usize,
+}
+
 /// Internal state of the coordinator.
 struct CoordinatorData {
     /// Partitions waiting to be assigned
@@ -62,6 +105,12 @@ struct CoordinatorData {
     retry_counts: HashMap<usize, usize>,
     /// Partitions that permanently failed (exceeded max retries)
     failed_partitions: HashSet<usize>,
+    /// Registry of all known workers and their telemetry
+    worker_registry: HashMap<String, WorkerState>,
+    /// When the job started
+    job_start_time: Instant,
+    /// Whether the coordinator is idle (waiting for job submission via /api/job)
+    idle: bool,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -93,12 +142,23 @@ pub async fn run_coordinator(
     use axum::{routing::{get, post}, Router};
     use tokio::net::TcpListener;
 
-    println!(
-        "Coordinator starting on port {} with {} partitions",
-        port, total_partitions
-    );
-    println!("  Input: {}", input_path);
-    println!("  Output: {}", output_path);
+    // Determine if starting in idle mode (no job configured yet)
+    let idle = total_partitions == 0;
+
+    if idle {
+        println!(
+            "Coordinator starting on port {} in IDLE mode (waiting for job submission)",
+            port
+        );
+        println!("  Submit a job via POST /api/job or pool submit --distributed");
+    } else {
+        println!(
+            "Coordinator starting on port {} with {} partitions",
+            port, total_partitions
+        );
+        println!("  Input: {}", input_path);
+        println!("  Output: {}", output_path);
+    }
     println!("  Batch size: {}", batch_size);
     println!("  Timeout: {}s", timeout_secs);
 
@@ -117,6 +177,9 @@ pub async fn run_coordinator(
         total_rows: 0,
         retry_counts: HashMap::new(),
         failed_partitions: HashSet::new(),
+        worker_registry: HashMap::new(),
+        job_start_time: Instant::now(),
+        idle,
     }));
 
     // Start background timeout monitor
@@ -125,9 +188,10 @@ pub async fn run_coordinator(
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             check_timeouts(&monitor_state, timeout_secs);
+            check_worker_liveness(&monitor_state);
 
             // Print periodic status
-            let (pending, processing, completed, failed, total, rows) = {
+            let (pending, processing, completed, failed, total, rows, is_idle) = {
                 let data = monitor_state.lock().unwrap();
                 (
                     data.pending_partitions.len(),
@@ -136,8 +200,15 @@ pub async fn run_coordinator(
                     data.failed_partitions.len(),
                     data.config.total_partitions,
                     data.total_rows,
+                    data.idle,
                 )
             };
+
+            // Don't print progress or exit if idle
+            if is_idle {
+                println!("Coordinator idle, waiting for job submission...");
+                continue;
+            }
 
             if completed > 0 || failed > 0 {
                 println!(
@@ -151,7 +222,7 @@ pub async fn run_coordinator(
             }
 
             // Check if job is complete (all partitions either completed or failed)
-            if (completed + failed) == total && processing == 0 && pending == 0 {
+            if total > 0 && (completed + failed) == total && processing == 0 && pending == 0 {
                 if failed > 0 {
                     println!(
                         "Job finished with {} failed partitions out of {}. Total rows: {}",
@@ -171,7 +242,15 @@ pub async fn run_coordinator(
         .route("/work", post(get_work))
         .route("/complete", post(complete_work))
         .route("/status", get(get_status))
+        .route("/heartbeat", post(handle_heartbeat))
+        .route("/dashboard", get(serve_dashboard))
+        .route("/api/dashboard/summary", get(get_dashboard_summary))
+        .route("/api/dashboard/workers", get(get_dashboard_workers))
+        .route("/api/dashboard/metrics", get(get_dashboard_metrics))
+        .route("/api/job", post(submit_job))
         .with_state(state);
+
+    println!("Dashboard available at http://0.0.0.0:{}/dashboard", port);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("Coordinator listening on {}", addr);
@@ -221,12 +300,36 @@ fn check_timeouts(state: &SharedState, timeout_secs: u64) {
     }
 }
 
+/// Ensure a worker exists in the registry and update last_seen.
+fn touch_worker(data: &mut CoordinatorData, worker_id: &str) {
+    let worker = data
+        .worker_registry
+        .entry(worker_id.to_string())
+        .or_insert_with(|| WorkerState {
+            last_seen: Instant::now(),
+            status: WorkerStatus::Idle,
+            metrics_history: VecDeque::new(),
+            total_rows: 0,
+            partitions_completed: 0,
+        });
+    worker.last_seen = Instant::now();
+}
+
 /// Handler for POST /work - worker requests work.
 async fn get_work(
     axum::extract::State(state): axum::extract::State<SharedState>,
     axum::Json(req): axum::Json<WorkRequest>,
 ) -> axum::Json<WorkResponse> {
     let mut data = state.lock().unwrap();
+    touch_worker(&mut data, &req.worker_id);
+
+    // If coordinator is idle (no job configured), tell workers to wait
+    if data.idle {
+        if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+            w.status = WorkerStatus::Idle;
+        }
+        return axum::Json(WorkResponse::Wait);
+    }
 
     // Check if there's pending work
     if let Some(part_id) = data.pending_partitions.pop_front() {
@@ -249,6 +352,11 @@ async fn get_work(
                 .insert(p, (req.worker_id.clone(), now));
         }
 
+        // Update worker status
+        if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+            w.status = WorkerStatus::Active;
+        }
+
         println!(
             "Assigned partitions {:?} to worker {} ({} pending, {} processing, {} complete)",
             partitions,
@@ -266,10 +374,16 @@ async fn get_work(
         })
     } else if !data.processing_partitions.is_empty() {
         // Work in progress but nothing pending - tell worker to wait
+        if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+            w.status = WorkerStatus::Idle;
+        }
         axum::Json(WorkResponse::Wait)
     } else {
         // All done
-        println!("Worker {} requested work, but all partitions complete", req.worker_id);
+        println!(
+            "Worker {} requested work, but all partitions complete",
+            req.worker_id
+        );
         axum::Json(WorkResponse::Exit)
     }
 }
@@ -298,6 +412,13 @@ async fn complete_work(
     }
 
     data.total_rows += req.rows_processed;
+
+    // Update per-worker stats
+    touch_worker(&mut data, &req.worker_id);
+    if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+        w.total_rows += req.rows_processed;
+        w.partitions_completed += req.partitions.len();
+    }
 
     let total = data.config.total_partitions;
     let done = data.completed_partitions.len();
@@ -335,4 +456,213 @@ async fn get_status(
         failed,
         is_complete,
     })
+}
+
+/// Check worker liveness based on heartbeat timestamps.
+fn check_worker_liveness(state: &SharedState) {
+    let mut data = state.lock().unwrap();
+    let now = Instant::now();
+    let timeout = Duration::from_secs(WORKER_SUSPECT_TIMEOUT_SECS);
+
+    for (worker_id, worker) in data.worker_registry.iter_mut() {
+        if now.duration_since(worker.last_seen) > timeout
+            && worker.status != WorkerStatus::SuspectedDead
+        {
+            println!("Worker {} not seen for >{}s, marking as suspected dead", worker_id, WORKER_SUSPECT_TIMEOUT_SECS);
+            worker.status = WorkerStatus::SuspectedDead;
+        }
+    }
+}
+
+/// Handler for POST /heartbeat - worker sends telemetry.
+async fn handle_heartbeat(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    axum::Json(req): axum::Json<HeartbeatRequest>,
+) -> axum::Json<HeartbeatResponse> {
+    let mut data = state.lock().unwrap();
+    touch_worker(&mut data, &req.worker_id);
+
+    if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+        // Revive if previously suspected dead
+        if w.status == WorkerStatus::SuspectedDead {
+            w.status = WorkerStatus::Active;
+        }
+        // Store telemetry snapshot
+        w.metrics_history.push_back(req.telemetry);
+        if w.metrics_history.len() > MAX_METRICS_HISTORY {
+            w.metrics_history.pop_front();
+        }
+    }
+
+    axum::Json(HeartbeatResponse { acknowledged: true })
+}
+
+/// Handler for POST /api/job - submit a job to an idle coordinator.
+async fn submit_job(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    axum::Json(req): axum::Json<JobConfigRequest>,
+) -> axum::Json<JobConfigResponse> {
+    let mut data = state.lock().unwrap();
+
+    // Only accept job if coordinator is idle
+    if !data.idle {
+        return axum::Json(JobConfigResponse {
+            acknowledged: false,
+            error: Some("Coordinator already has a job running".to_string()),
+        });
+    }
+
+    // Validate request
+    if req.total_partitions == 0 {
+        return axum::Json(JobConfigResponse {
+            acknowledged: false,
+            error: Some("total_partitions must be greater than 0".to_string()),
+        });
+    }
+
+    if req.input_path.is_empty() {
+        return axum::Json(JobConfigResponse {
+            acknowledged: false,
+            error: Some("input_path is required".to_string()),
+        });
+    }
+
+    if req.output_path.is_empty() {
+        return axum::Json(JobConfigResponse {
+            acknowledged: false,
+            error: Some("output_path is required".to_string()),
+        });
+    }
+
+    // Configure the job
+    data.config.input_path = req.input_path.clone();
+    data.config.output_path = req.output_path.clone();
+    data.config.total_partitions = req.total_partitions;
+    if let Some(batch_size) = req.batch_size {
+        data.config.batch_size = batch_size;
+    }
+
+    // Fill pending queue with partition indices
+    data.pending_partitions = (0..req.total_partitions).collect();
+
+    // Reset job state
+    data.completed_partitions.clear();
+    data.processing_partitions.clear();
+    data.failed_partitions.clear();
+    data.retry_counts.clear();
+    data.total_rows = 0;
+    data.job_start_time = Instant::now();
+
+    // Mark as no longer idle
+    data.idle = false;
+
+    println!(
+        "Job submitted: {} partitions, input={}, output={}",
+        req.total_partitions, req.input_path, req.output_path
+    );
+
+    axum::Json(JobConfigResponse {
+        acknowledged: true,
+        error: None,
+    })
+}
+
+/// Handler for GET /api/dashboard/summary - overall job summary.
+async fn get_dashboard_summary(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<DashboardSummary> {
+    let data = state.lock().unwrap();
+
+    let completed = data.completed_partitions.len();
+    let failed = data.failed_partitions.len();
+    let total = data.config.total_partitions;
+    let elapsed = data.job_start_time.elapsed().as_secs_f64();
+    let is_complete = (completed + failed) == total;
+
+    let progress_percent = if total > 0 {
+        (completed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Compute cluster-wide rows/sec from worker telemetry
+    let cluster_rows_per_sec: f64 = data
+        .worker_registry
+        .values()
+        .filter(|w| w.status == WorkerStatus::Active)
+        .filter_map(|w| w.metrics_history.back())
+        .map(|s| s.rows_per_sec)
+        .sum();
+
+    // ETA based on partition completion rate
+    let eta_secs = if completed > 0 && !is_complete {
+        let remaining = total - completed - failed;
+        let secs_per_partition = elapsed / completed as f64;
+        Some(remaining as f64 * secs_per_partition)
+    } else {
+        None
+    };
+
+    axum::Json(DashboardSummary {
+        progress_percent,
+        total_partitions: total,
+        completed_partitions: completed,
+        processing_partitions: data.processing_partitions.len(),
+        pending_partitions: data.pending_partitions.len(),
+        failed_partitions: failed,
+        total_rows: data.total_rows,
+        cluster_rows_per_sec,
+        elapsed_secs: elapsed,
+        eta_secs,
+        is_complete,
+        input_path: data.config.input_path.clone(),
+        output_path: data.config.output_path.clone(),
+        idle: data.idle,
+    })
+}
+
+/// Handler for GET /api/dashboard/workers - list all workers.
+async fn get_dashboard_workers(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<Vec<DashboardWorker>> {
+    let data = state.lock().unwrap();
+    let now = Instant::now();
+
+    let workers: Vec<DashboardWorker> = data
+        .worker_registry
+        .iter()
+        .map(|(id, w)| DashboardWorker {
+            worker_id: id.clone(),
+            status: w.status.as_str().to_string(),
+            last_seen_secs: now.duration_since(w.last_seen).as_secs_f64(),
+            latest: w.metrics_history.back().cloned(),
+            total_rows: w.total_rows,
+            partitions_completed: w.partitions_completed,
+        })
+        .collect();
+
+    axum::Json(workers)
+}
+
+/// Handler for GET /api/dashboard/metrics - time-series metrics for charts.
+async fn get_dashboard_metrics(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<DashboardMetrics> {
+    let data = state.lock().unwrap();
+
+    let workers: Vec<WorkerMetricsSeries> = data
+        .worker_registry
+        .iter()
+        .map(|(id, w)| WorkerMetricsSeries {
+            worker_id: id.clone(),
+            snapshots: w.metrics_history.iter().cloned().collect(),
+        })
+        .collect();
+
+    axum::Json(DashboardMetrics { workers })
+}
+
+/// Handler for GET /dashboard - serve the embedded dashboard HTML.
+async fn serve_dashboard() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../static/dashboard.html"))
 }

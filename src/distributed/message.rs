@@ -71,3 +71,131 @@ pub struct StatusResponse {
     /// Whether the job is complete
     pub is_complete: bool,
 }
+
+/// A point-in-time telemetry snapshot from a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetrySnapshot {
+    /// Unix timestamp in milliseconds
+    pub timestamp_ms: u64,
+    /// CPU usage percentage (0-100), None if sysinfo unavailable
+    pub cpu_percent: Option<f32>,
+    /// Memory used in bytes, None if sysinfo unavailable
+    pub memory_used_bytes: Option<u64>,
+    /// Memory total in bytes, None if sysinfo unavailable
+    pub memory_total_bytes: Option<u64>,
+    /// Rows processed per second (computed by worker)
+    pub rows_per_sec: f64,
+    /// Total rows processed so far by this worker
+    pub total_rows: usize,
+    /// Currently active partition, if any
+    pub active_partition: Option<usize>,
+    /// Partitions completed by this worker
+    pub partitions_completed: usize,
+}
+
+/// Heartbeat request from worker to coordinator.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    /// Worker sending the heartbeat
+    pub worker_id: String,
+    /// Current telemetry snapshot
+    pub telemetry: TelemetrySnapshot,
+}
+
+/// Heartbeat response from coordinator.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    /// Whether the heartbeat was acknowledged
+    pub acknowledged: bool,
+}
+
+/// Dashboard summary for the overall job.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardSummary {
+    /// Job progress percentage (0-100)
+    pub progress_percent: f64,
+    /// Total partitions in the job
+    pub total_partitions: usize,
+    /// Partitions completed
+    pub completed_partitions: usize,
+    /// Partitions currently processing
+    pub processing_partitions: usize,
+    /// Partitions pending
+    pub pending_partitions: usize,
+    /// Partitions permanently failed
+    pub failed_partitions: usize,
+    /// Total rows processed across all workers
+    pub total_rows: usize,
+    /// Aggregate rows per second across all workers
+    pub cluster_rows_per_sec: f64,
+    /// Job elapsed time in seconds
+    pub elapsed_secs: f64,
+    /// Estimated time remaining in seconds, if calculable
+    pub eta_secs: Option<f64>,
+    /// Whether the job is complete
+    pub is_complete: bool,
+    /// Input path being processed
+    pub input_path: String,
+    /// Output path
+    pub output_path: String,
+    /// Whether the coordinator is idle (waiting for job submission)
+    #[serde(default)]
+    pub idle: bool,
+}
+
+/// Request to submit a new job to an idle coordinator.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JobConfigRequest {
+    /// Path to input Hail table
+    pub input_path: String,
+    /// Path to output directory
+    pub output_path: String,
+    /// Total number of partitions to process
+    pub total_partitions: usize,
+    /// Number of partitions per work request (optional, defaults to coordinator's batch_size)
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+}
+
+/// Response to a job submission request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JobConfigResponse {
+    /// Whether the job was accepted
+    pub acknowledged: bool,
+    /// Error message if job was rejected
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Dashboard info about a single worker.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardWorker {
+    /// Worker identifier
+    pub worker_id: String,
+    /// Current status
+    pub status: String,
+    /// Seconds since last heartbeat
+    pub last_seen_secs: f64,
+    /// Latest telemetry snapshot
+    pub latest: Option<TelemetrySnapshot>,
+    /// Total rows reported by this worker
+    pub total_rows: usize,
+    /// Total partitions completed by this worker
+    pub partitions_completed: usize,
+}
+
+/// Time-series metrics data for charts.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardMetrics {
+    /// Per-worker time-series data
+    pub workers: Vec<WorkerMetricsSeries>,
+}
+
+/// Time-series data for a single worker.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkerMetricsSeries {
+    /// Worker identifier
+    pub worker_id: String,
+    /// Telemetry snapshots (most recent last)
+    pub snapshots: Vec<TelemetrySnapshot>,
+}
