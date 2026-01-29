@@ -493,37 +493,75 @@ async function update() {
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    // Aggregate throughput and per-worker CPU
-    let totalThroughput = 0;
-    for (const wm of metrics.workers) {
-      if (!chartData[wm.worker_id]) {
-        chartData[wm.worker_id] = { throughput: [], cpu: [] };
-      }
-      const wd = chartData[wm.worker_id];
-      const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
-      if (latest) {
-        wd.throughput.push(latest.rows_per_sec || 0);
-        wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
-        totalThroughput += (latest.rows_per_sec || 0);
-      } else {
-        wd.throughput.push(0);
-        wd.cpu.push(0);
-      }
-      // Trim
-      if (wd.throughput.length > MAX_CHART_POINTS) {
-        wd.throughput.shift();
-        wd.cpu.shift();
-      }
-    }
+    // On first load (empty chartData), populate from full snapshot history
+    const isFirstLoad = Object.keys(chartData).length === 0;
 
-    // Also track aggregate throughput
-    if (!chartData['__aggregate']) chartData['__aggregate'] = { throughput: [], timestamps: [] };
-    const agg = chartData['__aggregate'];
-    agg.throughput.push(totalThroughput);
-    agg.timestamps.push(timeLabel);
-    if (agg.throughput.length > MAX_CHART_POINTS) {
-      agg.throughput.shift();
-      agg.timestamps.shift();
+    if (isFirstLoad && metrics.workers.length > 0) {
+      // Initialize aggregate
+      chartData['__aggregate'] = { throughput: [], timestamps: [] };
+      const agg = chartData['__aggregate'];
+
+      // Find the worker with the most snapshots to determine history length
+      const maxSnapshots = Math.max(...metrics.workers.map(wm => wm.snapshots.length));
+
+      // Build historical data from all snapshots
+      for (let i = 0; i < maxSnapshots; i++) {
+        let totalThroughput = 0;
+        const t = new Date(now.getTime() - (maxSnapshots - i - 1) * 3000); // Assume 3s intervals
+        const label = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        for (const wm of metrics.workers) {
+          if (!chartData[wm.worker_id]) {
+            chartData[wm.worker_id] = { throughput: [], cpu: [] };
+          }
+          const wd = chartData[wm.worker_id];
+          const snap = wm.snapshots[i];
+          if (snap) {
+            wd.throughput.push(snap.rows_per_sec || 0);
+            wd.cpu.push(snap.cpu_percent != null ? snap.cpu_percent : 0);
+            totalThroughput += (snap.rows_per_sec || 0);
+          } else {
+            wd.throughput.push(0);
+            wd.cpu.push(0);
+          }
+        }
+
+        agg.throughput.push(totalThroughput);
+        agg.timestamps.push(label);
+      }
+    } else {
+      // Normal incremental update - just append latest
+      let totalThroughput = 0;
+      for (const wm of metrics.workers) {
+        if (!chartData[wm.worker_id]) {
+          chartData[wm.worker_id] = { throughput: [], cpu: [] };
+        }
+        const wd = chartData[wm.worker_id];
+        const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
+        if (latest) {
+          wd.throughput.push(latest.rows_per_sec || 0);
+          wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
+          totalThroughput += (latest.rows_per_sec || 0);
+        } else {
+          wd.throughput.push(0);
+          wd.cpu.push(0);
+        }
+        // Trim
+        if (wd.throughput.length > MAX_CHART_POINTS) {
+          wd.throughput.shift();
+          wd.cpu.shift();
+        }
+      }
+
+      // Also track aggregate throughput
+      if (!chartData['__aggregate']) chartData['__aggregate'] = { throughput: [], timestamps: [] };
+      const agg = chartData['__aggregate'];
+      agg.throughput.push(totalThroughput);
+      agg.timestamps.push(timeLabel);
+      if (agg.throughput.length > MAX_CHART_POINTS) {
+        agg.throughput.shift();
+        agg.timestamps.shift();
+      }
     }
 
     // Rebuild throughput chart
