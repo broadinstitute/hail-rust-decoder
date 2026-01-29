@@ -29,7 +29,14 @@ impl MetricsDb {
                 rows_per_sec REAL NOT NULL,
                 total_rows INTEGER NOT NULL,
                 active_partition INTEGER,
-                partitions_completed INTEGER NOT NULL
+                partitions_completed INTEGER NOT NULL,
+                -- Extended metrics for btop-style dashboard (added in v2)
+                disk_used_bytes INTEGER,
+                disk_total_bytes INTEGER,
+                network_rx_bytes_sec REAL,
+                network_tx_bytes_sec REAL,
+                network_rx_total_bytes INTEGER,
+                network_tx_total_bytes INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_telemetry_worker_time
@@ -39,6 +46,30 @@ impl MetricsDb {
                 ON telemetry(timestamp_ms);
             "#,
         )?;
+
+        // Add columns if they don't exist (for existing databases)
+        // SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we check first
+        let has_disk_used: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('telemetry') WHERE name = 'disk_used_bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0) > 0;
+
+        if !has_disk_used {
+            // Add new columns for existing databases
+            let _ = conn.execute_batch(
+                r#"
+                ALTER TABLE telemetry ADD COLUMN disk_used_bytes INTEGER;
+                ALTER TABLE telemetry ADD COLUMN disk_total_bytes INTEGER;
+                ALTER TABLE telemetry ADD COLUMN network_rx_bytes_sec REAL;
+                ALTER TABLE telemetry ADD COLUMN network_tx_bytes_sec REAL;
+                ALTER TABLE telemetry ADD COLUMN network_rx_total_bytes INTEGER;
+                ALTER TABLE telemetry ADD COLUMN network_tx_total_bytes INTEGER;
+                "#,
+            );
+        }
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -58,8 +89,11 @@ impl MetricsDb {
             INSERT INTO telemetry (
                 worker_id, timestamp_ms, cpu_percent, memory_used_bytes,
                 memory_total_bytes, rows_per_sec, total_rows,
-                active_partition, partitions_completed
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                active_partition, partitions_completed,
+                disk_used_bytes, disk_total_bytes,
+                network_rx_bytes_sec, network_tx_bytes_sec,
+                network_rx_total_bytes, network_tx_total_bytes
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 worker_id,
@@ -71,6 +105,12 @@ impl MetricsDb {
                 snapshot.total_rows as i64,
                 snapshot.active_partition.map(|v| v as i64),
                 snapshot.partitions_completed as i64,
+                snapshot.disk_used_bytes.map(|v| v as i64),
+                snapshot.disk_total_bytes.map(|v| v as i64),
+                snapshot.network_rx_bytes_sec,
+                snapshot.network_tx_bytes_sec,
+                snapshot.network_rx_total_bytes.map(|v| v as i64),
+                snapshot.network_tx_total_bytes.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -82,7 +122,10 @@ impl MetricsDb {
         let mut stmt = conn.prepare(
             r#"
             SELECT timestamp_ms, cpu_percent, memory_used_bytes, memory_total_bytes,
-                   rows_per_sec, total_rows, active_partition, partitions_completed
+                   rows_per_sec, total_rows, active_partition, partitions_completed,
+                   disk_used_bytes, disk_total_bytes,
+                   network_rx_bytes_sec, network_tx_bytes_sec,
+                   network_rx_total_bytes, network_tx_total_bytes
             FROM telemetry
             WHERE worker_id = ?1
             ORDER BY timestamp_ms ASC
@@ -100,6 +143,16 @@ impl MetricsDb {
                     total_rows: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
+                    cpu_per_core: None,
+                    disk_read_bytes_sec: None,
+                    disk_write_bytes_sec: None,
+                    disk_used_bytes: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                    disk_total_bytes: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                    network_rx_bytes_sec: row.get(10)?,
+                    network_tx_bytes_sec: row.get(11)?,
+                    network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+                    network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -117,7 +170,10 @@ impl MetricsDb {
         let mut stmt = conn.prepare(
             r#"
             SELECT timestamp_ms, cpu_percent, memory_used_bytes, memory_total_bytes,
-                   rows_per_sec, total_rows, active_partition, partitions_completed
+                   rows_per_sec, total_rows, active_partition, partitions_completed,
+                   disk_used_bytes, disk_total_bytes,
+                   network_rx_bytes_sec, network_tx_bytes_sec,
+                   network_rx_total_bytes, network_tx_total_bytes
             FROM telemetry
             WHERE worker_id = ?1
             ORDER BY timestamp_ms DESC
@@ -136,6 +192,16 @@ impl MetricsDb {
                     total_rows: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
+                    cpu_per_core: None,
+                    disk_read_bytes_sec: None,
+                    disk_write_bytes_sec: None,
+                    disk_used_bytes: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+                    disk_total_bytes: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
+                    network_rx_bytes_sec: row.get(10)?,
+                    network_tx_bytes_sec: row.get(11)?,
+                    network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
+                    network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -195,6 +261,16 @@ mod tests {
             total_rows: 5000,
             active_partition: Some(5),
             partitions_completed: 10,
+            // Extended metrics
+            cpu_per_core: Some(vec![45.0, 55.0, 48.0, 52.0]),
+            disk_read_bytes_sec: None,
+            disk_write_bytes_sec: None,
+            disk_used_bytes: Some(50_000_000_000),
+            disk_total_bytes: Some(100_000_000_000),
+            network_rx_bytes_sec: Some(1_000_000.0),
+            network_tx_bytes_sec: Some(500_000.0),
+            network_rx_total_bytes: Some(10_000_000_000),
+            network_tx_total_bytes: Some(5_000_000_000),
         };
 
         db.insert_snapshot("worker-1", &snapshot).unwrap();
@@ -205,6 +281,9 @@ mod tests {
 
         let worker1_snaps = db.get_worker_snapshots("worker-1").unwrap();
         assert_eq!(worker1_snaps.len(), 2);
+        // Verify extended metrics are retrieved
+        assert_eq!(worker1_snaps[0].disk_used_bytes, Some(50_000_000_000));
+        assert_eq!(worker1_snaps[0].network_rx_bytes_sec, Some(1_000_000.0));
 
         let ids = db.get_worker_ids().unwrap();
         assert_eq!(ids, vec!["worker-1", "worker-2"]);

@@ -91,6 +91,36 @@ pub struct TelemetrySnapshot {
     pub active_partition: Option<usize>,
     /// Partitions completed by this worker
     pub partitions_completed: usize,
+
+    // Extended metrics for btop-style dashboard
+
+    /// Per-core CPU usage percentages (0-100 for each core)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_per_core: Option<Vec<f32>>,
+    /// Disk read rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_read_bytes_sec: Option<f64>,
+    /// Disk write rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_write_bytes_sec: Option<f64>,
+    /// Disk space used in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<u64>,
+    /// Disk space total in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
+    /// Network receive rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_rx_bytes_sec: Option<f64>,
+    /// Network transmit rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_tx_bytes_sec: Option<f64>,
+    /// Cumulative network bytes received (for totals display)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_rx_total_bytes: Option<u64>,
+    /// Cumulative network bytes transmitted (for totals display)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_tx_total_bytes: Option<u64>,
 }
 
 /// Heartbeat request from worker to coordinator.

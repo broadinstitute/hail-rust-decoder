@@ -7,58 +7,65 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {
-    --bg: #0f1117;
-    --surface: #1a1d27;
-    --border: #2a2d3a;
-    --text: #e1e4ed;
-    --text-dim: #8b8fa3;
-    --accent: #6c8cff;
-    --green: #4ade80;
-    --red: #f87171;
-    --yellow: #fbbf24;
-    --orange: #fb923c;
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-hover: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-dim: #7d8590;
+    --accent: #58a6ff;
+    --cyan: #39c5cf;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --orange: #db6d28;
+    --purple: #a371f7;
+    --magenta: #db61a2;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
     background: var(--bg);
     color: var(--text);
-    padding: 24px;
+    padding: 12px;
     min-height: 100vh;
+    font-size: 12px;
   }
-  h1 { font-size: 20px; font-weight: 600; }
-  h2 { font-size: 15px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+  h1 { font-size: 14px; font-weight: 600; }
+  h2 { font-size: 11px; font-weight: 600; color: var(--cyan); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
 
   .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 24px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
   }
   .header-left { display: flex; align-items: center; gap: 16px; }
   .header-right { display: flex; align-items: center; gap: 12px; }
-  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
   .status-dot.complete { background: var(--accent); }
-  .meta-text { font-size: 13px; color: var(--text-dim); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .meta-text { font-size: 11px; color: var(--text-dim); }
 
   /* Progress bar */
-  .progress-section { margin-bottom: 24px; }
+  .progress-section { margin-bottom: 12px; }
   .progress-bar-outer {
     width: 100%;
-    height: 28px;
+    height: 20px;
     background: var(--surface);
-    border-radius: 6px;
+    border-radius: 3px;
     overflow: hidden;
     border: 1px solid var(--border);
     position: relative;
   }
   .progress-bar-inner {
     height: 100%;
-    background: linear-gradient(90deg, var(--accent), #8ba4ff);
-    border-radius: 6px 0 0 6px;
+    background: linear-gradient(90deg, var(--cyan), var(--accent));
     transition: width 0.5s ease;
     min-width: 0;
   }
@@ -78,99 +85,209 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 600;
     color: white;
-    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.8);
   }
   .progress-stats {
     display: flex;
-    gap: 24px;
-    margin-top: 10px;
-    font-size: 13px;
+    gap: 16px;
+    margin-top: 6px;
+    font-size: 11px;
     color: var(--text-dim);
   }
-  .progress-stats span { display: flex; align-items: center; gap: 6px; }
+  .progress-stats span { display: flex; align-items: center; gap: 4px; }
 
   /* Stats grid */
   .stats-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
   }
   .stat-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
+    border-radius: 4px;
+    padding: 10px 12px;
   }
-  .stat-label { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
-  .stat-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .stat-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  .stat-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 2px; }
+  .stat-value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat-value.cyan { color: var(--cyan); }
+  .stat-value.green { color: var(--green); }
+  .stat-sub { font-size: 10px; color: var(--text-dim); margin-top: 1px; }
 
-  /* Charts */
-  .charts-row {
+  /* Main layout grid */
+  .main-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 24px;
+    gap: 12px;
+    margin-bottom: 12px;
   }
-  @media (max-width: 900px) { .charts-row { grid-template-columns: 1fr; } }
-  .chart-card {
+  @media (max-width: 1200px) { .main-grid { grid-template-columns: 1fr; } }
+
+  .panel {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
+    border-radius: 4px;
+    padding: 12px;
   }
-  .chart-card canvas { max-height: 240px; }
+  .panel canvas { max-height: 180px; }
 
-  /* Worker grid */
+  /* Worker cards - btop style */
+  .workers-section { margin-bottom: 12px; }
   .workers-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 10px;
   }
   .worker-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
+    border-radius: 4px;
+    overflow: hidden;
     transition: border-color 0.3s;
   }
   .worker-card.active { border-color: var(--green); }
   .worker-card.idle { border-color: var(--yellow); }
   .worker-card.dead { border-color: var(--red); }
-  .worker-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-  .worker-name { font-weight: 600; font-size: 14px; }
+
+  .worker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(255,255,255,0.02);
+    border-bottom: 1px solid var(--border);
+  }
+  .worker-name { font-weight: 600; font-size: 11px; color: var(--cyan); }
   .worker-badge {
-    font-size: 11px;
+    font-size: 9px;
     font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 4px;
+    padding: 2px 6px;
+    border-radius: 3px;
     text-transform: uppercase;
   }
-  .worker-badge.active { background: rgba(74,222,128,0.15); color: var(--green); }
-  .worker-badge.idle { background: rgba(251,191,36,0.15); color: var(--yellow); }
-  .worker-badge.dead { background: rgba(248,113,113,0.15); color: var(--red); }
-  .worker-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 13px; }
-  .worker-stat-label { color: var(--text-dim); }
-  .worker-stat-value { text-align: right; font-variant-numeric: tabular-nums; }
+  .worker-badge.active { background: rgba(63,185,80,0.15); color: var(--green); }
+  .worker-badge.idle { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .worker-badge.dead { background: rgba(248,81,73,0.15); color: var(--red); }
 
-  /* Table info */
+  .worker-body { padding: 10px; }
+
+  /* CPU section in worker card */
+  .cpu-section { margin-bottom: 10px; }
+  .cpu-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .cpu-label { font-size: 10px; color: var(--cyan); font-weight: 600; }
+  .cpu-total { font-size: 11px; color: var(--text); }
+  .cores-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(50px, 1fr));
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .core-item { display: flex; flex-direction: column; gap: 2px; }
+  .core-label { font-size: 9px; color: var(--text-dim); }
+  .core-bar-outer {
+    height: 6px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .core-bar {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s, background 0.3s;
+  }
+  .cpu-sparkline { height: 30px; width: 100%; }
+
+  /* Memory section */
+  .mem-section { margin-bottom: 10px; }
+  .mem-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .mem-label { font-size: 10px; color: var(--green); font-weight: 600; }
+  .mem-value { font-size: 11px; color: var(--text); }
+  .mem-bar-outer {
+    height: 8px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .mem-bar {
+    height: 100%;
+    background: var(--green);
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+
+  /* Network section */
+  .net-section { margin-bottom: 10px; }
+  .net-header { font-size: 10px; color: var(--purple); font-weight: 600; margin-bottom: 4px; }
+  .net-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
+  .net-label { font-size: 10px; color: var(--text-dim); }
+  .net-value { font-size: 11px; font-variant-numeric: tabular-nums; }
+  .net-value.download { color: var(--orange); }
+  .net-value.upload { color: var(--purple); }
+  .net-bars { display: flex; gap: 4px; height: 20px; }
+  .net-bar-container { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .net-bar-label { font-size: 8px; color: var(--text-dim); }
+  .net-bar-outer {
+    flex: 1;
+    background: rgba(255,255,255,0.05);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .net-bar {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+  .net-bar.rx { background: var(--orange); }
+  .net-bar.tx { background: var(--purple); }
+
+  /* Disk section */
+  .disk-section { margin-bottom: 8px; }
+  .disk-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .disk-label { font-size: 10px; color: var(--magenta); font-weight: 600; }
+  .disk-value { font-size: 11px; color: var(--text); }
+  .disk-bar-outer {
+    height: 8px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .disk-bar {
+    height: 100%;
+    background: var(--magenta);
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+
+  /* Worker stats row */
+  .worker-stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+  }
+  .worker-stat { text-align: center; }
+  .worker-stat-label { font-size: 9px; color: var(--text-dim); }
+  .worker-stat-value { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* Info section */
   .info-section {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 24px;
+    border-radius: 4px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
   }
-  .info-row { display: flex; gap: 8px; font-size: 13px; margin-bottom: 4px; }
-  .info-label { color: var(--text-dim); min-width: 80px; }
-  .info-value { font-family: 'JetBrains Mono', 'Fira Code', monospace; word-break: break-all; }
+  .info-row { display: flex; gap: 8px; font-size: 11px; margin-bottom: 3px; }
+  .info-label { color: var(--text-dim); min-width: 60px; }
+  .info-value { word-break: break-all; color: var(--accent); }
 
-  .no-data { text-align: center; color: var(--text-dim); padding: 40px; font-size: 14px; }
+  .no-data { text-align: center; color: var(--text-dim); padding: 40px; font-size: 12px; }
 
   /* Idle overlay */
   .idle-overlay {
@@ -179,7 +296,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(15, 17, 23, 0.95);
+    background: rgba(13, 17, 23, 0.97);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -187,38 +304,22 @@
     z-index: 1000;
   }
   .idle-overlay.hidden { display: none; }
-  .idle-icon {
-    width: 64px;
-    height: 64px;
-    margin-bottom: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .idle-icon svg {
-    width: 64px;
-    height: 64px;
-    color: var(--accent);
-  }
-  .idle-title {
-    font-size: 24px;
-    font-weight: 600;
-    margin-bottom: 12px;
-    color: var(--text);
-  }
+  .idle-icon { width: 48px; height: 48px; margin-bottom: 16px; }
+  .idle-icon svg { width: 48px; height: 48px; color: var(--cyan); }
+  .idle-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
   .idle-subtitle {
-    font-size: 14px;
+    font-size: 12px;
     color: var(--text-dim);
     text-align: center;
     max-width: 400px;
-    line-height: 1.5;
+    line-height: 1.6;
   }
   .idle-subtitle code {
     background: var(--surface);
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 13px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--accent);
   }
 </style>
 </head>
@@ -242,7 +343,7 @@
 
   <div class="header">
     <div class="header-left">
-      <h1>Hail Decoder</h1>
+      <h1>HAIL DECODER</h1>
       <span class="meta-text" id="job-status-text">Connecting...</span>
     </div>
     <div class="header-right">
@@ -258,28 +359,28 @@
       <div class="progress-label" id="progress-label">0%</div>
     </div>
     <div class="progress-stats">
-      <span><strong id="parts-done">0</strong> completed</span>
-      <span><strong id="parts-processing">0</strong> processing</span>
-      <span><strong id="parts-pending">0</strong> pending</span>
-      <span id="parts-failed-wrap" style="display:none"><strong id="parts-failed" style="color:var(--red)">0</strong> failed</span>
-      <span>ETA: <strong id="eta-text">--</strong></span>
+      <span><strong id="parts-done">0</strong> done</span>
+      <span><strong id="parts-processing">0</strong> proc</span>
+      <span><strong id="parts-pending">0</strong> pend</span>
+      <span id="parts-failed-wrap" style="display:none"><strong id="parts-failed" style="color:var(--red)">0</strong> fail</span>
+      <span>ETA <strong id="eta-text">--</strong></span>
     </div>
   </div>
 
   <div class="stats-grid">
     <div class="stat-card">
-      <div class="stat-label">Total Rows</div>
-      <div class="stat-value" id="total-rows">0</div>
+      <div class="stat-label">Rows</div>
+      <div class="stat-value cyan" id="total-rows">0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Cluster Throughput</div>
-      <div class="stat-value" id="rows-per-sec">0</div>
+      <div class="stat-label">Throughput</div>
+      <div class="stat-value green" id="rows-per-sec">0</div>
       <div class="stat-sub">rows/sec</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Active Workers</div>
+      <div class="stat-label">Workers</div>
       <div class="stat-value" id="active-workers">0</div>
-      <div class="stat-sub" id="total-workers-sub">of 0 total</div>
+      <div class="stat-sub" id="total-workers-sub">of 0</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Partitions</div>
@@ -287,20 +388,22 @@
     </div>
   </div>
 
-  <div class="charts-row">
-    <div class="chart-card">
-      <h2>Cluster Throughput (rows/sec)</h2>
+  <div class="main-grid">
+    <div class="panel">
+      <h2>Cluster Throughput</h2>
       <canvas id="throughput-chart"></canvas>
     </div>
-    <div class="chart-card">
-      <h2>CPU Utilization (%)</h2>
+    <div class="panel">
+      <h2>Cluster CPU</h2>
       <canvas id="cpu-chart"></canvas>
     </div>
   </div>
 
-  <h2>Workers</h2>
-  <div class="workers-grid" id="workers-grid">
-    <div class="no-data">Waiting for workers to connect...</div>
+  <div class="workers-section">
+    <h2>Workers</h2>
+    <div class="workers-grid" id="workers-grid">
+      <div class="no-data">Waiting for workers to connect...</div>
+    </div>
   </div>
 
   <div class="info-section" id="info-section">
@@ -312,23 +415,26 @@
 <script>
 // Chart setup
 const chartColors = [
-  '#6c8cff','#4ade80','#fb923c','#f87171','#a78bfa',
-  '#38bdf8','#fbbf24','#e879f9','#34d399','#f472b6'
+  '#39c5cf','#3fb950','#db6d28','#f85149','#a371f7',
+  '#58a6ff','#d29922','#db61a2','#2ea043','#8b949e'
 ];
 const chartOpts = {
   responsive: true,
-  animation: { duration: 300 },
-  plugins: { legend: { labels: { color: '#8b8fa3', font: { size: 11 } } } },
+  maintainAspectRatio: false,
+  animation: { duration: 200 },
+  plugins: {
+    legend: { display: true, position: 'bottom', labels: { color: '#7d8590', font: { size: 10, family: "'JetBrains Mono', monospace" }, boxWidth: 12, padding: 8 } }
+  },
   scales: {
-    x: { ticks: { color: '#8b8fa3', maxTicksLimit: 10 }, grid: { color: '#2a2d3a' } },
-    y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' }, beginAtZero: true }
+    x: { ticks: { color: '#7d8590', maxTicksLimit: 8, font: { size: 9 } }, grid: { color: '#21262d' } },
+    y: { ticks: { color: '#7d8590', font: { size: 9 } }, grid: { color: '#21262d' }, beginAtZero: true }
   }
 };
 
 const throughputChart = new Chart(document.getElementById('throughput-chart'), {
   type: 'line',
   data: { labels: [], datasets: [] },
-  options: { ...chartOpts, plugins: { ...chartOpts.plugins, legend: { display: true, labels: { color: '#8b8fa3', font: { size: 11 } } } } }
+  options: { ...chartOpts }
 });
 
 const cpuChart = new Chart(document.getElementById('cpu-chart'), {
@@ -336,20 +442,20 @@ const cpuChart = new Chart(document.getElementById('cpu-chart'), {
   data: { labels: [], datasets: [] },
   options: {
     ...chartOpts,
-    plugins: { ...chartOpts.plugins, legend: { display: true, labels: { color: '#8b8fa3', font: { size: 11 } } } },
-    scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, max: 100 } }
+    scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, max: 100, ticks: { ...chartOpts.scales.y.ticks, callback: v => v + '%' } } }
   }
 });
 
-// Time-series data store (last N points)
+// Time-series data store
 const MAX_CHART_POINTS = 60;
-const chartData = {}; // worker_id -> { timestamps: [], throughput: [], cpu: [] }
+const chartData = {};
+let agg = { throughput: [], timestamps: [] };
 
 function formatNumber(n) {
   if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
-  return n.toLocaleString();
+  return Math.round(n).toLocaleString();
 }
 
 function formatDuration(secs) {
@@ -357,7 +463,7 @@ function formatDuration(secs) {
   const h = Math.floor(secs / 3600);
   const m = Math.floor((secs % 3600) / 60);
   const s = Math.floor(secs % 60);
-  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
 }
@@ -370,10 +476,20 @@ function formatElapsed(secs) {
 }
 
 function formatBytes(b) {
-  if (!b) return '--';
+  if (!b && b !== 0) return '--';
+  if (b >= 1e12) return (b/1e12).toFixed(1) + ' TB';
   if (b >= 1e9) return (b/1e9).toFixed(1) + ' GB';
   if (b >= 1e6) return (b/1e6).toFixed(0) + ' MB';
-  return (b/1e3).toFixed(0) + ' KB';
+  if (b >= 1e3) return (b/1e3).toFixed(0) + ' KB';
+  return b + ' B';
+}
+
+function formatRate(bytesPerSec) {
+  if (!bytesPerSec && bytesPerSec !== 0) return '--';
+  if (bytesPerSec >= 1e9) return (bytesPerSec/1e9).toFixed(1) + ' GB/s';
+  if (bytesPerSec >= 1e6) return (bytesPerSec/1e6).toFixed(1) + ' MB/s';
+  if (bytesPerSec >= 1e3) return (bytesPerSec/1e3).toFixed(0) + ' KB/s';
+  return Math.round(bytesPerSec) + ' B/s';
 }
 
 function statusClass(s) {
@@ -382,10 +498,131 @@ function statusClass(s) {
   return 'dead';
 }
 
+function getCpuColor(pct) {
+  if (pct >= 90) return 'var(--red)';
+  if (pct >= 70) return 'var(--orange)';
+  if (pct >= 50) return 'var(--yellow)';
+  return 'var(--cyan)';
+}
+
 async function fetchJSON(url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
+}
+
+function renderWorkerCard(w, metricsData) {
+  const sc = statusClass(w.status);
+  const latest = w.latest || {};
+  const cpuPct = latest.cpu_percent != null ? latest.cpu_percent.toFixed(0) : '--';
+  const memPct = latest.memory_total_bytes
+    ? ((latest.memory_used_bytes / latest.memory_total_bytes) * 100).toFixed(0)
+    : '--';
+  const memUsed = formatBytes(latest.memory_used_bytes);
+  const memTotal = formatBytes(latest.memory_total_bytes);
+  const diskPct = latest.disk_total_bytes
+    ? ((latest.disk_used_bytes / latest.disk_total_bytes) * 100).toFixed(0)
+    : '--';
+  const diskUsed = formatBytes(latest.disk_used_bytes);
+  const diskTotal = formatBytes(latest.disk_total_bytes);
+  const netRxRate = formatRate(latest.network_rx_bytes_sec);
+  const netTxRate = formatRate(latest.network_tx_bytes_sec);
+  const netRxTotal = formatBytes(latest.network_rx_total_bytes);
+  const netTxTotal = formatBytes(latest.network_tx_total_bytes);
+
+  // Per-core CPU bars
+  const cores = latest.cpu_per_core || [];
+  const coresHtml = cores.map((pct, i) => `
+    <div class="core-item">
+      <span class="core-label">C${i}</span>
+      <div class="core-bar-outer">
+        <div class="core-bar" style="width:${pct.toFixed(0)}%;background:${getCpuColor(pct)}"></div>
+      </div>
+    </div>
+  `).join('');
+
+  // Network bar widths (scale to 100MB/s max for visualization)
+  const maxNetRate = 100 * 1024 * 1024;
+  const rxPct = Math.min(100, ((latest.network_rx_bytes_sec || 0) / maxNetRate) * 100);
+  const txPct = Math.min(100, ((latest.network_tx_bytes_sec || 0) / maxNetRate) * 100);
+
+  return `
+    <div class="worker-card ${sc}">
+      <div class="worker-header">
+        <span class="worker-name">${w.worker_id}</span>
+        <span class="worker-badge ${sc}">${w.status.replace('_',' ')}</span>
+      </div>
+      <div class="worker-body">
+        <div class="cpu-section">
+          <div class="cpu-header">
+            <span class="cpu-label">CPU</span>
+            <span class="cpu-total">${cpuPct}%</span>
+          </div>
+          ${cores.length > 0 ? `<div class="cores-grid">${coresHtml}</div>` : ''}
+        </div>
+
+        <div class="mem-section">
+          <div class="mem-header">
+            <span class="mem-label">MEM</span>
+            <span class="mem-value">${memUsed} / ${memTotal} (${memPct}%)</span>
+          </div>
+          <div class="mem-bar-outer">
+            <div class="mem-bar" style="width:${memPct === '--' ? 0 : memPct}%"></div>
+          </div>
+        </div>
+
+        <div class="net-section">
+          <div class="net-header">NET</div>
+          <div class="net-row">
+            <span class="net-label">&#9660; RX</span>
+            <span class="net-value download">${netRxRate}</span>
+            <span class="net-value" style="color:var(--text-dim)">(${netRxTotal})</span>
+          </div>
+          <div class="net-row">
+            <span class="net-label">&#9650; TX</span>
+            <span class="net-value upload">${netTxRate}</span>
+            <span class="net-value" style="color:var(--text-dim)">(${netTxTotal})</span>
+          </div>
+          <div class="net-bars">
+            <div class="net-bar-container">
+              <div class="net-bar-outer"><div class="net-bar rx" style="width:${rxPct.toFixed(1)}%"></div></div>
+            </div>
+            <div class="net-bar-container">
+              <div class="net-bar-outer"><div class="net-bar tx" style="width:${txPct.toFixed(1)}%"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="disk-section">
+          <div class="disk-header">
+            <span class="disk-label">DISK</span>
+            <span class="disk-value">${diskUsed} / ${diskTotal} (${diskPct}%)</span>
+          </div>
+          <div class="disk-bar-outer">
+            <div class="disk-bar" style="width:${diskPct === '--' ? 0 : diskPct}%"></div>
+          </div>
+        </div>
+
+        <div class="worker-stats-row">
+          <div class="worker-stat">
+            <div class="worker-stat-label">Part</div>
+            <div class="worker-stat-value">${latest.active_partition != null ? '#' + latest.active_partition : '--'}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="worker-stat-label">R/s</div>
+            <div class="worker-stat-value">${formatNumber(latest.rows_per_sec || 0)}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="worker-stat-label">Rows</div>
+            <div class="worker-stat-value">${formatNumber(w.total_rows)}</div>
+          </div>
+          <div class="worker-stat">
+            <div class="worker-stat-label">Done</div>
+            <div class="worker-stat-value">${w.partitions_completed}</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
 }
 
 async function update() {
@@ -400,9 +637,9 @@ async function update() {
     const idleOverlay = document.getElementById('idle-overlay');
     if (summary.idle) {
       idleOverlay.classList.remove('hidden');
-      document.getElementById('job-status-text').textContent = 'Idle - Waiting for job';
+      document.getElementById('job-status-text').textContent = 'Idle';
       document.getElementById('live-dot').className = 'status-dot';
-      return; // Don't update the rest when idle
+      return;
     } else {
       idleOverlay.classList.add('hidden');
     }
@@ -412,10 +649,10 @@ async function update() {
     const statusText = document.getElementById('job-status-text');
     if (summary.is_complete) {
       dot.className = 'status-dot complete';
-      statusText.textContent = 'Job Complete';
+      statusText.textContent = 'Complete';
     } else {
       dot.className = 'status-dot live';
-      statusText.textContent = 'Job Running';
+      statusText.textContent = 'Running';
     }
     document.getElementById('elapsed-text').textContent = formatElapsed(summary.elapsed_secs);
 
@@ -448,7 +685,7 @@ async function update() {
 
     const activeCount = workers.filter(w => w.status === 'active').length;
     document.getElementById('active-workers').textContent = activeCount;
-    document.getElementById('total-workers-sub').textContent = `of ${workers.length} total`;
+    document.getElementById('total-workers-sub').textContent = `of ${workers.length}`;
 
     // Info
     document.getElementById('input-path').textContent = summary.input_path || '--';
@@ -459,109 +696,40 @@ async function update() {
     if (workers.length === 0) {
       grid.innerHTML = '<div class="no-data">Waiting for workers to connect...</div>';
     } else {
-      grid.innerHTML = workers.map(w => {
-        const sc = statusClass(w.status);
-        const latest = w.latest || {};
-        const memPct = latest.memory_total_bytes
-          ? ((latest.memory_used_bytes / latest.memory_total_bytes) * 100).toFixed(0) + '%'
-          : '--';
-        return `
-          <div class="worker-card ${sc}">
-            <div class="worker-header">
-              <span class="worker-name">${w.worker_id}</span>
-              <span class="worker-badge ${sc}">${w.status.replace('_',' ')}</span>
-            </div>
-            <div class="worker-stats">
-              <span class="worker-stat-label">Partition</span>
-              <span class="worker-stat-value">${latest.active_partition != null ? '#' + latest.active_partition : 'idle'}</span>
-              <span class="worker-stat-label">Rows/sec</span>
-              <span class="worker-stat-value">${formatNumber(Math.round(latest.rows_per_sec || 0))}</span>
-              <span class="worker-stat-label">Total Rows</span>
-              <span class="worker-stat-value">${formatNumber(w.total_rows)}</span>
-              <span class="worker-stat-label">Parts Done</span>
-              <span class="worker-stat-value">${w.partitions_completed}</span>
-              <span class="worker-stat-label">CPU</span>
-              <span class="worker-stat-value">${latest.cpu_percent != null ? latest.cpu_percent.toFixed(0) + '%' : '--'}</span>
-              <span class="worker-stat-label">Memory</span>
-              <span class="worker-stat-value">${memPct}</span>
-            </div>
-          </div>`;
-      }).join('');
+      grid.innerHTML = workers.map(w => renderWorkerCard(w, metrics)).join('');
     }
 
-    // Update chart time-series data from metrics
+    // Update chart time-series data
     const now = new Date();
     const timeLabel = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    // On first load (empty chartData), populate from full snapshot history
-    const isFirstLoad = Object.keys(chartData).length === 0;
-
-    if (isFirstLoad && metrics.workers.length > 0) {
-      // Initialize aggregate
-      chartData['__aggregate'] = { throughput: [], timestamps: [] };
-      const agg = chartData['__aggregate'];
-
-      // Find the worker with the most snapshots to determine history length
-      const maxSnapshots = Math.max(...metrics.workers.map(wm => wm.snapshots.length));
-
-      // Build historical data from all snapshots
-      for (let i = 0; i < maxSnapshots; i++) {
-        let totalThroughput = 0;
-        const t = new Date(now.getTime() - (maxSnapshots - i - 1) * 3000); // Assume 3s intervals
-        const label = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
-        for (const wm of metrics.workers) {
-          if (!chartData[wm.worker_id]) {
-            chartData[wm.worker_id] = { throughput: [], cpu: [] };
-          }
-          const wd = chartData[wm.worker_id];
-          const snap = wm.snapshots[i];
-          if (snap) {
-            wd.throughput.push(snap.rows_per_sec || 0);
-            wd.cpu.push(snap.cpu_percent != null ? snap.cpu_percent : 0);
-            totalThroughput += (snap.rows_per_sec || 0);
-          } else {
-            wd.throughput.push(0);
-            wd.cpu.push(0);
-          }
-        }
-
-        agg.throughput.push(totalThroughput);
-        agg.timestamps.push(label);
+    // Incremental update
+    let totalThroughput = 0;
+    for (const wm of metrics.workers) {
+      if (!chartData[wm.worker_id]) {
+        chartData[wm.worker_id] = { throughput: [], cpu: [] };
       }
-    } else {
-      // Normal incremental update - just append latest
-      let totalThroughput = 0;
-      for (const wm of metrics.workers) {
-        if (!chartData[wm.worker_id]) {
-          chartData[wm.worker_id] = { throughput: [], cpu: [] };
-        }
-        const wd = chartData[wm.worker_id];
-        const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
-        if (latest) {
-          wd.throughput.push(latest.rows_per_sec || 0);
-          wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
-          totalThroughput += (latest.rows_per_sec || 0);
-        } else {
-          wd.throughput.push(0);
-          wd.cpu.push(0);
-        }
-        // Trim
-        if (wd.throughput.length > MAX_CHART_POINTS) {
-          wd.throughput.shift();
-          wd.cpu.shift();
-        }
+      const wd = chartData[wm.worker_id];
+      const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
+      if (latest) {
+        wd.throughput.push(latest.rows_per_sec || 0);
+        wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
+        totalThroughput += (latest.rows_per_sec || 0);
+      } else {
+        wd.throughput.push(0);
+        wd.cpu.push(0);
       }
+      if (wd.throughput.length > MAX_CHART_POINTS) {
+        wd.throughput.shift();
+        wd.cpu.shift();
+      }
+    }
 
-      // Also track aggregate throughput
-      if (!chartData['__aggregate']) chartData['__aggregate'] = { throughput: [], timestamps: [] };
-      const agg = chartData['__aggregate'];
-      agg.throughput.push(totalThroughput);
-      agg.timestamps.push(timeLabel);
-      if (agg.throughput.length > MAX_CHART_POINTS) {
-        agg.throughput.shift();
-        agg.timestamps.shift();
-      }
+    agg.throughput.push(totalThroughput);
+    agg.timestamps.push(timeLabel);
+    if (agg.throughput.length > MAX_CHART_POINTS) {
+      agg.throughput.shift();
+      agg.timestamps.shift();
     }
 
     // Rebuild throughput chart
@@ -593,7 +761,7 @@ async function update() {
 
   } catch (err) {
     console.error('Dashboard update failed:', err);
-    document.getElementById('job-status-text').textContent = 'Connection lost - retrying...';
+    document.getElementById('job-status-text').textContent = 'Reconnecting...';
     document.getElementById('live-dot').className = 'status-dot';
   }
 }

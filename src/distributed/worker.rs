@@ -298,8 +298,16 @@ fn spawn_telemetry_loop(
         sys
     });
 
+    // Initialize disk and network monitoring
+    let disks = std::sync::Mutex::new(sysinfo::Disks::new_with_refreshed_list());
+    let networks = std::sync::Mutex::new(sysinfo::Networks::new_with_refreshed_list());
+
     let mut prev_rows: usize = 0;
     let mut prev_time = start_time;
+
+    // Track previous network counters for rate calculation
+    let mut prev_net_rx: u64 = 0;
+    let mut prev_net_tx: u64 = 0;
 
     tokio::spawn(async move {
         loop {
@@ -328,8 +336,8 @@ fn spawn_telemetry_loop(
                 .unwrap_or_default()
                 .as_millis() as u64;
 
-            // Collect system metrics
-            let (cpu, mem_used, mem_total) = {
+            // Collect system metrics (CPU and memory)
+            let (cpu, cpu_per_core, mem_used, mem_total) = {
                 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind};
                 let mut s = sys.lock().unwrap();
                 s.refresh_specifics(
@@ -337,9 +345,54 @@ fn spawn_telemetry_loop(
                         .with_cpu(CpuRefreshKind::new().with_cpu_usage())
                         .with_memory(MemoryRefreshKind::new().with_ram()),
                 );
-                let cpu_avg = s.cpus().iter().map(|c| c.cpu_usage()).sum::<f32>()
-                    / s.cpus().len().max(1) as f32;
-                (Some(cpu_avg), Some(s.used_memory()), Some(s.total_memory()))
+                let per_core: Vec<f32> = s.cpus().iter().map(|c| c.cpu_usage()).collect();
+                let cpu_avg = per_core.iter().sum::<f32>() / per_core.len().max(1) as f32;
+                (
+                    Some(cpu_avg),
+                    Some(per_core),
+                    Some(s.used_memory()),
+                    Some(s.total_memory()),
+                )
+            };
+
+            // Collect disk metrics
+            let (disk_used, disk_total) = {
+                let mut d = disks.lock().unwrap();
+                d.refresh_list();
+                let mut used = 0u64;
+                let mut total = 0u64;
+                for disk in d.iter() {
+                    total += disk.total_space();
+                    used += disk.total_space().saturating_sub(disk.available_space());
+                }
+                (Some(used), Some(total))
+            };
+
+            // Collect network metrics
+            let (net_rx_sec, net_tx_sec, net_rx_total, net_tx_total) = {
+                let mut n = networks.lock().unwrap();
+                n.refresh();
+                let (current_rx, current_tx) = n
+                    .iter()
+                    .fold((0u64, 0u64), |(rx, tx), (_, iface)| {
+                        (rx + iface.total_received(), tx + iface.total_transmitted())
+                    });
+
+                // Calculate rates (bytes/sec)
+                let rx_sec = if dt > 0.0 {
+                    current_rx.saturating_sub(prev_net_rx) as f64 / dt
+                } else {
+                    0.0
+                };
+                let tx_sec = if dt > 0.0 {
+                    current_tx.saturating_sub(prev_net_tx) as f64 / dt
+                } else {
+                    0.0
+                };
+                prev_net_rx = current_rx;
+                prev_net_tx = current_tx;
+
+                (Some(rx_sec), Some(tx_sec), Some(current_rx), Some(current_tx))
             };
 
             let snapshot = TelemetrySnapshot {
@@ -355,6 +408,16 @@ fn spawn_telemetry_loop(
                     Some(active_part)
                 },
                 partitions_completed: parts_done,
+                // Extended metrics
+                cpu_per_core,
+                disk_read_bytes_sec: None, // sysinfo doesn't provide disk I/O rates directly
+                disk_write_bytes_sec: None,
+                disk_used_bytes: disk_used,
+                disk_total_bytes: disk_total,
+                network_rx_bytes_sec: net_rx_sec,
+                network_tx_bytes_sec: net_tx_sec,
+                network_rx_total_bytes: net_rx_total,
+                network_tx_total_bytes: net_tx_total,
             };
 
             let req = HeartbeatRequest {
