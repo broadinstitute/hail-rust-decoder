@@ -4,6 +4,53 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Specification for a distributed job operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum JobSpec {
+    /// Export to Parquet files
+    ExportParquet {
+        output_path: String,
+    },
+    /// Export to JSON files (NDJSON)
+    ExportJson {
+        output_path: String,
+        /// Optional field to group by (creates separate files/directories)
+        #[serde(default)]
+        group_by: Option<String>,
+    },
+    /// Compute summary statistics
+    Summary,
+    /// Validate against schema
+    Validate {
+        schema_path: String,
+        #[serde(default)]
+        fail_fast: bool,
+    },
+}
+
+impl JobSpec {
+    /// Get a human-readable description of the job type.
+    pub fn description(&self) -> &'static str {
+        match self {
+            JobSpec::ExportParquet { .. } => "export parquet",
+            JobSpec::ExportJson { .. } => "export json",
+            JobSpec::Summary => "summary",
+            JobSpec::Validate { .. } => "validate",
+        }
+    }
+
+    /// Get the output path if this job produces output.
+    pub fn output_path(&self) -> Option<&str> {
+        match self {
+            JobSpec::ExportParquet { output_path } => Some(output_path),
+            JobSpec::ExportJson { output_path, .. } => Some(output_path),
+            JobSpec::Summary => None,
+            JobSpec::Validate { .. } => None,
+        }
+    }
+}
+
 /// Request from a worker asking for work.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WorkRequest {
@@ -22,10 +69,16 @@ pub enum WorkResponse {
         partitions: Vec<usize>,
         /// Path to input Hail table
         input_path: String,
-        /// Path to output directory
-        output_path: String,
+        /// Job specification (what to do with the data)
+        job_spec: JobSpec,
         /// Total number of partitions in the table (for output file naming)
         total_partitions: usize,
+        /// Filter conditions (where clauses)
+        #[serde(default)]
+        filters: Vec<String>,
+        /// Interval filters
+        #[serde(default)]
+        intervals: Vec<String>,
     },
     /// No work available but job is still in progress - wait and retry
     #[serde(rename = "wait")]
@@ -44,6 +97,9 @@ pub struct CompleteRequest {
     pub partitions: Vec<usize>,
     /// Number of rows processed
     pub rows_processed: usize,
+    /// Optional result data for aggregation (e.g., stats, validation report)
+    #[serde(default)]
+    pub result_json: Option<serde_json::Value>,
 }
 
 /// Response to completion request.
@@ -166,8 +222,9 @@ pub struct DashboardSummary {
     pub is_complete: bool,
     /// Input path being processed
     pub input_path: String,
-    /// Output path
-    pub output_path: String,
+    /// Job specification
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_spec: Option<JobSpec>,
     /// Whether the coordinator is idle (waiting for job submission)
     #[serde(default)]
     pub idle: bool,
@@ -178,8 +235,8 @@ pub struct DashboardSummary {
 pub struct JobConfigRequest {
     /// Path to input Hail table
     pub input_path: String,
-    /// Path to output directory
-    pub output_path: String,
+    /// Job specification
+    pub job_spec: JobSpec,
     /// Total number of partitions to process
     pub total_partitions: usize,
     /// Number of partitions per work request (optional, defaults to coordinator's batch_size)
@@ -188,6 +245,12 @@ pub struct JobConfigRequest {
     /// Force submission even if a job is already running (supersede)
     #[serde(default)]
     pub force: bool,
+    /// Filter conditions (where clauses)
+    #[serde(default)]
+    pub filters: Vec<String>,
+    /// Interval filters
+    #[serde(default)]
+    pub intervals: Vec<String>,
 }
 
 /// Response to a job submission request.
@@ -267,4 +330,19 @@ pub struct WorkerMetricsSeries {
     pub worker_id: String,
     /// Telemetry snapshots (most recent last)
     pub snapshots: Vec<TelemetrySnapshot>,
+}
+
+/// Response containing aggregated job results.
+///
+/// Used by `GET /api/result` to retrieve final stats for summary/validate jobs.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JobResultResponse {
+    /// Whether a result is available
+    pub available: bool,
+    /// The aggregated result (structure depends on job type)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Error message if result retrieval failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }

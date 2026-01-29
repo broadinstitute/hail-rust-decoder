@@ -4,10 +4,12 @@
 //!
 //! # Modules
 //! - `hail`: Export to Hail Table (.ht) format
+//! - `json`: Export to JSON (NDJSON) format
 //! - `clickhouse`: Export to ClickHouse using Parquet as intermediate format (requires `clickhouse` feature)
 //! - `bigquery`: Export to Google BigQuery using Parquet and GCS staging (requires `bigquery` feature)
 
 pub mod hail;
+pub mod json;
 
 #[cfg(feature = "bigquery")]
 pub mod bigquery;
@@ -15,6 +17,7 @@ pub mod bigquery;
 pub mod clickhouse;
 
 pub use hail::HailTableWriter;
+pub use json::{hail_to_json_sharded_full, JsonWriter};
 
 #[cfg(feature = "bigquery")]
 pub use bigquery::{BigQueryClient, BigQueryError};

@@ -7,11 +7,11 @@
 //! metrics to the coordinator for the dashboard UI.
 
 use crate::distributed::message::{
-    CompleteRequest, HeartbeatRequest, TelemetrySnapshot, WorkRequest, WorkResponse,
+    CompleteRequest, HeartbeatRequest, JobSpec, TelemetrySnapshot, WorkRequest, WorkResponse,
 };
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
-use crate::query::QueryEngine;
+use crate::query::{IntervalList, KeyRange, QueryEngine};
 use crate::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -124,13 +124,16 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
             WorkResponse::Task {
                 partitions,
                 input_path,
-                output_path,
+                job_spec,
                 total_partitions: _,
+                filters,
+                intervals,
             } => {
                 println!(
-                    "Received work: {} partition(s) {:?}",
+                    "Received work: {} partition(s) {:?} ({})",
                     partitions.len(),
-                    partitions
+                    partitions,
+                    job_spec.description()
                 );
 
                 // Update telemetry: mark first partition as active
@@ -142,27 +145,30 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
 
                 // Process the assigned partitions on a blocking thread
                 // (QueryEngine uses blocking I/O internally)
-                // Pass cached engine in and get it back to avoid re-reading metadata
                 let partitions_clone = partitions.clone();
                 let input_clone = input_path.clone();
-                let output_clone = output_path.clone();
+                let job_spec_clone = job_spec.clone();
+                let filters_clone = filters.clone();
+                let intervals_clone = intervals.clone();
                 let ts = telemetry_state.clone();
 
                 let result = tokio::task::spawn_blocking(move || {
-                    process_partitions_sync(
+                    dispatch_job(
                         cached_engine,
                         &partitions_clone,
                         &input_clone,
-                        &output_clone,
+                        &job_spec_clone,
+                        &filters_clone,
+                        &intervals_clone,
                         Some(ts),
                     )
                 })
                 .await;
 
-                let rows_processed = match result {
-                    Ok(Ok((rows, engine_back))) => {
+                let (rows_processed, result_json) = match result {
+                    Ok(Ok((rows, result, engine_back))) => {
                         cached_engine = engine_back;
-                        rows
+                        (rows, result)
                     }
                     Ok(Err(e)) => {
                         eprintln!("Error processing partitions {:?}: {}", partitions, e);
@@ -185,13 +191,14 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     .partitions_completed
                     .fetch_add(partitions.len(), Ordering::Relaxed);
 
-                // Report completion
+                // Report completion (with optional result_json for aggregation)
                 if let Err(e) = report_completion(
                     &client,
                     &complete_url,
                     &config.worker_id,
                     &partitions,
                     rows_processed,
+                    result_json,
                 )
                 .await
                 {
@@ -253,11 +260,13 @@ async fn report_completion(
     worker_id: &str,
     partitions: &[usize],
     rows_processed: usize,
+    result_json: Option<serde_json::Value>,
 ) -> Result<()> {
     let request = CompleteRequest {
         worker_id: worker_id.to_string(),
         partitions: partitions.to_vec(),
         rows_processed,
+        result_json,
     };
 
     client
@@ -431,25 +440,104 @@ fn spawn_telemetry_loop(
     })
 }
 
-/// Process the assigned partitions and write to output (synchronous version).
+/// Dispatch job based on JobSpec to the appropriate processor.
+///
+/// Returns (rows_processed, result_json, cached_engine).
+fn dispatch_job(
+    cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    input_path: &str,
+    job_spec: &JobSpec,
+    filters: &[String],
+    intervals: &[String],
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, Option<serde_json::Value>, Option<(String, QueryEngine)>)> {
+    // Parse filters from strings
+    let key_ranges = parse_filter_strings(filters);
+    let interval_list = parse_interval_strings(intervals);
+
+    match job_spec {
+        JobSpec::ExportParquet { output_path } => {
+            let (rows, engine) = process_parquet_export(
+                cached_engine,
+                partitions,
+                input_path,
+                output_path,
+                &key_ranges,
+                interval_list.as_ref(),
+                telemetry,
+            )?;
+            Ok((rows, None, engine))
+        }
+        JobSpec::ExportJson { output_path, .. } => {
+            let (rows, engine) = process_json_export(
+                cached_engine,
+                partitions,
+                input_path,
+                output_path,
+                &key_ranges,
+                interval_list.as_ref(),
+                telemetry,
+            )?;
+            Ok((rows, None, engine))
+        }
+        JobSpec::Summary => {
+            // TODO: Implement distributed summary
+            eprintln!("Summary job not yet implemented for distributed mode");
+            Ok((0, None, cached_engine))
+        }
+        JobSpec::Validate { .. } => {
+            // TODO: Implement distributed validation
+            eprintln!("Validate job not yet implemented for distributed mode");
+            Ok((0, None, cached_engine))
+        }
+    }
+}
+
+/// Parse filter strings back into KeyRanges.
+///
+/// Note: For distributed mode, filtering is primarily done at the partition level.
+/// The filters here are passed as strings from the coordinator but the complex
+/// parsing logic lives in main.rs. For now, we skip re-parsing on workers.
+/// The coordinator handles filter validation.
+fn parse_filter_strings(_filters: &[String]) -> Vec<KeyRange> {
+    // TODO: Move parse_where_condition to a shared module if filter
+    // re-parsing on workers becomes necessary
+    Vec::new()
+}
+
+/// Parse interval strings back into IntervalList.
+///
+/// Note: Similar to filters, interval parsing is complex and lives in main.rs.
+/// For distributed mode, the coordinator handles interval validation.
+fn parse_interval_strings(_intervals: &[String]) -> Option<Arc<IntervalList>> {
+    // TODO: Move interval parsing to a shared module if needed on workers
+    None
+}
+
+/// Process partitions and write to Parquet output (synchronous version).
 /// Uses rayon to process partitions in parallel across all CPU cores.
-/// Accepts an optional cached engine and returns it for reuse across work requests.
-fn process_partitions_sync(
+fn process_parquet_export(
     _cached_engine: Option<(String, QueryEngine)>,
     partitions: &[usize],
     input_path: &str,
     output_path: &str,
+    filters: &[KeyRange],
+    intervals: Option<&Arc<IntervalList>>,
     telemetry: Option<Arc<TelemetryState>>,
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    use crate::query::row_matches_intervals;
     use rayon::prelude::*;
 
-    println!("Processing {} partitions in parallel...", partitions.len());
+    println!("Processing {} partitions to Parquet...", partitions.len());
 
     let output_is_cloud = is_cloud_path(output_path);
 
     // Clone refs for the parallel closure
     let input_path = input_path.to_string();
     let output_path = output_path.to_string();
+    let filters = filters.to_vec();
+    let intervals = intervals.cloned();
 
     // Process partitions in parallel using rayon
     let results: Vec<Result<usize>> = partitions
@@ -472,8 +560,8 @@ fn process_partitions_sync(
             let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
             let mut partition_rows = 0;
 
-            // Stream rows from this partition
-            let iter = engine.scan_partition_iter(partition_id, &[])?;
+            // Stream rows from this partition with filters
+            let iter = engine.scan_partition_iter(partition_id, &filters)?;
 
             // Clone telemetry for this thread
             let ts = telemetry.clone();
@@ -485,6 +573,14 @@ fn process_partitions_sync(
 
                     for row_result in iter {
                         let row = row_result?;
+
+                        // Apply interval filtering if present
+                        if let Some(ref ivl) = intervals {
+                            if !row_matches_intervals(&row, ivl) {
+                                continue;
+                            }
+                        }
+
                         batch_rows.push(row);
 
                         if batch_rows.len() >= BATCH_SIZE {
@@ -547,5 +643,111 @@ fn process_partitions_sync(
     let total: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
 
     // Don't return cached engine since we opened multiple in parallel
+    Ok((total, None))
+}
+
+/// Process partitions and write to JSON output (NDJSON format).
+fn process_json_export(
+    _cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    input_path: &str,
+    output_path: &str,
+    filters: &[KeyRange],
+    intervals: Option<&Arc<IntervalList>>,
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    use crate::export::JsonWriter;
+    use crate::query::row_matches_intervals;
+    use rayon::prelude::*;
+    use std::fs::File;
+    use std::io::BufWriter;
+
+    println!("Processing {} partitions to JSON...", partitions.len());
+
+    let output_is_cloud = is_cloud_path(output_path);
+
+    // Clone refs for the parallel closure
+    let input_path = input_path.to_string();
+    let output_path = output_path.to_string();
+    let filters = filters.to_vec();
+    let intervals = intervals.cloned();
+
+    // Process partitions in parallel using rayon
+    let results: Vec<Result<usize>> = partitions
+        .par_iter()
+        .map(|&partition_id| {
+            let engine = QueryEngine::open_path(&input_path)?;
+
+            let output_file = if output_is_cloud {
+                let base = output_path.trim_end_matches('/');
+                format!("{}/part-{:05}.json", base, partition_id)
+            } else {
+                format!("{}/part-{:05}.json", output_path, partition_id)
+            };
+
+            let mut partition_rows = 0;
+
+            // Stream rows from this partition with filters
+            let iter = engine.scan_partition_iter(partition_id, &filters)?;
+
+            let ts = telemetry.clone();
+
+            macro_rules! process_json_with_writer {
+                ($writer:expr) => {{
+                    let mut json_writer = JsonWriter::new($writer);
+
+                    for row_result in iter {
+                        let row = row_result?;
+
+                        // Apply interval filtering if present
+                        if let Some(ref ivl) = intervals {
+                            if !row_matches_intervals(&row, ivl) {
+                                continue;
+                            }
+                        }
+
+                        json_writer.write_row(&row)?;
+                        partition_rows += 1;
+
+                        if let Some(ref t) = ts {
+                            t.total_rows.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    json_writer.flush()?;
+                    json_writer.into_inner()
+                }};
+            }
+
+            if output_is_cloud {
+                let cloud_writer = StreamingCloudWriter::new(&output_file)?;
+                let writer = process_json_with_writer!(cloud_writer);
+                writer.finish()?;
+            } else {
+                let file = File::create(&output_file)?;
+                let buf_writer = BufWriter::new(file);
+                process_json_with_writer!(buf_writer);
+            }
+
+            println!(
+                "  Partition {} complete: {} rows -> {}",
+                partition_id, partition_rows, output_file
+            );
+
+            Ok(partition_rows)
+        })
+        .collect();
+
+    // Check for any errors
+    for result in &results {
+        if let Err(e) = result {
+            return Err(crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Partition processing failed: {}", e),
+            )));
+        }
+    }
+
+    let total: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
     Ok((total, None))
 }

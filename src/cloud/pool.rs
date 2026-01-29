@@ -184,18 +184,22 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         coordinator: &Instance,
         zone: &str,
         input_path: &str,
-        output_path: &str,
+        job_spec: &crate::distributed::message::JobSpec,
         total_partitions: usize,
         force: bool,
+        filters: &[String],
+        intervals: &[String],
     ) -> Result<bool> {
         use crate::distributed::message::{JobConfigRequest, JobConfigResponse};
 
         let request = JobConfigRequest {
             input_path: input_path.to_string(),
-            output_path: output_path.to_string(),
+            job_spec: job_spec.clone(),
             total_partitions,
             batch_size: None, // Use coordinator's default
             force,
+            filters: filters.to_vec(),
+            intervals: intervals.to_vec(),
         };
 
         let json_payload = serde_json::to_string(&request)
@@ -1557,7 +1561,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// Submit a distributed job using the coordinator/worker pattern.
     ///
     /// This method:
-    /// 1. Parses the command to extract input/output paths
+    /// 1. Parses the command to extract input/output paths and job type
     /// 2. Calculates total partitions from the input table
     /// 3. Checks if coordinator is already running (idle mode), submits via API
     /// 4. Or starts the coordinator service on the coordinator VM (legacy)
@@ -1577,28 +1581,29 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
         println!("{}", "Preparing distributed job...".dimmed());
 
-        // Parse input/output from command
-        // Expected format: export parquet <input> <output> [args...]
-        if command.len() < 4 || command.get(0).map(|s| s.as_str()) != Some("export") {
-            return Err(HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Distributed mode currently only supports 'export parquet <input> <output>'\n\
-                 Example: pool submit mypool --distributed -- export parquet gs://bucket/input.ht gs://bucket/output/",
-            )));
-        }
-
-        let input_path = &command[2];
-        let output_path = &command[3];
+        // Parse command into JobSpec
+        // Supported formats:
+        //   export parquet <input> <output> [--where ...]
+        //   export json <input> <output> [--where ...]
+        let (input_path, job_spec, filters, intervals) = Self::parse_command_to_job_spec(command)?;
 
         // Calculate total partitions by reading metadata locally
         println!("Reading metadata from {}...", input_path.bright_white());
-        let engine = QueryEngine::open_path(input_path)?;
+        let engine = QueryEngine::open_path(&input_path)?;
         let total_partitions = engine.num_partitions();
         println!(
             "  {} {} partitions to process",
             "Found".green(),
             total_partitions.to_string().bright_white()
         );
+        println!(
+            "  {} {}",
+            "Job type:".cyan(),
+            job_spec.description().bright_white()
+        );
+        if let Some(out) = job_spec.output_path() {
+            println!("  {} {}", "Output:".cyan(), out.bright_white());
+        }
         drop(engine);
 
         // Get coordinator's internal IP
@@ -1625,10 +1630,12 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             if !self.submit_job_via_api(
                 coordinator,
                 zone,
-                input_path,
-                output_path,
+                &input_path,
+                &job_spec,
                 total_partitions,
                 force,
+                &filters,
+                &intervals,
             )? {
                 return Err(HailError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -1637,7 +1644,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
             println!("{} Job submitted via API", "OK".green().bold());
         } else {
-            // Legacy mode: start coordinator fresh
+            // Legacy mode: start coordinator fresh (only supports basic parquet export)
+            let output_path = job_spec.output_path().ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Legacy coordinator mode only supports jobs with output paths",
+                ))
+            })?;
+
             println!(
                 "Starting coordinator on {} ({})...",
                 coordinator.name.cyan(),
@@ -1990,6 +2004,100 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
              \n\
              Or specify path with --binary",
         )))
+    }
+
+    /// Parse a command array into a JobSpec and input path.
+    ///
+    /// Supported formats:
+    /// - `export parquet <input> <output> [--where ...] [--interval ...]`
+    /// - `export json <input> <output> [--where ...] [--interval ...]`
+    ///
+    /// Returns (input_path, job_spec, filters, intervals)
+    fn parse_command_to_job_spec(
+        command: &[String],
+    ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
+        use crate::distributed::message::JobSpec;
+
+        if command.is_empty() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Empty command",
+            )));
+        }
+
+        // Expect: export <type> <input> <output> [args...]
+        if command.get(0).map(|s| s.as_str()) != Some("export") {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Distributed mode requires 'export' command, got: {}\n\
+                     Example: pool submit mypool --distributed -- export parquet gs://bucket/input.ht gs://bucket/output/",
+                    command.get(0).map(|s| s.as_str()).unwrap_or("<empty>")
+                ),
+            )));
+        }
+
+        if command.len() < 4 {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Export command requires: export <type> <input> <output>\n\
+                 Example: export parquet gs://bucket/input.ht gs://bucket/output/",
+            )));
+        }
+
+        let export_type = &command[1];
+        let input_path = command[2].clone();
+        let output_path = command[3].clone();
+
+        // Parse optional arguments (--where, --interval)
+        let mut filters = Vec::new();
+        let mut intervals = Vec::new();
+        let mut i = 4;
+        while i < command.len() {
+            match command[i].as_str() {
+                "--where" => {
+                    if i + 1 < command.len() {
+                        filters.push(command[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--interval" => {
+                    if i + 1 < command.len() {
+                        intervals.push(command[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        let job_spec = match export_type.as_str() {
+            "parquet" => JobSpec::ExportParquet {
+                output_path,
+            },
+            "json" => JobSpec::ExportJson {
+                output_path,
+                group_by: None,
+            },
+            other => {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Unsupported export type for distributed mode: '{}'\n\
+                         Supported types: parquet, json",
+                        other
+                    ),
+                )));
+            }
+        };
+
+        Ok((input_path, job_spec, filters, intervals))
     }
 }
 

@@ -11,8 +11,8 @@
 use crate::distributed::message::{
     CancelRequest, CancelResponse, CompleteRequest, CompleteResponse, DashboardMetrics,
     DashboardSummary, DashboardWorker, ExportMetricsRequest, ExportMetricsResponse,
-    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, StatusResponse,
-    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
+    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, JobResultResponse,
+    JobSpec, StatusResponse, TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::Result;
@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio_util::io::ReaderStream;
 
 /// Configuration for the coordinator.
 pub struct CoordinatorConfig {
@@ -29,8 +28,8 @@ pub struct CoordinatorConfig {
     pub port: u16,
     /// Path to input Hail table
     pub input_path: String,
-    /// Path to output directory
-    pub output_path: String,
+    /// Job specification (what operation to perform)
+    pub job_spec: Option<JobSpec>,
     /// Total number of partitions to process
     pub total_partitions: usize,
     /// Number of partitions to assign per work request (batching)
@@ -39,6 +38,10 @@ pub struct CoordinatorConfig {
     pub timeout_secs: u64,
     /// Timeout for stuck jobs making no progress (seconds)
     pub stuck_timeout_secs: u64,
+    /// Filter conditions (where clauses)
+    pub filters: Vec<String>,
+    /// Interval filters
+    pub intervals: Vec<String>,
 }
 
 impl Default for CoordinatorConfig {
@@ -46,11 +49,13 @@ impl Default for CoordinatorConfig {
         Self {
             port: 3000,
             input_path: String::new(),
-            output_path: String::new(),
+            job_spec: None,
             total_partitions: 0,
             batch_size: 1, // Default to 1 partition per request for fine-grained retry
             timeout_secs: 600, // 10 minutes
             stuck_timeout_secs: 600, // 10 minutes for stuck job detection
+            filters: Vec::new(),
+            intervals: Vec::new(),
         }
     }
 }
@@ -122,6 +127,8 @@ struct CoordinatorData {
     idle: bool,
     /// SQLite database for persistent metrics storage
     metrics_db: MetricsDb,
+    /// Aggregated results from workers (for Summary/Validate jobs)
+    aggregated_results: Vec<serde_json::Value>,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -130,10 +137,18 @@ type SharedState = Arc<Mutex<CoordinatorData>>;
 ///
 /// This function blocks until the job is complete or the server is interrupted.
 pub async fn start_coordinator(config: CoordinatorConfig) -> Result<()> {
+    // Extract output_path from job_spec for backward compatibility
+    let output_path = config
+        .job_spec
+        .as_ref()
+        .and_then(|js| js.output_path())
+        .map(String::from)
+        .unwrap_or_default();
+
     run_coordinator(
         config.port,
         config.input_path,
-        config.output_path,
+        output_path,
         config.total_partitions,
         config.batch_size,
         config.timeout_secs,
@@ -142,6 +157,9 @@ pub async fn start_coordinator(config: CoordinatorConfig) -> Result<()> {
 }
 
 /// Properly structured coordinator startup.
+///
+/// Note: For backward compatibility, `output_path` is converted to a default
+/// ExportParquet JobSpec. New code should use the API endpoint with JobSpec directly.
 pub async fn run_coordinator(
     port: u16,
     input_path: String,
@@ -156,6 +174,15 @@ pub async fn run_coordinator(
     // Determine if starting in idle mode (no job configured yet)
     let idle = total_partitions == 0;
 
+    // Convert output_path to JobSpec for backward compatibility
+    let job_spec = if output_path.is_empty() {
+        None
+    } else {
+        Some(JobSpec::ExportParquet {
+            output_path: output_path.clone(),
+        })
+    };
+
     if idle {
         println!(
             "Coordinator starting on port {} in IDLE mode (waiting for job submission)",
@@ -168,7 +195,12 @@ pub async fn run_coordinator(
             port, total_partitions
         );
         println!("  Input: {}", input_path);
-        println!("  Output: {}", output_path);
+        if let Some(ref spec) = job_spec {
+            println!("  Job: {}", spec.description());
+            if let Some(out) = spec.output_path() {
+                println!("  Output: {}", out);
+            }
+        }
     }
     println!("  Batch size: {}", batch_size);
     println!("  Timeout: {}s", timeout_secs);
@@ -189,11 +221,13 @@ pub async fn run_coordinator(
         config: CoordinatorConfig {
             port,
             input_path,
-            output_path,
+            job_spec,
             total_partitions,
             batch_size,
             timeout_secs,
             stuck_timeout_secs: 600, // Default 10 minutes
+            filters: Vec::new(),
+            intervals: Vec::new(),
         },
         total_rows: 0,
         retry_counts: HashMap::new(),
@@ -203,6 +237,7 @@ pub async fn run_coordinator(
         last_progress_time: Instant::now(),
         idle,
         metrics_db,
+        aggregated_results: Vec::new(),
     }));
 
     // Start background timeout monitor
@@ -279,6 +314,7 @@ pub async fn run_coordinator(
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
         .route("/api/job", post(submit_job))
         .route("/api/cancel", post(cancel_job))
+        .route("/api/result", get(get_job_result))
         .route("/api/binary", get(serve_binary))
         .route("/api/export-metrics", post(export_metrics))
         .with_state(state);
@@ -428,11 +464,25 @@ async fn get_work(
             data.completed_partitions.len()
         );
 
+        // Get job_spec, or return Wait if not configured (shouldn't happen since we check idle)
+        let job_spec = match data.config.job_spec.clone() {
+            Some(spec) => spec,
+            None => {
+                // Put partitions back
+                for p in partitions.into_iter().rev() {
+                    data.pending_partitions.push_front(p);
+                }
+                return axum::Json(WorkResponse::Wait);
+            }
+        };
+
         axum::Json(WorkResponse::Task {
             partitions,
             input_path: data.config.input_path.clone(),
-            output_path: data.config.output_path.clone(),
+            job_spec,
             total_partitions: data.config.total_partitions,
+            filters: data.config.filters.clone(),
+            intervals: data.config.intervals.clone(),
         })
     } else if !data.processing_partitions.is_empty() {
         // Work in progress but nothing pending - tell worker to wait
@@ -476,6 +526,11 @@ async fn complete_work(
     }
 
     data.total_rows += req.rows_processed;
+
+    // Store result_json if present (for Summary/Validate jobs)
+    if let Some(result) = req.result_json {
+        data.aggregated_results.push(result);
+    }
 
     // Update per-worker stats
     touch_worker(&mut data, &req.worker_id);
@@ -619,17 +674,12 @@ async fn submit_job(
         });
     }
 
-    if req.output_path.is_empty() {
-        return axum::Json(JobConfigResponse {
-            acknowledged: false,
-            error: Some("output_path is required".to_string()),
-        });
-    }
-
     // Configure the job
     data.config.input_path = req.input_path.clone();
-    data.config.output_path = req.output_path.clone();
+    data.config.job_spec = Some(req.job_spec.clone());
     data.config.total_partitions = req.total_partitions;
+    data.config.filters = req.filters.clone();
+    data.config.intervals = req.intervals.clone();
     if let Some(batch_size) = req.batch_size {
         data.config.batch_size = batch_size;
     }
@@ -645,6 +695,7 @@ async fn submit_job(
     data.total_rows = 0;
     data.job_start_time = Instant::now();
     data.last_progress_time = Instant::now();
+    data.aggregated_results.clear();
 
     // Don't clear worker registry on resubmission/superseding, as we want to keep connected workers
     // Only clear if this is a fresh start and we want to purge stale workers
@@ -658,9 +709,17 @@ async fn submit_job(
     // Mark as no longer idle
     data.idle = false;
 
+    let output_desc = req
+        .job_spec
+        .output_path()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "(no output)".to_string());
     println!(
-        "Job submitted: {} partitions, input={}, output={}",
-        req.total_partitions, req.input_path, req.output_path
+        "Job submitted: {} ({} partitions, input={}, output={})",
+        req.job_spec.description(),
+        req.total_partitions,
+        req.input_path,
+        output_desc
     );
 
     axum::Json(JobConfigResponse {
@@ -694,6 +753,47 @@ async fn cancel_job(
     axum::Json(CancelResponse {
         success: true,
         message: format!("Job cancelled: {}", reason),
+    })
+}
+
+/// Handler for GET /api/result - retrieve aggregated job results.
+///
+/// For Summary and Validate jobs, this returns the collected results from all workers.
+async fn get_job_result(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<JobResultResponse> {
+    let data = state.lock().unwrap();
+
+    // Check if the job is complete
+    let failed = data.failed_partitions.len();
+    let completed = data.completed_partitions.len();
+    let total = data.config.total_partitions;
+    let is_complete = total > 0 && (completed + failed) == total;
+
+    if data.idle {
+        return axum::Json(JobResultResponse {
+            available: false,
+            result: None,
+            error: Some("No job is running".to_string()),
+        });
+    }
+
+    if !is_complete {
+        return axum::Json(JobResultResponse {
+            available: false,
+            result: None,
+            error: Some(format!(
+                "Job not complete: {}/{} partitions done",
+                completed, total
+            )),
+        });
+    }
+
+    // Return aggregated results as a JSON array
+    axum::Json(JobResultResponse {
+        available: true,
+        result: Some(serde_json::Value::Array(data.aggregated_results.clone())),
+        error: None,
     })
 }
 
@@ -746,7 +846,7 @@ async fn get_dashboard_summary(
         eta_secs,
         is_complete,
         input_path: data.config.input_path.clone(),
-        output_path: data.config.output_path.clone(),
+        job_spec: data.config.job_spec.clone(),
         idle: data.idle,
     })
 }
@@ -828,58 +928,58 @@ const BINARY_INSTALL_PATH: &str = "/usr/local/bin/hail-decoder";
 async fn serve_binary() -> impl axum::response::IntoResponse {
     use axum::http::{header, StatusCode};
     use axum::response::Response;
+    use std::fs::File;
+    use std::io::Read;
     use std::path::Path;
 
     // Use the fixed install path - this always points to the latest binary
     // even after updates (unlike /proc/self/exe which becomes "(deleted)")
     let exe_path = Path::new(BINARY_INSTALL_PATH);
 
-    // Open the file
-    let file = match tokio::fs::File::open(&exe_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Failed to open binary file {}: {}", exe_path.display(), e);
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Failed to open binary: {}", e)))
-                .unwrap();
+    // Read the file synchronously (it's a one-time operation per request)
+    let result = tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<u8>, u64)> {
+        let mut file = File::open(exe_path)?;
+        let metadata = file.metadata()?;
+        let file_size = metadata.len();
+        let mut buffer = Vec::with_capacity(file_size as usize);
+        file.read_to_end(&mut buffer)?;
+        Ok((buffer, file_size))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((buffer, file_size))) => {
+            println!(
+                "Serving binary {} ({} bytes) to worker",
+                BINARY_INSTALL_PATH, file_size
+            );
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header(header::CONTENT_LENGTH, file_size)
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"hail-decoder\"",
+                )
+                .body(Body::from(buffer))
+                .unwrap()
         }
-    };
-
-    // Get file metadata for Content-Length
-    let metadata = match file.metadata().await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Failed to get binary metadata: {}", e);
-            return Response::builder()
+        Ok(Err(e)) => {
+            eprintln!("Failed to read binary file {}: {}", BINARY_INSTALL_PATH, e);
+            Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(Body::from(format!("Failed to read binary metadata: {}", e)))
-                .unwrap();
+                .body(Body::from(format!("Failed to read binary: {}", e)))
+                .unwrap()
         }
-    };
-
-    let file_size = metadata.len();
-
-    // Create a stream from the file
-    let stream = ReaderStream::new(file);
-    let body = Body::from_stream(stream);
-
-    println!(
-        "Serving binary {} ({} bytes) to worker",
-        exe_path.display(),
-        file_size
-    );
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header(header::CONTENT_LENGTH, file_size)
-        .header(
-            header::CONTENT_DISPOSITION,
-            "attachment; filename=\"hail-decoder\"",
-        )
-        .body(body)
-        .unwrap()
+        Err(e) => {
+            eprintln!("Task panicked reading binary: {}", e);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from(format!("Internal error: {}", e)))
+                .unwrap()
+        }
+    }
 }
 
 /// Handler for POST /api/export-metrics - export metrics database to GCS.

@@ -66,6 +66,9 @@ pub enum ExportCommands {
     /// Convert to Parquet file
     Parquet(ExportParquetArgs),
 
+    /// Export to JSON file (NDJSON)
+    Json(ExportJsonArgs),
+
     /// Export to VCF file
     Vcf(ExportVcfArgs),
 
@@ -162,6 +165,33 @@ pub struct ExportParquetArgs {
 }
 
 impl HasCommonExportArgs for ExportParquetArgs {
+    fn common(&self) -> &CommonExportArgs {
+        &self.common
+    }
+}
+
+#[derive(Args)]
+pub struct ExportJsonArgs {
+    #[command(flatten)]
+    pub common: CommonExportArgs,
+
+    /// Output JSON file path (or directory if --per-partition or --shard-count is used)
+    pub output: String,
+
+    /// Write each partition to a separate file in the output directory
+    #[arg(long)]
+    pub per_partition: bool,
+
+    /// Write output as a directory of N JSON files (groups partitions)
+    #[arg(long, conflicts_with = "per_partition")]
+    pub shard_count: Option<usize>,
+
+    /// Group rows by field value and write to separate files (not yet implemented)
+    #[arg(long)]
+    pub group_by: Option<String>,
+}
+
+impl HasCommonExportArgs for ExportJsonArgs {
     fn common(&self) -> &CommonExportArgs {
         &self.common
     }
