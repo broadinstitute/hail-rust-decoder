@@ -1784,9 +1784,61 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             distributed,
             auto_stop,
             redeploy_binary,
+            autoscale,
             command,
         } => {
-            manager.submit(&name, &zone, binary, distributed, auto_stop, redeploy_binary, &command)?;
+            // Convert ResolvedPoolConfig to ScalingConfig if available
+            let scaling_config = app_config.get_pool(&name).map(|p| {
+                hail_decoder::cloud::ScalingConfig {
+                    machine_type: p.machine_type.clone(),
+                    workers: p.workers,
+                    spot: p.spot,
+                    network: p.network.clone(),
+                    subnet: p.subnet.clone(),
+                    project: p.project.clone(),
+                    with_coordinator: p.with_coordinator,
+                }
+            });
+            manager.submit(
+                &name,
+                &zone,
+                binary,
+                distributed,
+                auto_stop,
+                redeploy_binary,
+                autoscale,
+                scaling_config.as_ref(),
+                &command,
+            )?;
+        }
+        PoolCommands::Scale {
+            name,
+            workers,
+            zone,
+            binary,
+            skip_build,
+        } => {
+            let pool_config = app_config.get_pool(&name).ok_or_else(|| {
+                hail_decoder::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "Pool '{}' not found in config. Required for scaling to know machine type/network.",
+                        name
+                    ),
+                ))
+            })?;
+
+            let scaling_config = hail_decoder::cloud::ScalingConfig {
+                machine_type: pool_config.machine_type.clone(),
+                workers: pool_config.workers,
+                spot: pool_config.spot,
+                network: pool_config.network.clone(),
+                subnet: pool_config.subnet.clone(),
+                project: pool_config.project.clone(),
+                with_coordinator: pool_config.with_coordinator,
+            };
+
+            manager.scale(&name, workers, &zone, binary, skip_build, &scaling_config)?;
         }
         PoolCommands::Destroy { name, zone, metrics_bucket } => {
             manager.destroy(&name, &zone, metrics_bucket.as_deref())?;

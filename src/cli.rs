@@ -399,9 +399,35 @@ pub enum PoolCommands {
         #[arg(long)]
         redeploy_binary: bool,
 
+        /// Automatically scale workers up for this job and down to 0 afterwards
+        #[arg(long)]
+        autoscale: bool,
+
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
         command: Vec<String>,
+    },
+
+    /// Scale the number of workers in a pool
+    Scale {
+        /// Name of the pool
+        name: String,
+
+        /// Target number of workers
+        #[arg(long)]
+        workers: usize,
+
+        /// GCP zone (defaults to us-central1-a)
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Path to the Linux-compiled binary (optional)
+        #[arg(long)]
+        binary: Option<String>,
+
+        /// Skip automatic Linux binary build (use existing binary)
+        #[arg(long)]
+        skip_build: bool,
     },
 
     /// Destroy a worker pool and delete all VMs

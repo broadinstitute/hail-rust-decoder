@@ -602,6 +602,272 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(instances)
     }
 
+    /// Scale the number of workers in a pool.
+    ///
+    /// This will:
+    /// - Scale up: create new worker VMs, wait for startup, deploy binary
+    /// - Scale down: delete workers with highest indices
+    ///
+    /// The coordinator is never affected by scaling operations.
+    pub fn scale(
+        &self,
+        name: &str,
+        target_workers: usize,
+        zone: &str,
+        binary_path: Option<String>,
+        skip_build: bool,
+        config: &crate::cloud::ScalingConfig,
+    ) -> Result<()> {
+        println!(
+            "{} pool '{}' to {} workers...",
+            "Scaling".green(),
+            name.bright_white(),
+            target_workers.to_string().bright_white()
+        );
+
+        // 1. Get current status
+        let instances = self.provider.list_instances(name)?;
+        let workers: Vec<&Instance> = instances
+            .iter()
+            .filter(|i| i.name.contains("-worker-"))
+            .collect();
+
+        let current_count = workers.len();
+
+        if current_count == target_workers {
+            println!(
+                "{} Pool already has {} workers.",
+                "OK".green().bold(),
+                current_count
+            );
+            return Ok(());
+        }
+
+        // 2. Identify coordinator (needed for deploying binary to new workers)
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"));
+        if coordinator.is_none() && config.with_coordinator {
+            println!(
+                "{} Coordinator not found, but configuration expects one.",
+                "Warning:".yellow()
+            );
+        }
+
+        // Get project ID for operations
+        let project_id = config
+            .project
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        if target_workers > current_count {
+            // SCALE UP
+            let to_add = target_workers - current_count;
+            println!(
+                "{} Adding {} workers...",
+                "Scaling up:".cyan(),
+                to_add.to_string().bright_white()
+            );
+
+            // Build binary first if needed (fail fast before creating VMs)
+            if !skip_build {
+                Self::build_linux_binary()?;
+            }
+            let binary = self.locate_binary(binary_path.clone())?;
+
+            // Determine indices for new workers
+            // Find existing indices and create new workers at gaps or at the end
+            let mut existing_indices: Vec<usize> = workers
+                .iter()
+                .filter_map(|w| {
+                    w.name
+                        .split("-worker-")
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                })
+                .collect();
+            existing_indices.sort();
+
+            let mut new_instances = Vec::new();
+            let mut next_idx = 0;
+
+            for _ in 0..to_add {
+                // Find the next available index
+                while existing_indices.contains(&next_idx) {
+                    next_idx += 1;
+                }
+
+                let instance_name = format!("{}-worker-{}", name, next_idx);
+                let tags = format!(
+                    "hail-decoder-worker,pool-{},role-worker",
+                    name
+                );
+
+                new_instances.push(crate::cloud::InstanceSetup {
+                    name: instance_name,
+                    machine_type: config.machine_type.clone(),
+                    zone: zone.to_string(),
+                    tags: vec![tags],
+                    startup_script: super::startup::generate_startup_script(),
+                    spot: config.spot,
+                    network: config.network.clone(),
+                    subnet: config.subnet.clone(),
+                    project_id: project_id.clone(),
+                });
+
+                existing_indices.push(next_idx);
+            }
+
+            // Create instances
+            self.provider.create_instances(&new_instances)?;
+            println!(
+                "{} Created {} new instances.",
+                "OK".green().bold(),
+                to_add
+            );
+
+            // Wait for readiness
+            println!("{}", "Waiting for new instances to be ready...".dimmed());
+            for inst in &new_instances {
+                self.wait_for_startup_complete(&inst.name, zone, 300)?;
+            }
+
+            // Get updated instance list to get IPs
+            let updated_instances = self.provider.list_instances(name)?;
+            let new_worker_instances: Vec<Instance> = updated_instances
+                .into_iter()
+                .filter(|i| new_instances.iter().any(|n| n.name == i.name))
+                .collect();
+
+            // Deploy binary
+            if let Some(coord) = coordinator {
+                if let Some(coord_ip) = coord.ip() {
+                    // Coordinator exists, check if it's running to serve binary
+                    if self.check_coordinator_status(coord, zone) {
+                        println!(
+                            "{}",
+                            "Deploying binary via coordinator...".dimmed()
+                        );
+                        self.propagate_binary_from_coordinator(
+                            coord_ip,
+                            &new_worker_instances,
+                            zone,
+                        )?;
+                    } else {
+                        // Coordinator not running, deploy via SCP
+                        println!(
+                            "{}",
+                            "Coordinator not running, deploying via SCP...".dimmed()
+                        );
+                        self.deploy_binary(&binary, &new_worker_instances, zone)?;
+                    }
+                } else {
+                    self.deploy_binary(&binary, &new_worker_instances, zone)?;
+                }
+            } else {
+                // No coordinator, direct SCP
+                self.deploy_binary(&binary, &new_worker_instances, zone)?;
+            }
+
+            println!(
+                "{} Scaled up to {} workers.",
+                "OK".green().bold(),
+                target_workers
+            );
+        } else {
+            // SCALE DOWN
+            let to_remove = current_count - target_workers;
+            println!(
+                "{} Removing {} workers...",
+                "Scaling down:".cyan(),
+                to_remove.to_string().bright_white()
+            );
+
+            // Sort workers by index descending to remove highest indices first
+            let mut sorted_workers: Vec<(usize, &Instance)> = workers
+                .iter()
+                .filter_map(|w| {
+                    w.name
+                        .split("-worker-")
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                        .map(|idx| (idx, *w))
+                })
+                .collect();
+
+            // Sort descending by index
+            sorted_workers.sort_by(|a, b| b.0.cmp(&a.0));
+
+            let instances_to_delete: Vec<String> = sorted_workers
+                .iter()
+                .take(to_remove)
+                .map(|(_, w)| w.name.clone())
+                .collect();
+
+            // Show which instances are being deleted
+            for name in &instances_to_delete {
+                println!("  {} {}", "Deleting:".dimmed(), name.yellow());
+            }
+
+            self.provider
+                .delete_instances(&instances_to_delete, zone, &project_id)?;
+
+            println!(
+                "{} Scaled down to {} workers.",
+                "OK".green().bold(),
+                target_workers
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Wait for startup script to complete on a specific instance.
+    fn wait_for_startup_complete(
+        &self,
+        instance_name: &str,
+        zone: &str,
+        timeout_secs: u64,
+    ) -> Result<()> {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "Timeout waiting for startup script on instance {}",
+                        instance_name
+                    ),
+                )));
+            }
+
+            // Check if the ready marker file exists
+            let mut cmd = self.provider.get_ssh_command(
+                instance_name,
+                zone,
+                "test -f /tmp/hail-decoder-ready && echo ready",
+            );
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::null());
+
+            if let Ok(output) = cmd.output() {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    if stdout.contains("ready") {
+                        println!("  {} {}", "Ready:".dimmed(), instance_name.cyan());
+                        return Ok(());
+                    }
+                }
+            }
+
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    }
+
     /// Update the binary on a running pool.
     ///
     /// This will:
@@ -780,7 +1046,73 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     ///
     /// If `distributed` is true, uses coordinator/worker pattern for resilient
     /// distributed processing with automatic retry on Spot instance preemption.
+    ///
+    /// If `autoscale` is true and `config` is provided, automatically scales
+    /// workers up before the job and down to 0 after the job completes.
     pub fn submit(
+        &self,
+        name: &str,
+        zone: &str,
+        binary_path: Option<String>,
+        distributed: bool,
+        auto_stop: bool,
+        force_redeploy: bool,
+        autoscale: bool,
+        config: Option<&crate::cloud::ScalingConfig>,
+        command: &[String],
+    ) -> Result<()> {
+        // Handle autoscaling
+        if autoscale {
+            let pool_config = config.ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Autoscaling requires pool configuration. Ensure pool is defined in config.toml",
+                ))
+            })?;
+
+            // Scale up to target workers
+            let target = pool_config.workers;
+            println!(
+                "{} Autoscaling up to {} workers...",
+                "Setup:".cyan(),
+                target.to_string().bright_white()
+            );
+
+            // Build binary once, then pass skip_build=true to scale
+            Self::build_linux_binary()?;
+            self.scale(name, target, zone, binary_path.clone(), true, pool_config)?;
+        }
+
+        // Run the actual job
+        let result = self.submit_internal(
+            name,
+            zone,
+            binary_path.clone(),
+            distributed,
+            auto_stop,
+            force_redeploy,
+            command,
+        );
+
+        // Handle autoscaling down
+        if autoscale {
+            if let Some(pool_config) = config {
+                println!(
+                    "\n{} Autoscaling down to 0 workers...",
+                    "Cleanup:".cyan()
+                );
+                // Ignore errors during scale down to ensure we return the job result
+                if let Err(e) = self.scale(name, 0, zone, binary_path, true, pool_config) {
+                    eprintln!("{} Failed to scale down: {}", "Warning:".yellow(), e);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Internal submit implementation (called by submit, handles the actual job).
+    fn submit_internal(
         &self,
         name: &str,
         zone: &str,
@@ -822,6 +1154,19 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 format!(
                     "Distributed mode requires a coordinator node. Pool '{}' has none.\n\
                      Create with: hail-decoder pool create {} --with-coordinator",
+                    name, name
+                ),
+            )));
+        }
+
+        // Check for workers in distributed mode
+        if distributed && total_workers == 0 {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "No workers available for pool '{}'. Either:\n\
+                     - Scale up workers: hail-decoder pool scale {} --workers N\n\
+                     - Use --autoscale to automatically scale workers for the job",
                     name, name
                 ),
             )));
@@ -1625,6 +1970,12 @@ mod tests {
                 Ok(vec![])
             }
             fn destroy_pool(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn create_instances(&self, _: &[super::super::InstanceSetup]) -> Result<()> {
+                Ok(())
+            }
+            fn delete_instances(&self, _: &[String], _: &str, _: &str) -> Result<()> {
                 Ok(())
             }
             fn upload_file(&self, _: &Path, _: &str, _: &str, _: &str) -> Result<()> {

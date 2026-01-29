@@ -90,6 +90,50 @@ impl Instance {
     }
 }
 
+/// Configuration for creating a specific instance.
+/// Used by the scale operation to create individual worker VMs.
+#[derive(Debug, Clone)]
+pub struct InstanceSetup {
+    /// Instance name (e.g., "mypool-worker-3")
+    pub name: String,
+    /// GCP machine type (e.g., "c3-highcpu-22")
+    pub machine_type: String,
+    /// GCP zone (e.g., "us-central1-a")
+    pub zone: String,
+    /// Network tags (e.g., ["hail-decoder-worker,pool-mypool,role-worker"])
+    pub tags: Vec<String>,
+    /// Startup script to run on boot
+    pub startup_script: String,
+    /// Use spot/preemptible instances
+    pub spot: bool,
+    /// VPC network name (None = default)
+    pub network: Option<String>,
+    /// Subnet name
+    pub subnet: Option<String>,
+    /// GCP project ID
+    pub project_id: String,
+}
+
+/// Configuration for scaling operations.
+/// Contains the subset of pool configuration needed for scaling workers.
+#[derive(Debug, Clone)]
+pub struct ScalingConfig {
+    /// GCP machine type for workers
+    pub machine_type: String,
+    /// Target number of workers (used for autoscale)
+    pub workers: usize,
+    /// Use spot instances
+    pub spot: bool,
+    /// VPC network name
+    pub network: Option<String>,
+    /// Subnet name
+    pub subnet: Option<String>,
+    /// GCP project ID
+    pub project: Option<String>,
+    /// Whether the pool has a coordinator
+    pub with_coordinator: bool,
+}
+
 /// Abstract interface for cloud infrastructure operations.
 ///
 /// This trait allows swapping out the underlying cloud provider implementation
@@ -107,6 +151,14 @@ pub trait CloudProvider {
 
     /// Destroy all instances in the pool.
     fn destroy_pool(&self, pool_name: &str, zone: &str) -> Result<()>;
+
+    /// Create specific instances using detailed configuration.
+    /// Used for scaling up worker pools.
+    fn create_instances(&self, instances: &[InstanceSetup]) -> Result<()>;
+
+    /// Delete specific instances by name.
+    /// Used for scaling down worker pools.
+    fn delete_instances(&self, names: &[String], zone: &str, project_id: &str) -> Result<()>;
 
     /// Upload a file to a specific instance via SCP.
     fn upload_file(

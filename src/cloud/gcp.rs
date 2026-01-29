@@ -360,6 +360,98 @@ impl CloudProvider for GcpClient {
         Ok(())
     }
 
+    fn create_instances(&self, instances: &[super::InstanceSetup]) -> Result<()> {
+        self.check_gcloud_installed()?;
+
+        if instances.is_empty() {
+            return Ok(());
+        }
+
+        // Create instances in parallel using rayon
+        let results: Vec<Result<()>> = instances
+            .par_iter()
+            .map(|setup| {
+                let mut cmd = Command::new("gcloud");
+
+                cmd.args([
+                    "compute",
+                    "instances",
+                    "create",
+                    &setup.name,
+                    "--project",
+                    &setup.project_id,
+                    "--zone",
+                    &setup.zone,
+                    "--machine-type",
+                    &setup.machine_type,
+                    "--image-family",
+                    "ubuntu-2204-lts",
+                    "--image-project",
+                    "ubuntu-os-cloud",
+                    "--tags",
+                    &setup.tags.join(","),
+                    "--metadata",
+                    &format!("startup-script={}", setup.startup_script),
+                    "--scopes",
+                    "cloud-platform",
+                ]);
+
+                if setup.spot {
+                    cmd.arg("--provisioning-model=SPOT");
+                    cmd.arg("--instance-termination-action=STOP");
+                }
+
+                if let Some(ref network) = setup.network {
+                    cmd.args(["--network", network]);
+                }
+                if let Some(ref subnet) = setup.subnet {
+                    cmd.args(["--subnet", subnet]);
+                }
+
+                let output = cmd.output().map_err(HailError::Io)?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to create instance {}: {}", setup.name, stderr),
+                    )));
+                }
+
+                Ok(())
+            })
+            .collect();
+
+        // Check for any creation failures
+        for result in results {
+            result?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_instances(&self, names: &[String], zone: &str, project_id: &str) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+
+        let status = Command::new("gcloud")
+            .args(["compute", "instances", "delete"])
+            .args(names)
+            .args(["--zone", zone, "--project", project_id, "--quiet"])
+            .status()
+            .map_err(HailError::Io)?;
+
+        if !status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to delete instances",
+            )));
+        }
+
+        Ok(())
+    }
+
     fn upload_file(
         &self,
         local_path: &Path,
