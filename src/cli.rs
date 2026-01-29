@@ -417,10 +417,6 @@ pub enum PoolCommands {
         #[arg(long)]
         binary: Option<String>,
 
-        /// Use distributed coordinator/worker pattern (requires --with-coordinator on create)
-        #[arg(long)]
-        distributed: bool,
-
         /// Automatically stop VMs after job completion to save costs
         #[arg(long)]
         auto_stop: bool,

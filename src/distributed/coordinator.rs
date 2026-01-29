@@ -188,7 +188,7 @@ pub async fn run_coordinator(
             "Coordinator starting on port {} in IDLE mode (waiting for job submission)",
             port
         );
-        println!("  Submit a job via POST /api/job or pool submit --distributed");
+        println!("  Submit a job via POST /api/job or pool submit");
     } else {
         println!(
             "Coordinator starting on port {} with {} partitions",

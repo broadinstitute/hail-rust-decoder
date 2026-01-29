@@ -482,9 +482,15 @@ fn dispatch_job(
             Ok((rows, None, engine))
         }
         JobSpec::Summary => {
-            // TODO: Implement distributed summary
-            eprintln!("Summary job not yet implemented for distributed mode");
-            Ok((0, None, cached_engine))
+            let (rows, stats, engine) = process_summary(
+                cached_engine,
+                partitions,
+                input_path,
+                telemetry,
+            )?;
+            // Convert stats to JSON for aggregation on coordinator
+            let result_json = serde_json::to_value(&stats).ok();
+            Ok((rows, result_json, engine))
         }
         JobSpec::Validate { .. } => {
             // TODO: Implement distributed validation
@@ -750,4 +756,80 @@ fn process_json_export(
 
     let total: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
     Ok((total, None))
+}
+
+/// Process partitions and collect summary statistics.
+/// Uses rayon to process partitions in parallel and merge stats.
+fn process_summary(
+    _cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    input_path: &str,
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, crate::summary::stats::StatsAccumulator, Option<(String, QueryEngine)>)> {
+    use crate::summary::stats::StatsAccumulator;
+    use rayon::prelude::*;
+
+    println!("Processing {} partitions for summary...", partitions.len());
+
+    let input_path = input_path.to_string();
+
+    // Process partitions in parallel using rayon's fold/reduce
+    // Each thread gets its own StatsAccumulator and they are merged at the end
+    let (total_rows, stats) = partitions
+        .par_iter()
+        .fold(
+            || (0usize, StatsAccumulator::new()),
+            |(mut rows, mut acc), &partition_id| {
+                match QueryEngine::open_path(&input_path) {
+                    Ok(engine) => {
+                        match engine.scan_partition_iter(partition_id, &[]) {
+                            Ok(iter) => {
+                                for row_result in iter {
+                                    match row_result {
+                                        Ok(row) => {
+                                            acc.process_row(&row);
+                                            rows += 1;
+
+                                            // Update telemetry
+                                            if let Some(ref t) = telemetry {
+                                                t.total_rows.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "Warning: Error reading row in partition {}: {}",
+                                                partition_id, e
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: Failed to scan partition {}: {}",
+                                    partition_id, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to open engine for partition {}: {}", partition_id, e);
+                    }
+                }
+                (rows, acc)
+            },
+        )
+        .reduce(
+            || (0, StatsAccumulator::new()),
+            |(rows_a, mut acc_a), (rows_b, acc_b)| {
+                acc_a.merge(acc_b);
+                (rows_a + rows_b, acc_a)
+            },
+        );
+
+    println!("Summary complete: {} rows processed, {} fields tracked", total_rows, stats.stats.len());
+
+    // Don't cache engine since we opened multiple in parallel
+    Ok((total_rows, stats, None))
 }

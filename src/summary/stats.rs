@@ -4,10 +4,11 @@
 //! for all fields in a Hail table during a full scan.
 
 use crate::codec::EncodedValue;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Statistics for a single field
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct FieldStat {
     /// Total count of values seen (including nulls)
     pub count: usize,
@@ -66,6 +67,7 @@ impl FieldStat {
 }
 
 /// Accumulator for collecting statistics across all fields
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsAccumulator {
     /// Statistics for each field, keyed by field path (e.g., "vep.transcript_consequences.gene_id")
     pub stats: HashMap<String, FieldStat>,

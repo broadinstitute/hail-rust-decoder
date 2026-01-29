@@ -150,7 +150,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             coord_ip
         );
         println!(
-            "  Submit jobs with: hail-decoder pool submit {} --distributed -- <command>",
+            "  Submit jobs with: hail-decoder pool submit {} -- <command>",
             pool_name
         );
 
@@ -1094,8 +1094,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// 3. Execute the command on each worker with partition slicing
     /// 4. Stream logs and aggregate benchmark results
     ///
-    /// If `distributed` is true, uses coordinator/worker pattern for resilient
-    /// distributed processing with automatic retry on Spot instance preemption.
+    /// Automatically uses coordinator/worker pattern when a coordinator exists,
+    /// providing resilient distributed processing with automatic retry on Spot
+    /// instance preemption.
     ///
     /// If `autoscale` is true and `config` is provided, automatically scales
     /// workers up before the job and down to 0 after the job completes.
@@ -1104,7 +1105,6 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         name: &str,
         zone: &str,
         binary_path: Option<String>,
-        distributed: bool,
         auto_stop: bool,
         force_redeploy: bool,
         force: bool,
@@ -1139,7 +1139,6 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             name,
             zone,
             binary_path.clone(),
-            distributed,
             auto_stop,
             force_redeploy,
             force,
@@ -1169,7 +1168,6 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         name: &str,
         zone: &str,
         binary_path: Option<String>,
-        distributed: bool,
         auto_stop: bool,
         force_redeploy: bool,
         force: bool,
@@ -1201,19 +1199,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let coordinator = coordinators.into_iter().next();
         let total_workers = workers.len();
 
-        if distributed && coordinator.is_none() {
-            return Err(HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "Distributed mode requires a coordinator node. Pool '{}' has none.\n\
-                     Create with: hail-decoder pool create {} --with-coordinator",
-                    name, name
-                ),
-            )));
-        }
+        // Auto-detect distributed mode: use coordinator/worker pattern when coordinator exists
+        let use_distributed = coordinator.is_some();
 
-        // Check for workers in distributed mode
-        if distributed && total_workers == 0 {
+        // Validate we have workers for distributed mode
+        if use_distributed && total_workers == 0 {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
@@ -1237,7 +1227,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         );
 
         // 3. Deploy binary - auto-skip if coordinator is already running (binary was deployed earlier)
-        let should_deploy = if distributed {
+        let should_deploy = if use_distributed {
             let coord = coordinator.as_ref().unwrap();
             let coord_running = self.check_coordinator_status(coord, zone);
             if coord_running && !force_redeploy {
@@ -1265,7 +1255,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     "Linux binary not found. Build with: cargo linux --release",
                 ))
             })?;
-            if distributed {
+            if use_distributed {
                 // Distributed mode: upload to coordinator only, workers pull from coordinator
                 let coord = coordinator.as_ref().unwrap();
                 let coord_ip = coord.ip().ok_or_else(|| {
@@ -1335,8 +1325,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         }
 
-        // 4. Branch based on distributed mode for job submission
-        if distributed {
+        // 4. Branch based on mode - use coordinator/worker pattern when coordinator exists
+        if use_distributed {
             return self.submit_distributed(
                 name,
                 zone,
@@ -1625,6 +1615,17 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 coord_ip
             );
 
+            // Start workers FIRST so they're connected when we submit the job
+            println!(
+                "Starting {} worker(s)...",
+                workers.len().to_string().bright_white()
+            );
+            self.start_worker_services(workers, coord_ip, zone)?;
+
+            // Give workers a moment to connect to coordinator
+            println!("{}", "Waiting for workers to connect...".dimmed());
+            std::thread::sleep(std::time::Duration::from_secs(3));
+
             // Submit job via API
             println!("{}", "Submitting job via API...".dimmed());
             if !self.submit_job_via_api(
@@ -1684,46 +1685,13 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Give coordinator a moment to bind its port
             std::thread::sleep(std::time::Duration::from_secs(2));
-        }
 
-        // Start workers in parallel
-        println!(
-            "Starting {} worker(s)...",
-            workers.len().to_string().bright_white()
-        );
-
-        let worker_results: Vec<Result<()>> = workers
-            .par_iter()
-            .map(|worker| {
-                let worker_cmd = format!(
-                    "nohup /usr/local/bin/hail-decoder service start-worker \
-                     --url http://{}:3000 \
-                     --worker-id {} \
-                     > /tmp/worker.log 2>&1 &",
-                    coord_ip, worker.name
-                );
-
-                let status = self
-                    .provider
-                    .get_ssh_command(&worker.name, zone, &worker_cmd)
-                    .status()
-                    .map_err(HailError::Io)?;
-
-                if !status.success() {
-                    return Err(HailError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to start worker on {}", worker.name),
-                    )));
-                }
-
-                println!("  {} started on {}", "Worker".dimmed(), worker.name.cyan());
-                Ok(())
-            })
-            .collect();
-
-        // Check for any startup failures
-        for result in worker_results {
-            result?;
+            // Start workers
+            println!(
+                "Starting {} worker(s)...",
+                workers.len().to_string().bright_white()
+            );
+            self.start_worker_services(workers, coord_ip, zone)?;
         }
 
         println!();
@@ -1771,6 +1739,47 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 _ => eprintln!("{} Failed to stop instances.", "Error:".red()),
             }
+        }
+
+        Ok(())
+    }
+
+    /// Start worker services on the given instances.
+    fn start_worker_services(&self, workers: &[Instance], coord_ip: &str, zone: &str) -> Result<()> {
+        use rayon::prelude::*;
+
+        let worker_results: Vec<Result<()>> = workers
+            .par_iter()
+            .map(|worker| {
+                let worker_cmd = format!(
+                    "nohup /usr/local/bin/hail-decoder service start-worker \
+                     --url http://{}:3000 \
+                     --worker-id {} \
+                     > /tmp/worker.log 2>&1 &",
+                    coord_ip, worker.name
+                );
+
+                let status = self
+                    .provider
+                    .get_ssh_command(&worker.name, zone, &worker_cmd)
+                    .status()
+                    .map_err(HailError::Io)?;
+
+                if !status.success() {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to start worker on {}", worker.name),
+                    )));
+                }
+
+                println!("  {} started on {}", "Worker".dimmed(), worker.name.cyan());
+                Ok(())
+            })
+            .collect();
+
+        // Check for any startup failures
+        for result in worker_results {
+            result?;
         }
 
         Ok(())
@@ -2025,14 +2034,31 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             )));
         }
 
+        let cmd = command.get(0).map(|s| s.as_str()).unwrap_or("<empty>");
+
+        // Handle 'summary <input>' command
+        if cmd == "summary" {
+            if command.len() < 2 {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Summary command requires: summary <input>\n\
+                     Example: summary gs://bucket/input.ht",
+                )));
+            }
+            let input_path = command[1].clone();
+            return Ok((input_path, JobSpec::Summary, Vec::new(), Vec::new()));
+        }
+
         // Expect: export <type> <input> <output> [args...]
-        if command.get(0).map(|s| s.as_str()) != Some("export") {
+        if cmd != "export" {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Distributed mode requires 'export' command, got: {}\n\
-                     Example: pool submit mypool --distributed -- export parquet gs://bucket/input.ht gs://bucket/output/",
-                    command.get(0).map(|s| s.as_str()).unwrap_or("<empty>")
+                    "Distributed mode supports: export, summary. Got: '{}'\n\
+                     Examples:\n  \
+                     pool submit mypool -- export parquet gs://bucket/input.ht gs://bucket/output/\n  \
+                     pool submit mypool -- summary gs://bucket/input.ht",
+                    cmd
                 ),
             )));
         }
