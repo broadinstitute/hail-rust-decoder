@@ -114,6 +114,9 @@ sysinfo = "0.32"
 # SQLite for metrics persistence (coordinator dashboard)
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+# XDG directory support
+dirs = "5.0"
+
 [[bin]]
 name = "hail-server"
 path = "src/bin/hail-server.rs"

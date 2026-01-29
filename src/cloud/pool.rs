@@ -301,6 +301,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// Destroy a worker pool.
     ///
     /// Deletes all VMs tagged with the pool name.
+    /// Automatically downloads metrics database from coordinator before deletion.
     pub fn destroy(&self, name: &str, zone: &str) -> Result<()> {
         println!("{} pool '{}'...", "Destroying".red(), name.bright_white());
 
@@ -316,11 +317,95 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             println!("   - {}", inst.name.dimmed());
         }
 
+        // Try to download metrics database from coordinator before destroying
+        if let Some(coordinator) = instances.iter().find(|i| i.name.ends_with("-coordinator")) {
+            self.download_metrics_db(name, &coordinator.name, zone);
+        }
+
         self.provider.destroy_pool(name, zone)?;
 
         println!("{} Pool '{}' destroyed.", "OK".green().bold(), name);
 
         Ok(())
+    }
+
+    /// Download metrics database from coordinator VM.
+    /// Best-effort: failures are logged but don't block pool destruction.
+    /// Saves to ~/.local/share/hail-decoder/<pool-name>-<timestamp>-metrics.db
+    fn download_metrics_db(&self, pool_name: &str, coordinator_name: &str, zone: &str) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Use XDG data directory: ~/.local/share/hail-decoder/
+        let data_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("hail-decoder");
+
+        // Create directory if it doesn't exist
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            println!(
+                "   {} Failed to create data directory: {}",
+                "Warning:".yellow(),
+                e
+            );
+            return;
+        }
+
+        // Generate timestamp for unique filename
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let local_path = data_dir.join(format!("{}-{}-metrics.db", pool_name, timestamp));
+
+        println!(
+            "{} Downloading metrics database...",
+            "Saving:".cyan()
+        );
+
+        // Use gcloud compute scp to download the file
+        let result = std::process::Command::new("gcloud")
+            .args([
+                "compute",
+                "scp",
+                &format!("{}:/tmp/hail-coordinator-metrics.db", coordinator_name),
+                local_path.to_str().unwrap_or("metrics.db"),
+                "--zone",
+                zone,
+                "--quiet",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                println!(
+                    "   {} Metrics saved to {}",
+                    "OK".green().bold(),
+                    local_path.display().to_string().bright_white()
+                );
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if stderr.contains("No such file") {
+                    println!("   {} No metrics database found on coordinator", "Note:".yellow());
+                } else {
+                    println!(
+                        "   {} Failed to download metrics: {}",
+                        "Warning:".yellow(),
+                        stderr.trim()
+                    );
+                }
+            }
+            Err(e) => {
+                println!(
+                    "   {} Failed to download metrics: {}",
+                    "Warning:".yellow(),
+                    e
+                );
+            }
+        }
     }
 
     /// Get status of a distributed job running on the pool.
