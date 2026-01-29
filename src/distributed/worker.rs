@@ -154,7 +154,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                         &partitions_clone,
                         &input_clone,
                         &output_clone,
-                        Some(&ts),
+                        Some(ts),
                     )
                 })
                 .await;
@@ -369,112 +369,120 @@ fn spawn_telemetry_loop(
 }
 
 /// Process the assigned partitions and write to output (synchronous version).
+/// Uses rayon to process partitions in parallel across all CPU cores.
 /// Accepts an optional cached engine and returns it for reuse across work requests.
 fn process_partitions_sync(
-    cached_engine: Option<(String, QueryEngine)>,
+    _cached_engine: Option<(String, QueryEngine)>,
     partitions: &[usize],
     input_path: &str,
     output_path: &str,
-    telemetry: Option<&TelemetryState>,
+    telemetry: Option<Arc<TelemetryState>>,
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
-    // Reuse cached engine if input path matches, otherwise open a new one
-    let engine = match cached_engine {
-        Some((path, engine)) if path == input_path => {
-            println!("Reusing cached QueryEngine for {}", input_path);
-            engine
-        }
-        _ => {
-            println!("Opening input: {}", input_path);
-            QueryEngine::open_path(input_path)?
-        }
-    };
-    let row_type = engine.row_type().clone();
+    use rayon::prelude::*;
 
-    // Create schema for Parquet output
-    let arrow_schema = Arc::new(crate::parquet::schema::create_schema(&row_type)?);
+    println!("Processing {} partitions in parallel...", partitions.len());
 
     let output_is_cloud = is_cloud_path(output_path);
-    let mut total_rows = 0;
 
-    const BATCH_SIZE: usize = 4096;
+    // Clone refs for the parallel closure
+    let input_path = input_path.to_string();
+    let output_path = output_path.to_string();
 
-    // Process each partition
-    for &partition_id in partitions {
-        // Update telemetry: mark this partition as active
-        if let Some(ts) = telemetry {
-            ts.active_partition
-                .store(partition_id, Ordering::Relaxed);
-        }
+    // Process partitions in parallel using rayon
+    let results: Vec<Result<usize>> = partitions
+        .par_iter()
+        .map(|&partition_id| {
+            // Each thread opens its own QueryEngine (they share underlying caches)
+            let engine = QueryEngine::open_path(&input_path)?;
+            let row_type = engine.row_type().clone();
+            let arrow_schema = Arc::new(crate::parquet::schema::create_schema(&row_type)?);
 
-        // Determine the shard file name based on partition ID
-        // In distributed mode, we write one file per partition
-        let output_file = if output_is_cloud {
-            let base = output_path.trim_end_matches('/');
-            format!("{}/part-{:05}.parquet", base, partition_id)
-        } else {
-            format!("{}/part-{:05}.parquet", output_path, partition_id)
-        };
+            // Determine the output file path
+            let output_file = if output_is_cloud {
+                let base = output_path.trim_end_matches('/');
+                format!("{}/part-{:05}.parquet", base, partition_id)
+            } else {
+                format!("{}/part-{:05}.parquet", output_path, partition_id)
+            };
 
-        let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
-        let mut partition_rows = 0;
+            const BATCH_SIZE: usize = 4096;
+            let mut batch_rows = Vec::with_capacity(BATCH_SIZE);
+            let mut partition_rows = 0;
 
-        // Stream rows from this partition
-        let iter = engine.scan_partition_iter(partition_id, &[])?;
+            // Stream rows from this partition
+            let iter = engine.scan_partition_iter(partition_id, &[])?;
 
-        // Helper macro for processing with any writer type
-        macro_rules! process_with_writer {
-            ($writer:expr) => {{
-                let mut writer = $writer;
+            // Clone telemetry for this thread
+            let ts = telemetry.clone();
 
-                for row_result in iter {
-                    let row = row_result?;
-                    batch_rows.push(row);
+            // Helper macro for processing with any writer type
+            macro_rules! process_with_writer {
+                ($writer:expr) => {{
+                    let mut writer = $writer;
 
-                    if batch_rows.len() >= BATCH_SIZE {
+                    for row_result in iter {
+                        let row = row_result?;
+                        batch_rows.push(row);
+
+                        if batch_rows.len() >= BATCH_SIZE {
+                            let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
+                            writer.write_batch(&batch)?;
+                            partition_rows += batch_rows.len();
+                            // Update telemetry row count
+                            if let Some(ref t) = ts {
+                                t.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                            }
+                            batch_rows.clear();
+                        }
+                    }
+
+                    // Write remaining rows
+                    if !batch_rows.is_empty() {
                         let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
                         writer.write_batch(&batch)?;
                         partition_rows += batch_rows.len();
-                        // Update telemetry row count
-                        if let Some(ts) = telemetry {
-                            ts.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
+                        if let Some(ref t) = ts {
+                            t.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
                         }
-                        batch_rows.clear();
                     }
-                }
 
-                // Write remaining rows
-                if !batch_rows.is_empty() {
-                    let batch = build_record_batch(&batch_rows, &row_type, arrow_schema.clone())?;
-                    writer.write_batch(&batch)?;
-                    partition_rows += batch_rows.len();
-                    // Update telemetry row count
-                    if let Some(ts) = telemetry {
-                        ts.total_rows.fetch_add(batch_rows.len(), Ordering::Relaxed);
-                    }
-                }
+                    writer
+                }};
+            }
 
-                writer
-            }};
+            if output_is_cloud {
+                let cloud_writer = StreamingCloudWriter::new(&output_file)?;
+                let writer = ParquetWriter::from_writer(cloud_writer, &row_type)?;
+                let writer = process_with_writer!(writer);
+                let cloud_writer = writer.into_inner()?;
+                cloud_writer.finish()?;
+            } else {
+                let writer = ParquetWriter::new(&output_file, &row_type)?;
+                let writer = process_with_writer!(writer);
+                writer.close()?;
+            }
+
+            println!(
+                "  Partition {} complete: {} rows -> {}",
+                partition_id, partition_rows, output_file
+            );
+
+            Ok(partition_rows)
+        })
+        .collect();
+
+    // Check for any errors
+    for result in &results {
+        if let Err(e) = result {
+            return Err(crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Partition processing failed: {}", e),
+            )));
         }
-
-        if output_is_cloud {
-            let cloud_writer = StreamingCloudWriter::new(&output_file)?;
-            let writer = ParquetWriter::from_writer(cloud_writer, &row_type)?;
-            let writer = process_with_writer!(writer);
-            let cloud_writer = writer.into_inner()?;
-            cloud_writer.finish()?;
-        } else {
-            let writer = ParquetWriter::new(&output_file, &row_type)?;
-            let writer = process_with_writer!(writer);
-            writer.close()?;
-        }
-
-        total_rows += partition_rows;
-        println!(
-            "  Partition {} complete: {} rows -> {}",
-            partition_id, partition_rows, output_file
-        );
     }
 
-    Ok((total_rows, Some((input_path.to_string(), engine))))
+    let total: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
+
+    // Don't return cached engine since we opened multiple in parallel
+    Ok((total, None))
 }
