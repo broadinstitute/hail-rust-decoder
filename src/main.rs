@@ -390,72 +390,8 @@ fn parse_equality(s: &str) -> Option<(String, String)> {
     }
 }
 
-/// Parse a field string into a field path (supports dot notation)
-fn parse_field_path(field: &str) -> Vec<String> {
-    field.split('.').map(|s| s.to_string()).collect()
-}
-
-fn parse_where_condition(s: &str) -> Option<KeyRange> {
-    // Try different operators
-    if let Some(pos) = s.find(">=") {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 2..]);
-        return Some(KeyRange::gte_nested(field_path, value));
-    }
-    if let Some(pos) = s.find("<=") {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 2..]);
-        return Some(KeyRange::lte_nested(field_path, value));
-    }
-    if let Some(pos) = s.find("gte") {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 3..]);
-        return Some(KeyRange::gte_nested(field_path, value));
-    }
-    if let Some(pos) = s.find("lte") {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 3..]);
-        return Some(KeyRange::lte_nested(field_path, value));
-    }
-    if let Some(pos) = s.find('>') {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange::gt_nested(field_path, value));
-    }
-    if let Some(pos) = s.find('<') {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange::lt_nested(field_path, value));
-    }
-    if let Some(pos) = s.find('=') {
-        let field_path = parse_field_path(&s[..pos]);
-        let value = parse_key_value(&s[pos + 1..]);
-        return Some(KeyRange::point_nested(field_path, value));
-    }
-
-    None
-}
-
-fn parse_key_value(s: &str) -> KeyValue {
-    // Try to parse as integer first
-    if let Ok(i) = s.parse::<i32>() {
-        return KeyValue::Int32(i);
-    }
-    if let Ok(i) = s.parse::<i64>() {
-        return KeyValue::Int64(i);
-    }
-    if let Ok(f) = s.parse::<f64>() {
-        return KeyValue::Float64(f);
-    }
-    if s == "true" {
-        return KeyValue::Boolean(true);
-    }
-    if s == "false" {
-        return KeyValue::Boolean(false);
-    }
-    // Default to string
-    KeyValue::String(s.to_string())
-}
+// Filter parsing moved to hail_decoder::query::filter
+use hail_decoder::query::filter::{parse_key_value, parse_where_condition};
 
 fn build_key_from_filters(
     filters: &[(String, String)],

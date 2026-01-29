@@ -296,6 +296,24 @@ pub async fn run_coordinator(
                 } else {
                     println!("All {} partitions completed! Total rows: {}", total, rows);
                 }
+
+                // Save aggregated results to file before exiting
+                {
+                    let data = monitor_state.lock().unwrap();
+                    let result = JobResultResponse {
+                        available: true,
+                        result: Some(serde_json::Value::Array(data.aggregated_results.clone())),
+                        error: None,
+                    };
+                    if let Ok(json) = serde_json::to_string_pretty(&result) {
+                        if let Err(e) = std::fs::write("/tmp/job_result.json", &json) {
+                            eprintln!("Warning: Failed to save results to file: {}", e);
+                        } else {
+                            println!("Results saved to /tmp/job_result.json");
+                        }
+                    }
+                }
+
                 println!("Coordinator will exit in 10 seconds...");
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 std::process::exit(0);

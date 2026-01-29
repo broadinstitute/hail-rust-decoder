@@ -6,8 +6,10 @@
 //! - Query types for point lookups and range scans
 //! - High-level query engine for table operations
 //! - Genomic interval lists for region filtering
+//! - Filter parsing for where clauses
 
 mod engine;
+pub mod filter;
 mod intervals;
 mod pruning;
 mod stream;

@@ -502,14 +502,21 @@ fn dispatch_job(
 
 /// Parse filter strings back into KeyRanges.
 ///
-/// Note: For distributed mode, filtering is primarily done at the partition level.
-/// The filters here are passed as strings from the coordinator but the complex
-/// parsing logic lives in main.rs. For now, we skip re-parsing on workers.
-/// The coordinator handles filter validation.
-fn parse_filter_strings(_filters: &[String]) -> Vec<KeyRange> {
-    // TODO: Move parse_where_condition to a shared module if filter
-    // re-parsing on workers becomes necessary
-    Vec::new()
+/// Uses the shared filter parsing module to convert where clause strings
+/// into KeyRange objects for row filtering.
+fn parse_filter_strings(filters: &[String]) -> Vec<KeyRange> {
+    use crate::query::filter::parse_where_condition;
+
+    filters
+        .iter()
+        .filter_map(|s| {
+            let range = parse_where_condition(s);
+            if range.is_none() {
+                eprintln!("Warning: failed to parse filter condition: {}", s);
+            }
+            range
+        })
+        .collect()
 }
 
 /// Parse interval strings back into IntervalList.

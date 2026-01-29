@@ -1716,6 +1716,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // This blocks until coordinator exits or user interrupts
         let _ = log_cmd.status();
 
+        // Fetch and display aggregated results for Summary jobs
+        if matches!(job_spec, crate::distributed::message::JobSpec::Summary) {
+            println!();
+            println!("{}", "Fetching aggregated results...".dimmed());
+            if let Err(e) = self.fetch_and_display_summary_results(coordinator, zone) {
+                eprintln!("{} Failed to fetch results: {}", "Warning:".yellow(), e);
+            }
+        }
+
         if auto_stop {
             println!(
                 "{}",
@@ -1780,6 +1789,105 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // Check for any startup failures
         for result in worker_results {
             result?;
+        }
+
+        Ok(())
+    }
+
+    /// Fetch aggregated summary results from coordinator and display them.
+    fn fetch_and_display_summary_results(&self, coordinator: &Instance, zone: &str) -> Result<()> {
+        use crate::summary::stats::StatsAccumulator;
+
+        // Fetch results file saved by coordinator before exit
+        let fetch_cmd = "cat /tmp/job_result.json";
+        let output = self
+            .provider
+            .get_ssh_command(&coordinator.name, zone, fetch_cmd)
+            .output()
+            .map_err(HailError::Io)?;
+
+        if !output.status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to fetch results file from coordinator",
+            )));
+        }
+
+        // Parse the response
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to parse result JSON: {}", e),
+            )))?;
+
+        // Check if results are available
+        if !response.get("available").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let error = response.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Results not available: {}", error),
+            )));
+        }
+
+        // Get the array of partial results from workers
+        let results = response.get("result").and_then(|v| v.as_array()).ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "No result array in response",
+            ))
+        })?;
+
+        // Merge all partial StatsAccumulators
+        let mut merged = StatsAccumulator::new();
+        let mut total_rows = 0usize;
+
+        for partial in results {
+            if let Ok(acc) = serde_json::from_value::<StatsAccumulator>(partial.clone()) {
+                total_rows += acc.stats.values().map(|s| s.count).max().unwrap_or(0);
+                merged.merge(acc);
+            }
+        }
+
+        // Display results
+        println!();
+        println!("{} {}", "Row Count:".green(), total_rows.to_string().bright_white().bold());
+        println!();
+
+        // Print field statistics
+        println!("{}", "Field Statistics:".green().bold());
+        println!("{:<50} | {:>10} | {:>10} | {:>20} | {:>20}",
+            "Field".cyan(), "Count".cyan(), "Nulls".cyan(), "Min".cyan(), "Max".cyan());
+        println!("{}", "-".repeat(120).dimmed());
+
+        for key in merged.sorted_fields() {
+            let s = &merged.stats[key];
+
+            // Truncate field name if too long
+            let field_display = if key.len() > 48 {
+                format!("...{}", &key[key.len() - 45..])
+            } else {
+                key.clone()
+            };
+
+            // Truncate min/max if too long
+            let min_display = match &s.min {
+                Some(m) if m.len() > 18 => format!("{}...", &m[..15]),
+                Some(m) => m.clone(),
+                None => String::new(),
+            };
+            let max_display = match &s.max {
+                Some(m) if m.len() > 18 => format!("{}...", &m[..15]),
+                Some(m) => m.clone(),
+                None => String::new(),
+            };
+
+            println!("{:<50} | {:>10} | {:>10} | {:>20} | {:>20}",
+                field_display,
+                s.count,
+                s.null_count,
+                min_display,
+                max_display
+            );
         }
 
         Ok(())
