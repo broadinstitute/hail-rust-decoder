@@ -497,6 +497,13 @@ fn dispatch_job(
             eprintln!("Validate job not yet implemented for distributed mode");
             Ok((0, None, cached_engine))
         }
+        JobSpec::Manhattan(_spec) => {
+            // TODO: Implement distributed manhattan plot
+            // Workers would generate per-chromosome PNGs for their assigned partitions,
+            // then the coordinator would composite a genome-wide image.
+            eprintln!("Distributed manhattan plot not yet implemented");
+            Ok((0, None, cached_engine))
+        }
     }
 }
 

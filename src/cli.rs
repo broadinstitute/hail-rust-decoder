@@ -48,6 +48,9 @@ pub enum Commands {
         command: SchemaSubcommands,
     },
 
+    /// Generate Manhattan plots (PNG + JSON sidecar)
+    Manhattan(ManhattanArgs),
+
     /// Manage a distributed worker pool for parallel processing
     Pool {
         #[command(subcommand)]
@@ -349,6 +352,52 @@ pub struct ValidateArgs {
     /// Show each row ID and validation result in real-time (sequential)
     #[arg(long, short)]
     pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ManhattanArgs {
+    /// Path to the Hail table
+    pub table: String,
+
+    /// Chromosomes to include (e.g. '1', '1,6,17', 'all' for genome-wide)
+    #[arg(long, default_value = "all")]
+    pub chrom: String,
+
+    /// Field name for P-value (Y-axis, -log10 applied automatically)
+    #[arg(long, default_value = "Pvalue")]
+    pub y_field: String,
+
+    /// P-value threshold for significant hits (detailed data in sidecar JSON)
+    #[arg(long, default_value = "5e-8")]
+    pub threshold: f64,
+
+    /// Path to annotation table for enriching significant hits
+    #[arg(long)]
+    pub annotate: Option<String>,
+
+    /// Fields to extract from annotation table (default: all value fields)
+    #[arg(long, value_delimiter = ',')]
+    pub annotate_fields: Vec<String>,
+
+    /// Limit number of rows to process (for testing)
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    /// Image width in pixels
+    #[arg(long, default_value = "3000")]
+    pub width: u32,
+
+    /// Image height in pixels
+    #[arg(long, default_value = "800")]
+    pub height: u32,
+
+    /// Output filename prefix (produces {prefix}.png + {prefix}.json)
+    #[arg(long)]
+    pub output: Option<String>,
+
+    /// Color scheme (classic = alternating gray/blue per chromosome)
+    #[arg(long, default_value = "classic")]
+    pub colors: String,
 }
 
 /// Subcommands for managing distributed worker pools.

@@ -48,6 +48,7 @@ pub mod io;
 pub mod metadata;
 pub mod parquet;
 pub mod partitioning;
+pub mod manhattan;
 pub mod query;
 pub mod schema;
 pub mod summary;

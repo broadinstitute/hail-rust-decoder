@@ -10,7 +10,7 @@ mod cli;
 mod config;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, PoolCommands, QueryArgs, ServiceCommands};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -48,6 +48,7 @@ fn main() -> Result<()> {
             #[cfg(feature = "bigquery")]
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
+        Commands::Manhattan(args) => run_manhattan(args)?,
         #[cfg(feature = "validation")]
         Commands::Schema { command } => match command {
             SchemaSubcommands::Validate(args) => run_validate(args)?,
@@ -1977,4 +1978,178 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
             rt.block_on(worker::run_worker(config))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Manhattan plot
+// ---------------------------------------------------------------------------
+
+fn run_manhattan(args: ManhattanArgs) -> Result<()> {
+    use hail_decoder::manhattan::{
+        annotate::Annotator,
+        data::{
+            extract_plot_data, ManhattanSidecar, SidecarChromosome, SidecarImage,
+            SidecarThreshold, SidecarYAxis, SignificantHit,
+        },
+        layout::{ChromosomeLayout, YScale},
+        reference::get_contig_lengths,
+        render::ManhattanRenderer,
+    };
+    use std::fs::File;
+    use std::io::Write;
+
+    println!(
+        "{} {}",
+        "Generating Manhattan plot for:".green(),
+        args.table.bright_white()
+    );
+
+    // 1. Open table
+    let engine = QueryEngine::open_path(&args.table)?;
+
+    // 2. Get contig lengths and filter to requested chromosomes
+    let all_contigs = get_contig_lengths(&engine);
+
+    let contigs: Vec<(String, u32)> = if args.chrom == "all" {
+        all_contigs
+    } else {
+        let requested: Vec<&str> = args.chrom.split(',').collect();
+        all_contigs
+            .into_iter()
+            .filter(|(name, _)| requested.contains(&name.as_str()))
+            .collect()
+    };
+
+    if contigs.is_empty() {
+        eprintln!(
+            "{} No matching chromosomes found for --chrom {}",
+            "Error:".red().bold(),
+            args.chrom
+        );
+        std::process::exit(1);
+    }
+
+    // 3. Init components
+    let layout = ChromosomeLayout::new(&contigs, args.width, 4);
+    let mut renderer = ManhattanRenderer::new(args.width, args.height);
+    let mut annotator = Annotator::new(args.annotate, args.annotate_fields)?;
+
+    // Use log-log scale: linear 0-10, then log 10+
+    // Max of 300 handles extremely significant hits (p ~ 10^-300)
+    let y_scale = YScale::new(args.height, 300.0);
+
+    // Draw threshold line
+    let threshold_y = y_scale.threshold_y(args.threshold);
+    renderer.render_threshold_line(threshold_y, args.width);
+
+    let mut significant_hits: Vec<SignificantHit> = Vec::new();
+
+    // 4. Scan & Render
+    println!("{}", "Scanning rows...".dimmed());
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(progress_style_spinner());
+
+    let iterator = engine.query_iter(&[])?;
+    let mut row_count: usize = 0;
+
+    for row_result in iterator {
+        let row = row_result?;
+        if let Some(point) = extract_plot_data(&row, &args.y_field) {
+            // Normalize contig name to match layout (strip "chr" prefix)
+            let contig_name = if point.contig.starts_with("chr") {
+                point.contig[3..].to_string()
+            } else {
+                point.contig.clone()
+            };
+
+            if let Some(x) = layout.get_x(&contig_name, point.position) {
+                let y = y_scale.get_y(point.neg_log10_p);
+                let color = layout.get_color(&contig_name);
+
+                renderer.render_point(x, y, color, 0.5);
+
+                if point.pvalue < args.threshold {
+                    let hit = SignificantHit {
+                        variant_id: format!("{}:{}", point.contig, point.position),
+                        pvalue: point.pvalue,
+                        x_px: x,
+                        y_px: y,
+                        x_normalized: x / args.width as f32,
+                        y_normalized: y / args.height as f32,
+                        annotations: serde_json::Value::Null,
+                    };
+                    significant_hits.push(hit);
+                }
+            }
+        }
+        row_count += 1;
+        if row_count % 50_000 == 0 {
+            pb.set_message(format!("{} rows scanned...", row_count));
+        }
+        if let Some(limit) = args.limit {
+            if row_count >= limit {
+                break;
+            }
+        }
+    }
+    pb.finish_and_clear();
+    println!(
+        "{} {} rows, {} significant hits",
+        "Scanned:".green(),
+        row_count.to_string().bright_white(),
+        significant_hits.len().to_string().bright_white()
+    );
+
+    // 5. Annotate significant hits (if annotation table provided)
+    // Note: annotation requires key reconstruction which needs the full row key.
+    // For now we skip key-based annotation; the sidecar still contains hit positions.
+    // TODO: reconstruct EncodedValue keys for annotation lookup
+
+    // 6. Write output
+    let output_base = args.output.unwrap_or_else(|| "manhattan".to_string());
+
+    let png_data = renderer.encode_png()?;
+    let png_path = format!("{}.png", output_base);
+    let mut f = File::create(&png_path)?;
+    f.write_all(&png_data)?;
+
+    let sidecar = ManhattanSidecar {
+        image: SidecarImage {
+            width: args.width,
+            height: args.height,
+        },
+        chromosomes: layout
+            .chromosome_info
+            .iter()
+            .map(|ci| SidecarChromosome {
+                name: ci.name.clone(),
+                x_start_px: ci.x_start_px,
+                x_end_px: ci.x_end_px,
+                color: ci.color.clone(),
+            })
+            .collect(),
+        threshold: SidecarThreshold {
+            pvalue: args.threshold,
+            y_px: threshold_y,
+        },
+        y_axis: SidecarYAxis {
+            log_threshold: 10.0,
+            linear_fraction: 0.6,
+            max_neg_log_p: 300.0,
+        },
+        significant_hits,
+    };
+
+    let json_path = format!("{}.json", output_base);
+    let mut f = File::create(&json_path)?;
+    serde_json::to_writer_pretty(&mut f, &sidecar)?;
+
+    println!(
+        "{} {} + {}",
+        "Saved:".green().bold(),
+        png_path.bright_white(),
+        json_path.bright_white()
+    );
+
+    Ok(())
 }

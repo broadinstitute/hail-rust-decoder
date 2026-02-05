@@ -27,6 +27,26 @@ pub enum JobSpec {
         #[serde(default)]
         fail_fast: bool,
     },
+    /// Generate Manhattan plot
+    Manhattan(ManhattanSpec),
+}
+
+/// Configuration for a distributed Manhattan plot job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManhattanSpec {
+    /// Field name for P-value
+    pub y_field: String,
+    /// Significance threshold
+    pub threshold: f64,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+    /// Optional annotation table path
+    #[serde(default)]
+    pub annotate_path: Option<String>,
+    /// Output path prefix
+    pub output_path: String,
 }
 
 impl JobSpec {
@@ -37,6 +57,7 @@ impl JobSpec {
             JobSpec::ExportJson { .. } => "export json",
             JobSpec::Summary => "summary",
             JobSpec::Validate { .. } => "validate",
+            JobSpec::Manhattan(_) => "manhattan plot",
         }
     }
 
@@ -47,6 +68,7 @@ impl JobSpec {
             JobSpec::ExportJson { output_path, .. } => Some(output_path),
             JobSpec::Summary => None,
             JobSpec::Validate { .. } => None,
+            JobSpec::Manhattan(spec) => Some(&spec.output_path),
         }
     }
 }
