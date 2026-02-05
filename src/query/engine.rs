@@ -258,6 +258,18 @@ impl QueryEngine {
         self.source.query_stream(ranges)
     }
 
+    /// Query with streaming output in SORTED key order
+    ///
+    /// Unlike `query_iter` which may use parallel iteration for performance,
+    /// this method guarantees rows are returned in sorted key order. Use this
+    /// for merge-join operations that require sorted input.
+    pub fn query_iter_sorted(
+        &self,
+        ranges: &[KeyRange],
+    ) -> Result<impl Iterator<Item = Result<EncodedValue>>> {
+        self.source.query_stream_sorted(ranges)
+    }
+
     /// Query with streaming output and interval filtering
     ///
     /// Returns an iterator that yields rows as they are read, filtering by

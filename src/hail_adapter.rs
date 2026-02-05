@@ -17,6 +17,88 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 
+/// Iterator that processes partitions sequentially in sorted order.
+/// This ensures rows are yielded in key order for merge-join operations.
+pub struct SortedPartitionIterator {
+    partition_indices: Vec<usize>,
+    current_partition: usize,
+    current_stream: Option<PartitionStream>,
+    rows_path: String,
+    part_files: Vec<String>,
+    row_type: EncodedType,
+    ranges: Vec<KeyRange>,
+}
+
+impl SortedPartitionIterator {
+    pub fn new(
+        partition_indices: Vec<usize>,
+        rows_path: String,
+        part_files: Vec<String>,
+        row_type: EncodedType,
+        ranges: Vec<KeyRange>,
+    ) -> Self {
+        Self {
+            partition_indices,
+            current_partition: 0,
+            current_stream: None,
+            rows_path,
+            part_files,
+            row_type,
+            ranges,
+        }
+    }
+
+    fn open_partition(&mut self, idx: usize) -> Result<PartitionStream> {
+        let part_file = &self.part_files[idx];
+        let parts_path = join_path(&self.rows_path, "parts");
+        let part_path = join_path(&parts_path, part_file);
+
+        let buffer = BufferBuilder::from_path(&part_path)?.with_leb128().build();
+        Ok(PartitionStream::new(
+            buffer,
+            self.row_type.clone(),
+            self.ranges.clone(),
+        ))
+    }
+}
+
+impl Iterator for SortedPartitionIterator {
+    type Item = Result<EncodedValue>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Try to get next row from current stream
+            if let Some(ref mut stream) = self.current_stream {
+                if let Some(row) = stream.next() {
+                    return Some(row);
+                }
+                // Current stream exhausted, move to next partition
+                self.current_stream = None;
+            }
+
+            // Check if we have more partitions
+            if self.current_partition >= self.partition_indices.len() {
+                return None;
+            }
+
+            // Open next partition
+            let idx = self.partition_indices[self.current_partition];
+            self.current_partition += 1;
+
+            match self.open_partition(idx) {
+                Ok(stream) => {
+                    debug!("Opened partition {} for sorted iteration", idx);
+                    self.current_stream = Some(stream);
+                }
+                Err(e) => {
+                    warn!("Failed to open partition {}: {}", idx, e);
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+}
+
 /// DataSource implementation for Hail Tables
 ///
 /// Provides read access to Hail Table format (.ht directories) using:
@@ -330,6 +412,36 @@ impl DataSource for HailTableSource {
         });
 
         Ok(Box::new(rx.into_iter()))
+    }
+
+    fn query_stream_sorted(
+        &self,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        // Sequential iteration through partitions in sorted order
+        let matching_partitions = filter_partitions(&self.rvd_spec.range_bounds, ranges);
+
+        info!(
+            "query_stream_sorted: {} partitions matched filter (sequential)",
+            matching_partitions.len()
+        );
+
+        // Build a sequential iterator that processes partitions in order
+        let rows_path = self.rows_path.clone();
+        let part_files = self.rvd_spec.part_files.clone();
+        let row_type = self.row_type.clone();
+        let ranges = ranges.to_vec();
+
+        // Create an iterator that chains partition streams in order
+        let iter = SortedPartitionIterator::new(
+            matching_partitions,
+            rows_path,
+            part_files,
+            row_type,
+            ranges,
+        );
+
+        Ok(Box::new(iter))
     }
 
     fn lookup(&self, key: &EncodedValue) -> Result<Option<EncodedValue>> {

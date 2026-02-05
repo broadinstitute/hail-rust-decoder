@@ -27,6 +27,25 @@ pub fn compare_encoded_values(a: &EncodedValue, b: &EncodedValue) -> Option<Orde
         (EncodedValue::Int32(a), EncodedValue::Int64(b)) => (*a as i64).partial_cmp(b),
         (EncodedValue::Int64(a), EncodedValue::Int32(b)) => a.partial_cmp(&(*b as i64)),
 
+        // Array comparison (lexicographical by elements)
+        (EncodedValue::Array(a_elems), EncodedValue::Array(b_elems)) => {
+            for (i, val_a) in a_elems.iter().enumerate() {
+                if i >= b_elems.len() {
+                    return Some(Ordering::Greater); // a is longer
+                }
+                let val_b = &b_elems[i];
+                match compare_encoded_values(val_a, val_b) {
+                    Some(Ordering::Equal) => continue,
+                    other => return other,
+                }
+            }
+            if a_elems.len() < b_elems.len() {
+                Some(Ordering::Less) // a is shorter
+            } else {
+                Some(Ordering::Equal)
+            }
+        }
+
         // Struct comparison (lexicographical by fields)
         (EncodedValue::Struct(a_fields), EncodedValue::Struct(b_fields)) => {
             // For structs, we usually assume fields are in the same order if schemas match.

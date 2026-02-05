@@ -3,6 +3,37 @@
 use crate::codec::EncodedValue;
 use serde::Serialize;
 
+/// Source of a variant (for distinguishing exome vs genome in combined analyses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum VariantSource {
+    Exome,
+    Genome,
+}
+
+/// A variant buffered for locus plot generation.
+/// Contains minimal data needed for rendering and JSON export.
+#[derive(Debug, Clone, Serialize)]
+pub struct BufferedVariant {
+    pub contig: String,
+    pub position: i32,
+    pub alleles: Vec<String>,
+    pub pvalue: f64,
+    pub beta: Option<f64>,
+    pub source: VariantSource,
+    pub gene_symbol: Option<String>,
+    pub consequence: Option<String>,
+}
+
+/// A genomic region of interest for locus plot generation.
+#[derive(Debug, Clone)]
+pub struct LocusRegion {
+    pub contig: String,
+    pub start: i32,
+    pub end: i32,
+    /// Description of signals driving this region (e.g., "rs123 (exome)", "PCSK9 (burden)")
+    pub signals: Vec<String>,
+}
+
 /// A single variant extracted from a table row, ready for plotting.
 #[derive(Debug)]
 pub struct PlotPoint {

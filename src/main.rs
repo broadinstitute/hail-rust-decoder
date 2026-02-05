@@ -1994,11 +1994,49 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
         },
         genes::{process_gene_burden, GeneMap},
         layout::{ChromosomeLayout, YScale},
+        pipeline::{run_integrated_pipeline, PipelineConfig},
         reference::get_contig_lengths,
         render::ManhattanRenderer,
     };
     use std::fs::{self, File};
     use std::io::Write;
+
+    // Check if using new multi-table mode (exome/genome inputs)
+    let use_pipeline = args.exome.is_some() || args.genome.is_some();
+
+    if use_pipeline {
+        println!(
+            "{} Running integrated multi-table pipeline",
+            "Mode:".cyan().bold()
+        );
+
+        // Convert CLI args to PipelineConfig
+        let config = PipelineConfig {
+            exome: args.exome.clone(),
+            exome_annotations: args.exome_annotations.clone(),
+            genome: args.genome.clone(),
+            genome_annotations: args.genome_annotations.clone(),
+            gene_burden: args.gene_burden.clone(),
+            genes: args.genes.clone(),
+            threshold: args.threshold,
+            gene_threshold: args.gene_threshold,
+            locus_threshold: args.locus_threshold,
+            locus_window: args.locus_window,
+            locus_plots: args.locus_plots,
+            output: args.output.clone(),
+            width: args.width,
+            height: args.height,
+            y_field: args.y_field.clone(),
+        };
+
+        return run_integrated_pipeline(&config);
+    }
+
+    // Legacy single-table mode below
+    println!(
+        "{} Running legacy single-table mode",
+        "Mode:".cyan().bold()
+    );
 
     // Load Gene Map if provided
     let gene_map = if let Some(path) = &args.genes {
@@ -2053,7 +2091,7 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
             // If no variant table and no gene burden, error out
             if args.gene_burden.is_none() {
                 eprintln!(
-                    "{} Either --table or --gene-burden must be provided",
+                    "{} Either --table, --exome, or --genome must be provided",
                     "Error:".red().bold()
                 );
                 std::process::exit(1);

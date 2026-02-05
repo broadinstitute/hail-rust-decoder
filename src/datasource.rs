@@ -90,6 +90,20 @@ pub trait DataSource: Send + Sync {
         intervals: Option<Arc<IntervalList>>,
     ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>>;
 
+    /// Stream rows in SORTED key order (sequential partition iteration)
+    ///
+    /// Unlike `query_stream` which may use parallel iteration for performance,
+    /// this method guarantees rows are returned in sorted key order. This is
+    /// required for merge-join operations.
+    ///
+    /// Default implementation falls back to query_stream (may not be sorted).
+    fn query_stream_sorted(
+        &self,
+        ranges: &[KeyRange],
+    ) -> Result<Box<dyn Iterator<Item = Result<EncodedValue>> + Send>> {
+        self.query_stream(ranges)
+    }
+
     /// Perform a point lookup for a specific key
     ///
     /// Returns the first row matching the key, or None if not found.

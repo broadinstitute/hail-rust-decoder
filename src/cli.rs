@@ -359,10 +359,45 @@ pub struct ValidateArgs {
 
 #[derive(Args, Debug)]
 pub struct ManhattanArgs {
-    /// Path to the variant results Hail table
+    // -- Data Inputs --
+    /// Path to Exome results Hail Table
+    #[arg(long)]
+    pub exome: Option<String>,
+
+    /// Path to Exome annotations Hail Table (for merge-join with exome results)
+    #[arg(long)]
+    pub exome_annotations: Option<String>,
+
+    /// Path to Genome results Hail Table
+    #[arg(long)]
+    pub genome: Option<String>,
+
+    /// Path to Genome annotations Hail Table (for merge-join with genome results)
+    #[arg(long)]
+    pub genome_annotations: Option<String>,
+
+    /// Path to gene burden results Hail Table
+    #[arg(long)]
+    pub gene_burden: Option<String>,
+
+    /// Path to gnomAD genes table (for gene bounds lookup and locus gene tracks)
+    #[arg(long)]
+    pub genes: Option<String>,
+
+    // -- Legacy/Single Table Mode --
+    /// Path to the variant results Hail table (legacy single-table mode)
     #[arg(long)]
     pub table: Option<String>,
 
+    /// Path to annotation table for enriching significant hits (legacy mode)
+    #[arg(long)]
+    pub annotate: Option<String>,
+
+    /// Fields to extract from annotation table (default: all value fields)
+    #[arg(long, value_delimiter = ',')]
+    pub annotate_fields: Vec<String>,
+
+    // -- Thresholds & Config --
     /// Chromosomes to include (e.g. '1', '1,6,17', 'all' for genome-wide)
     #[arg(long, default_value = "all")]
     pub chrom: String,
@@ -371,18 +406,27 @@ pub struct ManhattanArgs {
     #[arg(long, default_value = "Pvalue")]
     pub y_field: String,
 
-    /// P-value threshold for significant hits (detailed data in sidecar JSON)
-    #[arg(long, default_value = "5e-8")]
+    /// P-value threshold for significant variants (default: 5e-8)
+    #[arg(long, visible_alias = "variant-threshold", default_value = "5e-8")]
     pub threshold: f64,
 
-    /// Path to annotation table for enriching significant hits
+    /// Significance threshold for gene burden results (default: 2.5e-6)
+    #[arg(long, default_value = "2.5e-6")]
+    pub gene_threshold: f64,
+
+    /// P-value threshold to buffer variants for locus plots (default: 0.01)
+    #[arg(long, default_value = "0.01")]
+    pub locus_threshold: f64,
+
+    /// Window size (bp) around significant hits for locus plots (default: 1MB)
+    #[arg(long, default_value = "1000000")]
+    pub locus_window: i32,
+
+    /// Generate locus-zoom style plots for significant regions
     #[arg(long)]
-    pub annotate: Option<String>,
+    pub locus_plots: bool,
 
-    /// Fields to extract from annotation table (default: all value fields)
-    #[arg(long, value_delimiter = ',')]
-    pub annotate_fields: Vec<String>,
-
+    // -- Output Options --
     /// Limit number of rows to process (for testing)
     #[arg(long)]
     pub limit: Option<usize>,
@@ -395,25 +439,13 @@ pub struct ManhattanArgs {
     #[arg(long, default_value = "800")]
     pub height: u32,
 
-    /// Output filename prefix (produces {prefix}.png + {prefix}.json)
+    /// Output filename prefix or directory (produces {prefix}.png + {prefix}.json)
     #[arg(long)]
     pub output: Option<String>,
 
     /// Color scheme (classic = alternating gray/blue per chromosome)
     #[arg(long, default_value = "classic")]
     pub colors: String,
-
-    /// Path to gene burden results table
-    #[arg(long)]
-    pub gene_burden: Option<String>,
-
-    /// Path to gnomAD genes table (for gene bounds lookup)
-    #[arg(long)]
-    pub genes: Option<String>,
-
-    /// Significance threshold for gene burden results
-    #[arg(long, default_value = "2.5e-6")]
-    pub gene_threshold: f64,
 }
 
 #[derive(Args, Debug)]
