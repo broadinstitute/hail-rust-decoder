@@ -134,14 +134,13 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
         ));
     };
 
-    // 3. Scan Exomes (if provided)
+    // 3. Scan Exomes (if provided) - NO annotations during main scan for speed
     if let Some(res_path) = &config.exome {
         println!("Scanning Exome variants: {}", res_path);
-        let annot_path = config.exome_annotations.as_ref();
 
         scan_variant_table(
             res_path,
-            annot_path.map(|s| s.as_str()),
+            None, // Skip annotations during main scan
             VariantSource::Exome,
             &chrom_layout,
             &y_scale,
@@ -153,14 +152,13 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
         )?;
     }
 
-    // 4. Scan Genomes (if provided)
+    // 4. Scan Genomes (if provided) - NO annotations during main scan for speed
     if let Some(res_path) = &config.genome {
         println!("Scanning Genome variants: {}", res_path);
-        let annot_path = config.genome_annotations.as_ref();
 
         scan_variant_table(
             res_path,
-            annot_path.map(|s| s.as_str()),
+            None, // Skip annotations during main scan
             VariantSource::Genome,
             &chrom_layout,
             &y_scale,
@@ -170,6 +168,20 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             &mut sig_variants,
             output_base.join("genome_manhattan.png").to_str().unwrap(),
         )?;
+    }
+
+    // 4b. Enrich buffered variants with annotations (targeted lookups)
+    if !exome_buffer.is_empty() {
+        if let Some(annot_path) = &config.exome_annotations {
+            println!("Enriching {} exome variants with annotations...", exome_buffer.len());
+            enrich_variants_with_annotations(&mut exome_buffer, annot_path)?;
+        }
+    }
+    if !genome_buffer.is_empty() {
+        if let Some(annot_path) = &config.genome_annotations {
+            println!("Enriching {} genome variants with annotations...", genome_buffer.len());
+            enrich_variants_with_annotations(&mut genome_buffer, annot_path)?;
+        }
     }
 
     // 5. Compute Locus Regions
@@ -642,4 +654,45 @@ fn render_locus_plot(
 
     renderer.draw_variants(&render_variants);
     renderer.encode_png()
+}
+
+/// Enrich buffered variants with annotations via targeted lookups.
+///
+/// This is much faster than merge-join for small numbers of variants
+/// because it uses index lookups instead of scanning the entire table.
+fn enrich_variants_with_annotations(
+    variants: &mut [BufferedVariant],
+    annot_path: &str,
+) -> Result<()> {
+    let mut annot_engine = QueryEngine::open_path(annot_path)?;
+
+    for variant in variants.iter_mut() {
+        // Build a key for lookup
+        let key = EncodedValue::Struct(vec![
+            (
+                "locus".to_string(),
+                EncodedValue::Struct(vec![
+                    ("contig".to_string(), EncodedValue::Binary(variant.contig.as_bytes().to_vec())),
+                    ("position".to_string(), EncodedValue::Int32(variant.position)),
+                ]),
+            ),
+            (
+                "alleles".to_string(),
+                EncodedValue::Array(
+                    variant.alleles.iter()
+                        .map(|a| EncodedValue::Binary(a.as_bytes().to_vec()))
+                        .collect()
+                ),
+            ),
+        ]);
+
+        // Try point lookup
+        if let Ok(Some(annot_row)) = annot_engine.lookup(&key) {
+            let (gene_symbol, consequence) = extract_annotation_fields(&annot_row);
+            variant.gene_symbol = gene_symbol;
+            variant.consequence = consequence;
+        }
+    }
+
+    Ok(())
 }
