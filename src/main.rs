@@ -10,7 +10,7 @@ mod cli;
 mod config;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LocusArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -49,6 +49,7 @@ fn main() -> Result<()> {
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
         Commands::Manhattan(args) => run_manhattan(args)?,
+        Commands::Locus(args) => run_locus(args)?,
         #[cfg(feature = "validation")]
         Commands::Schema { command } => match command {
             SchemaSubcommands::Validate(args) => run_validate(args)?,
@@ -2213,6 +2214,153 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
         "Saved:".green().bold(),
         png_path.bright_white(),
         json_path.bright_white()
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Locus plot (zoomed-in LocusZoom-style)
+// ---------------------------------------------------------------------------
+
+fn run_locus(args: LocusArgs) -> Result<()> {
+    use hail_decoder::manhattan::data::extract_plot_data;
+    use hail_decoder::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
+    use hail_decoder::query::{KeyRange, KeyValue, QueryBound};
+
+    // 1. Parse region string (chr:start-end)
+    let parts: Vec<&str> = args.region.split([':', '-']).collect();
+    if parts.len() != 3 {
+        eprintln!(
+            "{} Invalid region format. Use chr:start-end (e.g. chr1:100000-200000)",
+            "Error:".red().bold()
+        );
+        std::process::exit(1);
+    }
+    let chrom = parts[0].to_string();
+    let start_pos: i32 = parts[1].parse().unwrap_or_else(|_| {
+        eprintln!("{} Invalid start position: {}", "Error:".red().bold(), parts[1]);
+        std::process::exit(1);
+    });
+    let end_pos: i32 = parts[2].parse().unwrap_or_else(|_| {
+        eprintln!("{} Invalid end position: {}", "Error:".red().bold(), parts[2]);
+        std::process::exit(1);
+    });
+
+    println!(
+        "{} {}:{}-{}",
+        "Plotting region:".green(),
+        chrom.bright_white(),
+        start_pos.to_string().bright_white(),
+        end_pos.to_string().bright_white()
+    );
+
+    // 2. Initialize Renderer
+    let config = LocusPlotConfig {
+        width: args.width,
+        height: args.height,
+        start_pos,
+        end_pos,
+        y_max: args.y_max,
+    };
+    let mut renderer = LocusRenderer::new(config);
+
+    // 3. Helper to fetch variants from a table
+    let fetch_variants = |path: &str, source: DataSource, chrom: &str, start: i32, end: i32, y_field: &str, threshold: f64| -> Result<Vec<RenderVariant>> {
+        println!(
+            "{} {} variants from {}...",
+            "Fetching".cyan(),
+            match source {
+                DataSource::Exome => "exome",
+                DataSource::Genome => "genome",
+            },
+            path.bright_white()
+        );
+        let engine = QueryEngine::open_path(path)?;
+
+        // Construct filters for efficient partition pruning and row filtering
+        let filters = vec![
+            // Filter by chromosome (locus.contig)
+            KeyRange {
+                field_path: vec!["locus".to_string(), "contig".to_string()],
+                start: QueryBound::Included(KeyValue::String(chrom.to_string())),
+                end: QueryBound::Included(KeyValue::String(chrom.to_string())),
+            },
+            // Filter by position range (locus.position)
+            KeyRange {
+                field_path: vec!["locus".to_string(), "position".to_string()],
+                start: QueryBound::Included(KeyValue::Int32(start)),
+                end: QueryBound::Included(KeyValue::Int32(end)),
+            },
+        ];
+
+        let iter = engine.query_iter(&filters)?;
+        let mut variants = Vec::new();
+
+        for row_res in iter {
+            let row = row_res?;
+            if let Some(pt) = extract_plot_data(&row, y_field) {
+                // Normalize contig name (strip "chr" prefix if present for comparison)
+                let contig_normalized = if pt.contig.starts_with("chr") {
+                    &pt.contig[3..]
+                } else {
+                    &pt.contig
+                };
+                let chrom_normalized = if chrom.starts_with("chr") {
+                    &chrom[3..]
+                } else {
+                    chrom
+                };
+
+                // Ensure exact bounds check
+                if pt.position >= start
+                    && pt.position <= end
+                    && contig_normalized == chrom_normalized
+                {
+                    variants.push(RenderVariant {
+                        position: pt.position,
+                        pvalue: pt.pvalue,
+                        source,
+                        is_significant: pt.pvalue < threshold,
+                    });
+                }
+            }
+        }
+        println!(
+            "  {} {} variants",
+            "Found:".green(),
+            variants.len().to_string().bright_white()
+        );
+        Ok(variants)
+    };
+
+    // 4. Fetch and Render variants
+    let mut all_variants = Vec::new();
+
+    if let Some(ref path) = args.genome {
+        let vars = fetch_variants(path, DataSource::Genome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
+        all_variants.extend(vars);
+    }
+
+    if let Some(ref path) = args.exome {
+        let vars = fetch_variants(path, DataSource::Exome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
+        all_variants.extend(vars);
+    }
+
+    if all_variants.is_empty() {
+        println!("{} No variants found in the specified region.", "Warning:".yellow());
+    }
+
+    renderer.draw_variants(&all_variants);
+    renderer.draw_threshold_line(args.threshold);
+
+    // 5. Save Output
+    let png_data = renderer.encode_png()?;
+    std::fs::write(&args.output, png_data)?;
+    println!(
+        "{} {}",
+        "Saved plot to:".green().bold(),
+        args.output.bright_white()
     );
 
     Ok(())

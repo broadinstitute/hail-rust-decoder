@@ -51,6 +51,9 @@ pub enum Commands {
     /// Generate Manhattan plots (PNG + JSON sidecar)
     Manhattan(ManhattanArgs),
 
+    /// Render a LocusZoom-style scatter plot for a specific region
+    Locus(LocusArgs),
+
     /// Manage a distributed worker pool for parallel processing
     Pool {
         #[command(subcommand)]
@@ -411,6 +414,45 @@ pub struct ManhattanArgs {
     /// Significance threshold for gene burden results
     #[arg(long, default_value = "2.5e-6")]
     pub gene_threshold: f64,
+}
+
+#[derive(Args, Debug)]
+pub struct LocusArgs {
+    /// Path to Exome results Hail Table
+    #[arg(long)]
+    pub exome: Option<String>,
+
+    /// Path to Genome results Hail Table
+    #[arg(long)]
+    pub genome: Option<String>,
+
+    /// Region to plot (format: chr:start-end)
+    #[arg(long)]
+    pub region: String,
+
+    /// Output PNG path
+    #[arg(long)]
+    pub output: String,
+
+    /// P-value field name
+    #[arg(long, default_value = "Pvalue")]
+    pub y_field: String,
+
+    /// Significance threshold
+    #[arg(long, default_value = "5e-8")]
+    pub threshold: f64,
+
+    /// Image width
+    #[arg(long, default_value = "800")]
+    pub width: u32,
+
+    /// Image height
+    #[arg(long, default_value = "400")]
+    pub height: u32,
+
+    /// Max Y-axis value (-log10 p)
+    #[arg(long, default_value = "30.0")]
+    pub y_max: f64,
 }
 
 /// Subcommands for managing distributed worker pools.
