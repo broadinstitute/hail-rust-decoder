@@ -308,6 +308,10 @@ pub async fn run_coordinator(
                 };
 
                 if let Some(spec) = manhattan_spec {
+                    if spec.skip_composite {
+                        println!("Skipping composite step (--no-composite). Run manually with:");
+                        println!("  hail-decoder manhattan --from-shards {}", spec.output_path);
+                    } else {
                     println!("Running post-job composite for Manhattan plot...");
 
                     let output_dir = spec.output_path.trim_end_matches('/');
@@ -335,6 +339,7 @@ pub async fn run_coordinator(
                         Ok(Ok(())) => println!("Composite complete: {}", final_png),
                         Ok(Err(e)) => eprintln!("Warning: Composite failed: {}", e),
                         Err(e) => eprintln!("Warning: Composite task panicked: {}", e),
+                    }
                     }
                 }
 

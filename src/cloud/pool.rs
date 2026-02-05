@@ -2292,6 +2292,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut locus_threshold: f64 = 0.01;
         let mut locus_window: i32 = 1_000_000;
         let mut locus_plots = false;
+        let mut skip_composite = false;
         let mut width: u32 = 3000;
         let mut height: u32 = 800;
         let mut y_field = "Pvalue".to_string();
@@ -2391,6 +2392,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     locus_plots = true;
                     i += 1;
                 }
+                "--no-composite" => {
+                    skip_composite = true;
+                    i += 1;
+                }
                 "--width" => {
                     if i + 1 < args.len() {
                         width = args[i + 1].parse().unwrap_or(3000);
@@ -2460,6 +2465,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             output_path,
             layout: None,  // Computed by coordinator before dispatch
             y_scale: None, // Computed by coordinator before dispatch
+            skip_composite,
         };
 
         Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))

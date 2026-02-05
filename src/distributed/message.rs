@@ -89,6 +89,10 @@ pub struct ManhattanSpec {
     /// Y-axis scale for mapping -log10(p) to pixel Y coordinates
     #[serde(default)]
     pub y_scale: Option<crate::manhattan::layout::YScale>,
+
+    /// Skip automatic composite step (run manually later with --from-shards)
+    #[serde(default)]
+    pub skip_composite: bool,
 }
 
 fn default_gene_threshold() -> f64 {
