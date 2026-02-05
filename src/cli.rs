@@ -356,8 +356,9 @@ pub struct ValidateArgs {
 
 #[derive(Args, Debug)]
 pub struct ManhattanArgs {
-    /// Path to the Hail table
-    pub table: String,
+    /// Path to the variant results Hail table
+    #[arg(long)]
+    pub table: Option<String>,
 
     /// Chromosomes to include (e.g. '1', '1,6,17', 'all' for genome-wide)
     #[arg(long, default_value = "all")]
@@ -398,6 +399,18 @@ pub struct ManhattanArgs {
     /// Color scheme (classic = alternating gray/blue per chromosome)
     #[arg(long, default_value = "classic")]
     pub colors: String,
+
+    /// Path to gene burden results table
+    #[arg(long)]
+    pub gene_burden: Option<String>,
+
+    /// Path to gnomAD genes table (for gene bounds lookup)
+    #[arg(long)]
+    pub genes: Option<String>,
+
+    /// Significance threshold for gene burden results
+    #[arg(long, default_value = "2.5e-6")]
+    pub gene_threshold: f64,
 }
 
 /// Subcommands for managing distributed worker pools.

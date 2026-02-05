@@ -1991,21 +1991,85 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
             extract_plot_data, ManhattanSidecar, SidecarChromosome, SidecarImage,
             SidecarThreshold, SidecarYAxis, SignificantHit,
         },
+        genes::{process_gene_burden, GeneMap},
         layout::{ChromosomeLayout, YScale},
         reference::get_contig_lengths,
         render::ManhattanRenderer,
     };
-    use std::fs::File;
+    use std::fs::{self, File};
     use std::io::Write;
+
+    // Load Gene Map if provided
+    let gene_map = if let Some(path) = &args.genes {
+        println!("{} {}", "Loading genes from:".green(), path.bright_white());
+        Some(GeneMap::load(path)?)
+    } else {
+        None
+    };
+
+    // Output directory setup
+    let output_base = args.output.as_deref().unwrap_or("manhattan");
+
+    // Process Gene Burden if provided
+    if let Some(burden_path) = &args.gene_burden {
+        println!(
+            "{} {}",
+            "Processing gene burden:".green(),
+            burden_path.bright_white()
+        );
+
+        let (png, sidecar, regions) = process_gene_burden(
+            burden_path,
+            args.gene_threshold,
+            args.width,
+            args.height,
+            gene_map.as_ref(),
+        )?;
+
+        let png_path = format!("{}.gene_manhattan.png", output_base);
+        let json_path = format!("{}.gene_manhattan.json", output_base);
+
+        fs::write(&png_path, png)?;
+        fs::write(&json_path, sidecar)?;
+
+        println!(
+            "{} {} + {}",
+            "Saved gene plot:".green().bold(),
+            png_path.bright_white(),
+            json_path.bright_white()
+        );
+        println!(
+            "{} {} regions of interest",
+            "Found:".cyan(),
+            regions.len().to_string().bright_white()
+        );
+    }
+
+    // Process variant table if provided (existing logic)
+    let table_path = match &args.table {
+        Some(path) => path,
+        None => {
+            // If no variant table and no gene burden, error out
+            if args.gene_burden.is_none() {
+                eprintln!(
+                    "{} Either --table or --gene-burden must be provided",
+                    "Error:".red().bold()
+                );
+                std::process::exit(1);
+            }
+            // Gene burden only mode - we're done
+            return Ok(());
+        }
+    };
 
     println!(
         "{} {}",
         "Generating Manhattan plot for:".green(),
-        args.table.bright_white()
+        table_path.bright_white()
     );
 
     // 1. Open table
-    let engine = QueryEngine::open_path(&args.table)?;
+    let engine = QueryEngine::open_path(table_path)?;
 
     // 2. Get contig lengths and filter to requested chromosomes
     let all_contigs = get_contig_lengths(&engine);

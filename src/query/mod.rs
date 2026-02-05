@@ -7,10 +7,13 @@
 //! - High-level query engine for table operations
 //! - Genomic interval lists for region filtering
 //! - Filter parsing for where clauses
+//! - Merge join infrastructure for combining sorted tables
 
+pub mod compare;
 mod engine;
 pub mod filter;
 mod intervals;
+pub mod join;
 mod pruning;
 mod stream;
 mod types;
