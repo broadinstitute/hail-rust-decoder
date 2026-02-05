@@ -1,0 +1,100 @@
+/* Manhattan Viewer Styles */
+
+.manhattan-container {
+  position: relative;
+  width: 100%;
+  user-select: none;
+}
+
+.manhattan-image-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.manhattan-image {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.manhattan-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.manhattan-highlight {
+  fill: none;
+  stroke: #ff6b6b;
+  stroke-width: 2;
+  pointer-events: none;
+}
+
+.manhattan-highlight-inner {
+  fill: rgba(255, 107, 107, 0.3);
+  pointer-events: none;
+}
+
+/* Chromosome labels strip */
+.manhattan-chrom-labels {
+  position: relative;
+  width: 100%;
+  height: 24px;
+  margin-top: 4px;
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.manhattan-chrom-label {
+  position: absolute;
+  transform: translateX(-50%);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Loading state */
+.manhattan-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: #666;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Error state */
+.manhattan-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: #dc3545;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Stats bar */
+.manhattan-stats {
+  display: flex;
+  gap: 16px;
+  padding: 8px 0;
+  font-size: 12px;
+  color: #666;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.manhattan-stats-item {
+  display: flex;
+  gap: 4px;
+}
+
+.manhattan-stats-label {
+  color: #999;
+}
+
+.manhattan-stats-value {
+  font-weight: 500;
+  color: #333;
+}
