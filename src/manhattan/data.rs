@@ -1,7 +1,7 @@
 //! Data structures for Manhattan plot points, significant hits, and the sidecar JSON.
 
 use crate::codec::EncodedValue;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Source of a variant (for distinguishing exome vs genome in combined analyses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -35,7 +35,7 @@ pub struct LocusRegion {
 }
 
 /// A single variant extracted from a table row, ready for plotting.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlotPoint {
     pub contig: String,
     pub position: i32,

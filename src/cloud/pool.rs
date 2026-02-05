@@ -1112,6 +1112,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         config: Option<&crate::cloud::ScalingConfig>,
         command: &[String],
     ) -> Result<()> {
+        // Build binary if redeploying (ensures latest code is used)
+        if force_redeploy {
+            Self::build_linux_binary()?;
+        }
+
         // Handle autoscaling
         if autoscale {
             let pool_config = config.ok_or_else(|| {
@@ -1129,8 +1134,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 target.to_string().bright_white()
             );
 
-            // Build binary once, then pass skip_build=true to scale
-            Self::build_linux_binary()?;
+            // Build binary once (skip if already built for redeploy), then scale
+            if !force_redeploy {
+                Self::build_linux_binary()?;
+            }
             self.scale(name, target, zone, binary_path.clone(), true, pool_config)?;
         }
 
@@ -2157,15 +2164,21 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             return Ok((input_path, JobSpec::Summary, Vec::new(), Vec::new()));
         }
 
+        // Handle 'manhattan' command
+        if cmd == "manhattan" {
+            return Self::parse_manhattan_command(&command[1..]);
+        }
+
         // Expect: export <type> <input> <output> [args...]
         if cmd != "export" {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Distributed mode supports: export, summary. Got: '{}'\n\
+                    "Distributed mode supports: export, summary, manhattan. Got: '{}'\n\
                      Examples:\n  \
                      pool submit mypool -- export parquet gs://bucket/input.ht gs://bucket/output/\n  \
-                     pool submit mypool -- summary gs://bucket/input.ht",
+                     pool submit mypool -- summary gs://bucket/input.ht\n  \
+                     pool submit mypool -- manhattan --exome gs://bucket/exome.ht --output gs://bucket/out/",
                     cmd
                 ),
             )));
@@ -2232,6 +2245,198 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         };
 
         Ok((input_path, job_spec, filters, intervals))
+    }
+
+    /// Parse a `manhattan` command into a ManhattanSpec job.
+    ///
+    /// Supports: manhattan --exome <path> --genome <path> --output <path> [--threshold ...] ...
+    fn parse_manhattan_command(
+        args: &[String],
+    ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
+        use crate::distributed::message::{JobSpec, ManhattanSpec};
+
+        // Parse named arguments
+        let mut exome: Option<String> = None;
+        let mut exome_annotations: Option<String> = None;
+        let mut genome: Option<String> = None;
+        let mut genome_annotations: Option<String> = None;
+        let mut gene_burden: Option<String> = None;
+        let mut genes: Option<String> = None;
+        let mut output: Option<String> = None;
+        let mut threshold: f64 = 5e-8;
+        let mut gene_threshold: f64 = 2.5e-6;
+        let mut locus_threshold: f64 = 0.01;
+        let mut locus_window: i32 = 1_000_000;
+        let mut locus_plots = false;
+        let mut width: u32 = 3000;
+        let mut height: u32 = 800;
+        let mut y_field = "Pvalue".to_string();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--exome" => {
+                    if i + 1 < args.len() {
+                        exome = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--exome-annotations" => {
+                    if i + 1 < args.len() {
+                        exome_annotations = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--genome" => {
+                    if i + 1 < args.len() {
+                        genome = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--genome-annotations" => {
+                    if i + 1 < args.len() {
+                        genome_annotations = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--gene-burden" => {
+                    if i + 1 < args.len() {
+                        gene_burden = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--genes" => {
+                    if i + 1 < args.len() {
+                        genes = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--output" => {
+                    if i + 1 < args.len() {
+                        output = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--threshold" | "--variant-threshold" => {
+                    if i + 1 < args.len() {
+                        threshold = args[i + 1].parse().unwrap_or(5e-8);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--gene-threshold" => {
+                    if i + 1 < args.len() {
+                        gene_threshold = args[i + 1].parse().unwrap_or(2.5e-6);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-threshold" => {
+                    if i + 1 < args.len() {
+                        locus_threshold = args[i + 1].parse().unwrap_or(0.01);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-window" => {
+                    if i + 1 < args.len() {
+                        locus_window = args[i + 1].parse().unwrap_or(1_000_000);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-plots" => {
+                    locus_plots = true;
+                    i += 1;
+                }
+                "--width" => {
+                    if i + 1 < args.len() {
+                        width = args[i + 1].parse().unwrap_or(3000);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--height" => {
+                    if i + 1 < args.len() {
+                        height = args[i + 1].parse().unwrap_or(800);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--y-field" => {
+                    if i + 1 < args.len() {
+                        y_field = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        // Validate: need at least one input table and an output
+        let output_path = output.ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Manhattan command requires --output <path>",
+            ))
+        })?;
+
+        // Determine primary input for partition counting
+        let input_path = exome
+            .as_ref()
+            .or(genome.as_ref())
+            .or(gene_burden.as_ref())
+            .cloned()
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Manhattan command requires at least one input table: --exome, --genome, or --gene-burden",
+                ))
+            })?;
+
+        let spec = ManhattanSpec {
+            exome,
+            exome_annotations,
+            genome,
+            genome_annotations,
+            gene_burden,
+            genes,
+            threshold,
+            gene_threshold,
+            locus_threshold,
+            locus_window,
+            locus_plots,
+            width,
+            height,
+            y_field,
+            output_path,
+        };
+
+        Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))
     }
 }
 

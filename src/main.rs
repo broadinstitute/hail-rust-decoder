@@ -1986,6 +1986,7 @@ fn run_service_command(command: ServiceCommands) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_manhattan(args: ManhattanArgs) -> Result<()> {
+    use crossbeam_channel::bounded;
     use hail_decoder::manhattan::{
         annotate::Annotator,
         data::{
@@ -1994,12 +1995,30 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
         },
         genes::{process_gene_burden, GeneMap},
         layout::{ChromosomeLayout, YScale},
-        pipeline::{run_integrated_pipeline, PipelineConfig},
+        pipeline::{aggregate_shards_and_render, run_integrated_pipeline, PipelineConfig},
         reference::get_contig_lengths,
         render::ManhattanRenderer,
     };
     use std::fs::{self, File};
     use std::io::Write;
+    use std::thread;
+
+    // Check if aggregating from distributed shards
+    if let Some(shards_path) = &args.from_shards {
+        println!(
+            "{} Aggregating distributed shards",
+            "Mode:".cyan().bold()
+        );
+
+        let output_prefix = args.output.as_deref().unwrap_or("manhattan");
+        return aggregate_shards_and_render(
+            shards_path,
+            output_prefix,
+            args.width,
+            args.height,
+            args.threshold,
+        );
+    }
 
     // Check if using new multi-table mode (exome/genome inputs)
     let use_pipeline = args.exome.is_some() || args.genome.is_some();
@@ -2109,6 +2128,7 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
 
     // 1. Open table
     let engine = QueryEngine::open_path(table_path)?;
+    let num_partitions = engine.num_partitions();
 
     // 2. Get contig lengths and filter to requested chromosomes
     let all_contigs = get_contig_lengths(&engine);
@@ -2147,54 +2167,159 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
 
     let mut significant_hits: Vec<SignificantHit> = Vec::new();
 
-    // 4. Scan & Render
-    println!("{}", "Scanning rows...".dimmed());
+    // 4. Parallel Scan & Render using producer-consumer pattern
+    // Workers extract data and compute layout, main thread only renders
+    println!("{}", "Scanning rows (parallel)...".dimmed());
     let pb = ProgressBar::new_spinner();
     pb.set_style(progress_style_spinner());
 
-    let iterator = engine.query_iter(&[])?;
+    /// Batch of render data sent from workers to main thread
+    struct RenderBatch {
+        /// Points to render: (x, y, color_idx) - color_idx is 0 or 1 for alternating colors
+        points: Vec<(f32, f32, u8)>,
+        /// Significant hits identified
+        hits: Vec<SignificantHit>,
+        /// Number of rows processed in this batch
+        row_count: usize,
+    }
+
+    // Channel for sending batches from workers to main thread
+    let (tx, rx) = bounded::<Result<RenderBatch>>(100);
+
+    // Clone data for the background thread
+    let table_path_owned = table_path.to_string();
+    let y_field = args.y_field.clone();
+    let threshold = args.threshold;
+    let width = args.width;
+    let height = args.height;
+    let layout_clone = layout.clone();
+    let y_scale_copy = y_scale;
+    let limit = args.limit;
+
+    // Spawn producer thread that drives parallel workers
+    let producer_handle = thread::spawn(move || {
+        let result: Result<()> = (|| {
+            // Process partitions in parallel
+            let _ = QueryEngine::open_path(&table_path_owned)?; // Verify path is valid
+            let partitions_to_process: Vec<usize> = (0..num_partitions).collect();
+
+            partitions_to_process
+                .into_par_iter()
+                .try_for_each_with(tx.clone(), |sender, partition_idx| -> Result<()> {
+                    // Each worker opens its own engine for thread safety
+                    let worker_engine = QueryEngine::open_path(&table_path_owned)?;
+                    let iter = worker_engine.scan_partition_iter(partition_idx, &[])?;
+
+                    let mut batch = RenderBatch {
+                        points: Vec::with_capacity(2000),
+                        hits: Vec::new(),
+                        row_count: 0,
+                    };
+
+                    for row_result in iter {
+                        let row = row_result?;
+                        batch.row_count += 1;
+
+                        if let Some(point) = extract_plot_data(&row, &y_field) {
+                            // Normalize contig name (strip "chr" prefix)
+                            let contig_name = if point.contig.starts_with("chr") {
+                                &point.contig[3..]
+                            } else {
+                                &point.contig
+                            };
+
+                            if let Some(x) = layout_clone.get_x(contig_name, point.position) {
+                                let y = y_scale_copy.get_y(point.neg_log10_p);
+
+                                // Get color index (0 or 1) for alternating colors
+                                let color = layout_clone.get_color(contig_name);
+                                let color_idx = if color == "#404040" { 0u8 } else { 1u8 };
+
+                                batch.points.push((x, y, color_idx));
+
+                                if point.pvalue < threshold {
+                                    let hit = SignificantHit {
+                                        variant_id: format!("{}:{}", point.contig, point.position),
+                                        pvalue: point.pvalue,
+                                        x_px: x,
+                                        y_px: y,
+                                        x_normalized: x / width as f32,
+                                        y_normalized: y / height as f32,
+                                        annotations: serde_json::Value::Null,
+                                    };
+                                    batch.hits.push(hit);
+                                }
+                            }
+                        }
+
+                        // Send batch when full
+                        if batch.points.len() >= 2000 {
+                            if sender.send(Ok(batch)).is_err() {
+                                return Err(hail_decoder::HailError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "Receiver dropped",
+                                )));
+                            }
+                            batch = RenderBatch {
+                                points: Vec::with_capacity(2000),
+                                hits: Vec::new(),
+                                row_count: 0,
+                            };
+                        }
+                    }
+
+                    // Send remaining data
+                    if batch.row_count > 0 {
+                        if sender.send(Ok(batch)).is_err() {
+                            return Err(hail_decoder::HailError::Io(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "Receiver dropped",
+                            )));
+                        }
+                    }
+
+                    Ok(())
+                })
+        })();
+
+        if let Err(e) = result {
+            let _ = tx.send(Err(e));
+        }
+        // tx drops here, closing the channel
+    });
+
+    // Consumer (Main Thread) - only does lightweight rendering
+    let colors = ["#404040", "#4682B4"];
     let mut row_count: usize = 0;
 
-    for row_result in iterator {
-        let row = row_result?;
-        if let Some(point) = extract_plot_data(&row, &args.y_field) {
-            // Normalize contig name to match layout (strip "chr" prefix)
-            let contig_name = if point.contig.starts_with("chr") {
-                point.contig[3..].to_string()
-            } else {
-                point.contig.clone()
-            };
+    for batch_result in rx {
+        let batch = batch_result?;
 
-            if let Some(x) = layout.get_x(&contig_name, point.position) {
-                let y = y_scale.get_y(point.neg_log10_p);
-                let color = layout.get_color(&contig_name);
-
-                renderer.render_point(x, y, color, 0.5);
-
-                if point.pvalue < args.threshold {
-                    let hit = SignificantHit {
-                        variant_id: format!("{}:{}", point.contig, point.position),
-                        pvalue: point.pvalue,
-                        x_px: x,
-                        y_px: y,
-                        x_normalized: x / args.width as f32,
-                        y_normalized: y / args.height as f32,
-                        annotations: serde_json::Value::Null,
-                    };
-                    significant_hits.push(hit);
-                }
-            }
+        // Render points (serial, but fast pixel operations)
+        for (x, y, color_idx) in batch.points {
+            renderer.render_point(x, y, colors[color_idx as usize], 0.5);
         }
-        row_count += 1;
-        if row_count % 50_000 == 0 {
+
+        // Aggregate significant hits
+        significant_hits.extend(batch.hits);
+
+        // Update progress
+        row_count += batch.row_count;
+        if row_count % 50_000 < batch.row_count {
             pb.set_message(format!("{} rows scanned...", row_count));
         }
-        if let Some(limit) = args.limit {
-            if row_count >= limit {
+
+        // Check limit (approximate - may process slightly more due to batching)
+        if let Some(lim) = limit {
+            if row_count >= lim {
                 break;
             }
         }
     }
+
+    // Wait for producer to finish (may already be done if limit reached)
+    let _ = producer_handle.join();
+
     pb.finish_and_clear();
     println!(
         "{} {} rows, {} significant hits",

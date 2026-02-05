@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 /// Maps chromosome names and base-pair positions to pixel X coordinates.
+#[derive(Clone)]
 pub struct ChromosomeLayout {
     /// Map of contig name to (start_px, width_px)
     offsets: HashMap<String, (f32, f32)>,
@@ -15,6 +16,7 @@ pub struct ChromosomeLayout {
 }
 
 /// Per-chromosome layout metadata for the sidecar JSON.
+#[derive(Clone)]
 pub struct ChromosomeInfo {
     pub name: String,
     pub x_start_px: f32,
@@ -89,6 +91,7 @@ impl ChromosomeLayout {
 /// The scale is linear from 0 to `log_threshold` (default 10), then
 /// logarithmic above that. This compresses extreme values while preserving
 /// detail in the 0-10 range where most variants cluster.
+#[derive(Clone, Copy)]
 pub struct YScale {
     height: f32,
     /// Threshold where we switch from linear to log scale

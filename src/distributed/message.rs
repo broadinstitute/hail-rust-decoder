@@ -32,21 +32,79 @@ pub enum JobSpec {
 }
 
 /// Configuration for a distributed Manhattan plot job.
+///
+/// Matches the fields in `PipelineConfig` from `src/manhattan/pipeline.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManhattanSpec {
-    /// Field name for P-value
-    pub y_field: String,
-    /// Significance threshold
+    // Data inputs
+    /// Path to Exome results table
+    #[serde(default)]
+    pub exome: Option<String>,
+    /// Path to Exome annotations table (for merge-join)
+    #[serde(default)]
+    pub exome_annotations: Option<String>,
+    /// Path to Genome results table
+    #[serde(default)]
+    pub genome: Option<String>,
+    /// Path to Genome annotations table (for merge-join)
+    #[serde(default)]
+    pub genome_annotations: Option<String>,
+    /// Path to gene burden results table
+    #[serde(default)]
+    pub gene_burden: Option<String>,
+    /// Path to gnomAD genes table
+    #[serde(default)]
+    pub genes: Option<String>,
+
+    // Thresholds
+    /// P-value threshold for significant variants (default: 5e-8)
     pub threshold: f64,
+    /// Significance threshold for gene burden results (default: 2.5e-6)
+    #[serde(default = "default_gene_threshold")]
+    pub gene_threshold: f64,
+    /// P-value threshold to buffer variants for locus plots (default: 0.01)
+    #[serde(default = "default_locus_threshold")]
+    pub locus_threshold: f64,
+    /// Window size (bp) around significant hits for locus plots (default: 1MB)
+    #[serde(default = "default_locus_window")]
+    pub locus_window: i32,
+    /// Generate locus-zoom style plots for significant regions
+    #[serde(default)]
+    pub locus_plots: bool,
+
+    // Output
     /// Image width in pixels
     pub width: u32,
     /// Image height in pixels
     pub height: u32,
-    /// Optional annotation table path
-    #[serde(default)]
-    pub annotate_path: Option<String>,
-    /// Output path prefix
+    /// Field name for P-value (Y-axis)
+    pub y_field: String,
+    /// Output path (directory)
     pub output_path: String,
+}
+
+fn default_gene_threshold() -> f64 {
+    2.5e-6
+}
+
+fn default_locus_threshold() -> f64 {
+    0.01
+}
+
+fn default_locus_window() -> i32 {
+    1_000_000
+}
+
+impl ManhattanSpec {
+    /// Get the primary input path for partition counting.
+    ///
+    /// Returns the first available of: exome, genome, or gene_burden.
+    pub fn primary_input_path(&self) -> Option<&str> {
+        self.exome
+            .as_deref()
+            .or(self.genome.as_deref())
+            .or(self.gene_burden.as_deref())
+    }
 }
 
 impl JobSpec {

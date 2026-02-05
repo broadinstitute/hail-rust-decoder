@@ -7,7 +7,8 @@
 //! metrics to the coordinator for the dashboard UI.
 
 use crate::distributed::message::{
-    CompleteRequest, HeartbeatRequest, JobSpec, TelemetrySnapshot, WorkRequest, WorkResponse,
+    CompleteRequest, HeartbeatRequest, JobSpec, ManhattanSpec, TelemetrySnapshot, WorkRequest,
+    WorkResponse,
 };
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
@@ -497,12 +498,14 @@ fn dispatch_job(
             eprintln!("Validate job not yet implemented for distributed mode");
             Ok((0, None, cached_engine))
         }
-        JobSpec::Manhattan(_spec) => {
-            // TODO: Implement distributed manhattan plot
-            // Workers would generate per-chromosome PNGs for their assigned partitions,
-            // then the coordinator would composite a genome-wide image.
-            eprintln!("Distributed manhattan plot not yet implemented");
-            Ok((0, None, cached_engine))
+        JobSpec::Manhattan(spec) => {
+            let (rows, engine) = process_manhattan_scan(
+                cached_engine,
+                partitions,
+                spec,
+                telemetry,
+            )?;
+            Ok((rows, None, engine))
         }
     }
 }
@@ -846,4 +849,68 @@ fn process_summary(
 
     // Don't cache engine since we opened multiple in parallel
     Ok((total_rows, stats, None))
+}
+
+/// Process partitions for a Manhattan plot job.
+///
+/// Extracts plot point data from the specified partitions and writes
+/// intermediate JSON files for later aggregation by the coordinator.
+fn process_manhattan_scan(
+    _cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    spec: &ManhattanSpec,
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    use crate::manhattan::pipeline::{run_distributed_scan, PipelineConfig};
+
+    println!(
+        "Processing {} partitions for Manhattan plot...",
+        partitions.len()
+    );
+
+    // Convert ManhattanSpec to PipelineConfig
+    let config = PipelineConfig {
+        exome: spec.exome.clone(),
+        exome_annotations: spec.exome_annotations.clone(),
+        genome: spec.genome.clone(),
+        genome_annotations: spec.genome_annotations.clone(),
+        gene_burden: spec.gene_burden.clone(),
+        genes: spec.genes.clone(),
+        threshold: spec.threshold,
+        gene_threshold: spec.gene_threshold,
+        locus_threshold: spec.locus_threshold,
+        locus_window: spec.locus_window,
+        locus_plots: spec.locus_plots,
+        output: Some(spec.output_path.clone()),
+        width: spec.width,
+        height: spec.height,
+        y_field: spec.y_field.clone(),
+    };
+
+    // Determine output file path for this batch of partitions
+    // Use the first partition ID to name the file
+    let part_id = partitions.first().copied().unwrap_or(0);
+    let output_base = spec.output_path.trim_end_matches('/');
+    let output_file = format!("{}/part-{:05}.json", output_base, part_id);
+
+    // Update telemetry with active partition
+    if let Some(ref ts) = telemetry {
+        ts.active_partition.store(part_id, Ordering::Relaxed);
+    }
+
+    // Run the distributed scan
+    let rows = run_distributed_scan(&config, partitions, &output_file)?;
+
+    // Update telemetry
+    if let Some(ref ts) = telemetry {
+        ts.total_rows.fetch_add(rows, Ordering::Relaxed);
+    }
+
+    println!(
+        "  Manhattan partitions {:?} complete: {} rows -> {}",
+        partitions, rows, output_file
+    );
+
+    // Don't cache engine since we opened multiple in parallel
+    Ok((rows, None))
 }

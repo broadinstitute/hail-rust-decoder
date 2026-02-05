@@ -426,6 +426,12 @@ pub struct ManhattanArgs {
     #[arg(long)]
     pub locus_plots: bool,
 
+    // -- Distributed Aggregation --
+    /// Path to directory containing distributed scan shards (part-*.json files).
+    /// When specified, aggregates shards and renders final PNG instead of scanning tables.
+    #[arg(long)]
+    pub from_shards: Option<String>,
+
     // -- Output Options --
     /// Limit number of rows to process (for testing)
     #[arg(long)]
@@ -446,6 +452,15 @@ pub struct ManhattanArgs {
     /// Color scheme (classic = alternating gray/blue per chromosome)
     #[arg(long, default_value = "classic")]
     pub colors: String,
+
+    // -- Distributed Processing --
+    /// Partitioning arguments for distributed processing
+    #[command(flatten)]
+    pub partitioning: PartitioningArgs,
+
+    /// Output progress as JSON lines (for distributed job coordination)
+    #[arg(long, hide = true)]
+    pub progress_json: bool,
 }
 
 #[derive(Args, Debug)]
