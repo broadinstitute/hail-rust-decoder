@@ -297,6 +297,47 @@ pub async fn run_coordinator(
                     println!("All {} partitions completed! Total rows: {}", total, rows);
                 }
 
+                // For Manhattan jobs, run the composite step to merge partial PNGs
+                let manhattan_spec = {
+                    let data = monitor_state.lock().unwrap();
+                    if let Some(JobSpec::Manhattan(ref spec)) = data.config.job_spec {
+                        Some(spec.clone())
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(spec) = manhattan_spec {
+                    println!("Running post-job composite for Manhattan plot...");
+
+                    let output_dir = spec.output_path.trim_end_matches('/');
+                    let final_png = format!("{}/manhattan.png", output_dir);
+
+                    // Run composite in a blocking thread to avoid nested runtime issues
+                    let output_path = spec.output_path.clone();
+                    let final_png_clone = final_png.clone();
+                    let width = spec.width;
+                    let height = spec.height;
+                    let threshold = spec.threshold;
+
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::manhattan::pipeline::composite_partial_pngs(
+                            &output_path,
+                            &final_png_clone,
+                            width,
+                            height,
+                            threshold,
+                        )
+                    })
+                    .await;
+
+                    match result {
+                        Ok(Ok(())) => println!("Composite complete: {}", final_png),
+                        Ok(Err(e)) => eprintln!("Warning: Composite failed: {}", e),
+                        Err(e) => eprintln!("Warning: Composite task panicked: {}", e),
+                    }
+                }
+
                 // Save aggregated results to file before exiting
                 {
                     let data = monitor_state.lock().unwrap();

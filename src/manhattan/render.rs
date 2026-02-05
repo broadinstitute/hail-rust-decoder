@@ -18,6 +18,15 @@ impl ManhattanRenderer {
         Self { pixmap }
     }
 
+    /// Create a new renderer with a transparent background.
+    /// Use this for distributed rendering where partial images will be composited.
+    pub fn new_transparent(width: u32, height: u32) -> Self {
+        let pixmap =
+            Pixmap::new(width, height).expect("Failed to allocate pixmap (dimensions too large?)");
+        // Pixmap is already transparent (zeroed) by default
+        Self { pixmap }
+    }
+
     /// Render a single variant point as an anti-aliased circle.
     pub fn render_point(&mut self, x: f32, y: f32, color_hex: &str, alpha: f32) {
         let mut paint = Paint::default();

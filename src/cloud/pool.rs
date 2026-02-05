@@ -192,11 +192,19 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     ) -> Result<bool> {
         use crate::distributed::message::{JobConfigRequest, JobConfigResponse};
 
+        // For Manhattan jobs, use larger batches so workers can parallelize with rayon
+        // Default batch_size=1 means workers get 1 partition at a time (no parallelism)
+        // With 4-core VMs, batch_size=40 gives rayon plenty to work with
+        let batch_size = match job_spec {
+            crate::distributed::message::JobSpec::Manhattan(_) => Some(40),
+            _ => None, // Use coordinator's default for other job types
+        };
+
         let request = JobConfigRequest {
             input_path: input_path.to_string(),
             job_spec: job_spec.clone(),
             total_partitions,
-            batch_size: None, // Use coordinator's default
+            batch_size,
             force,
             filters: filters.to_vec(),
             intervals: intervals.to_vec(),
@@ -1582,7 +1590,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // Supported formats:
         //   export parquet <input> <output> [--where ...]
         //   export json <input> <output> [--where ...]
-        let (input_path, job_spec, filters, intervals) = Self::parse_command_to_job_spec(command)?;
+        let (input_path, mut job_spec, filters, intervals) = Self::parse_command_to_job_spec(command)?;
 
         // Calculate total partitions by reading metadata locally
         println!("Reading metadata from {}...", input_path.bright_white());
@@ -1601,6 +1609,22 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         if let Some(out) = job_spec.output_path() {
             println!("  {} {}", "Output:".cyan(), out.bright_white());
         }
+
+        // For Manhattan jobs, compute the layout from reference genome data
+        if let crate::distributed::message::JobSpec::Manhattan(ref mut spec) = job_spec {
+            use crate::manhattan::layout::{ChromosomeLayout, YScale};
+            use crate::manhattan::reference::get_contig_lengths;
+
+            println!("  {} Computing chromosome layout...", "Setup:".cyan());
+            let contigs = get_contig_lengths(&engine);
+            let layout = ChromosomeLayout::new(&contigs, spec.width, 4);
+            // Use a reasonable max -log10(p) for initial Y scale (will cover most GWAS hits)
+            // Use high max to avoid cutting off extreme p-values (height can have -log10(p) > 100)
+            let y_scale = YScale::new(spec.height, 300.0);
+            spec.layout = Some(layout);
+            spec.y_scale = Some(y_scale);
+        }
+
         drop(engine);
 
         // Get coordinator's internal IP
@@ -2434,6 +2458,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             height,
             y_field,
             output_path,
+            layout: None,  // Computed by coordinator before dispatch
+            y_scale: None, // Computed by coordinator before dispatch
         };
 
         Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))

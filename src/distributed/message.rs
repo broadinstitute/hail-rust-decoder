@@ -81,6 +81,14 @@ pub struct ManhattanSpec {
     pub y_field: String,
     /// Output path (directory)
     pub output_path: String,
+
+    // Pre-computed layout (set by coordinator for distributed rendering)
+    /// Chromosome layout for mapping genomic positions to pixel X coordinates
+    #[serde(default)]
+    pub layout: Option<crate::manhattan::layout::ChromosomeLayout>,
+    /// Y-axis scale for mapping -log10(p) to pixel Y coordinates
+    #[serde(default)]
+    pub y_scale: Option<crate::manhattan::layout::YScale>,
 }
 
 fn default_gene_threshold() -> f64 {

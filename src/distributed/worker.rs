@@ -853,64 +853,121 @@ fn process_summary(
 
 /// Process partitions for a Manhattan plot job.
 ///
-/// Extracts plot point data from the specified partitions and writes
-/// intermediate JSON files for later aggregation by the coordinator.
+/// Renders plot points directly to a PNG image for this batch of partitions.
+/// The coordinator will composite all partial PNGs into the final image.
 fn process_manhattan_scan(
     _cached_engine: Option<(String, QueryEngine)>,
     partitions: &[usize],
     spec: &ManhattanSpec,
     telemetry: Option<Arc<TelemetryState>>,
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
-    use crate::manhattan::pipeline::{run_distributed_scan, PipelineConfig};
+    use crate::io::{is_cloud_path, StreamingCloudWriter};
+    use crate::manhattan::data::{extract_plot_data, PlotPoint};
+    use crate::manhattan::render::ManhattanRenderer;
+    use rayon::prelude::*;
+    use std::io::Write;
 
     println!(
         "Processing {} partitions for Manhattan plot...",
         partitions.len()
     );
 
-    // Convert ManhattanSpec to PipelineConfig
-    let config = PipelineConfig {
-        exome: spec.exome.clone(),
-        exome_annotations: spec.exome_annotations.clone(),
-        genome: spec.genome.clone(),
-        genome_annotations: spec.genome_annotations.clone(),
-        gene_burden: spec.gene_burden.clone(),
-        genes: spec.genes.clone(),
-        threshold: spec.threshold,
-        gene_threshold: spec.gene_threshold,
-        locus_threshold: spec.locus_threshold,
-        locus_window: spec.locus_window,
-        locus_plots: spec.locus_plots,
-        output: Some(spec.output_path.clone()),
-        width: spec.width,
-        height: spec.height,
-        y_field: spec.y_field.clone(),
-    };
+    // Get the pre-computed layout from the spec
+    let layout = spec.layout.as_ref().ok_or_else(|| {
+        crate::HailError::InvalidFormat("Manhattan job missing pre-computed layout".into())
+    })?;
+    let y_scale = spec.y_scale.as_ref().ok_or_else(|| {
+        crate::HailError::InvalidFormat("Manhattan job missing pre-computed y_scale".into())
+    })?;
 
-    // Determine output file path for this batch of partitions
-    // Use the first partition ID to name the file
+    // Determine which table to scan
+    let table_path = spec
+        .genome
+        .as_ref()
+        .or(spec.exome.as_ref())
+        .ok_or_else(|| {
+            crate::HailError::InvalidFormat("Manhattan job requires --genome or --exome".into())
+        })?;
+
     let part_id = partitions.first().copied().unwrap_or(0);
-    let output_base = spec.output_path.trim_end_matches('/');
-    let output_file = format!("{}/part-{:05}.json", output_base, part_id);
 
     // Update telemetry with active partition
     if let Some(ref ts) = telemetry {
         ts.active_partition.store(part_id, Ordering::Relaxed);
     }
 
-    // Run the distributed scan
-    let rows = run_distributed_scan(&config, partitions, &output_file)?;
+    let y_field = spec.y_field.clone();
+    let table_path_clone = table_path.clone();
+    let output_base = spec.output_path.trim_end_matches('/').to_string();
+    let width = spec.width;
+    let height = spec.height;
+
+    // Parallel scan+render+encode: each partition produces its own PNG
+    // This parallelizes PNG encoding across all cores
+    let results: Vec<Result<usize>> = partitions
+        .par_iter()
+        .map(|&partition_id| {
+            let engine = QueryEngine::open_path(&table_path_clone)?;
+            let iter = engine.scan_partition_iter(partition_id, &[])?;
+
+            // Each thread has its own renderer with transparent background
+            let mut renderer = ManhattanRenderer::new_transparent(width, height);
+            let mut rows = 0usize;
+
+            for row_result in iter {
+                let row = row_result?;
+                rows += 1;
+
+                if let Some(point) = extract_plot_data(&row, &y_field) {
+                    // Normalize contig name (strip "chr" prefix)
+                    let contig_name = if point.contig.starts_with("chr") {
+                        &point.contig[3..]
+                    } else {
+                        &point.contig
+                    };
+
+                    // Map to pixel coordinates and render
+                    if let Some(x) = layout.get_x(contig_name, point.position) {
+                        let y = y_scale.get_y(point.neg_log10_p);
+                        let color = layout.get_color(contig_name);
+                        renderer.render_point(x, y, color, 0.6);
+                    }
+                }
+            }
+
+            // Encode PNG (now parallel - each thread encodes its own)
+            let png_data = renderer.encode_png()?;
+
+            // Write PNG for this partition
+            let output_file = format!("{}/part-{:05}.png", output_base, partition_id);
+            if is_cloud_path(&output_file) {
+                let mut writer = StreamingCloudWriter::new(&output_file)?;
+                writer.write_all(&png_data)?;
+                writer.finish()?;
+            } else {
+                std::fs::write(&output_file, &png_data)?;
+            }
+
+            Ok(rows)
+        })
+        .collect();
+
+    // Aggregate row counts
+    let mut total_rows = 0usize;
+    for result in results {
+        total_rows += result?;
+    }
 
     // Update telemetry
     if let Some(ref ts) = telemetry {
-        ts.total_rows.fetch_add(rows, Ordering::Relaxed);
+        ts.total_rows.fetch_add(total_rows, Ordering::Relaxed);
     }
 
     println!(
-        "  Manhattan partitions {:?} complete: {} rows -> {}",
-        partitions, rows, output_file
+        "  Manhattan partitions {:?} complete: {} rows -> {}/part-*.png",
+        partitions, total_rows, output_base
     );
 
     // Don't cache engine since we opened multiple in parallel
-    Ok((rows, None))
+    Ok((total_rows, None))
 }

@@ -2005,19 +2005,45 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
 
     // Check if aggregating from distributed shards
     if let Some(shards_path) = &args.from_shards {
+        use hail_decoder::manhattan::pipeline::composite_partial_pngs;
+
         println!(
             "{} Aggregating distributed shards",
             "Mode:".cyan().bold()
         );
 
         let output_prefix = args.output.as_deref().unwrap_or("manhattan");
-        return aggregate_shards_and_render(
-            shards_path,
-            output_prefix,
-            args.width,
-            args.height,
-            args.threshold,
-        );
+
+        // Detect whether shards are PNG or JSON by checking what files exist
+        let shards_dir = shards_path.trim_end_matches('/');
+        let png_check = std::process::Command::new("gsutil")
+            .args(["ls", &format!("{}/part-*.png", shards_dir)])
+            .output();
+
+        let has_pngs = png_check
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if has_pngs {
+            println!("  Detected PNG shards, compositing images...");
+            let final_png = format!("{}.png", output_prefix);
+            return composite_partial_pngs(
+                shards_path,
+                &final_png,
+                args.width,
+                args.height,
+                args.threshold,
+            );
+        } else {
+            println!("  Detected JSON shards, aggregating points...");
+            return aggregate_shards_and_render(
+                shards_path,
+                output_prefix,
+                args.width,
+                args.height,
+                args.threshold,
+            );
+        }
     }
 
     // Check if using new multi-table mode (exome/genome inputs)
