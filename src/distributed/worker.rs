@@ -1295,9 +1295,132 @@ fn extract_sig_hit_fields(row: &crate::codec::EncodedValue) -> (String, String, 
 /// 3. Merges pre-annotated significant hits
 /// 4. Generates locus plots for significant regions
 /// 5. Writes manifest.json
+/// 6. Verifies outputs and writes to checkpoint
 fn process_manhattan_aggregate(
     spec: &ManhattanAggregateSpec,
 ) -> Result<usize> {
     use crate::manhattan::aggregate::run_aggregation;
-    run_aggregation(spec)
+
+    let rows = run_aggregation(spec)?;
+
+    // Verify expected outputs exist and write to checkpoint
+    if let Err(e) = verify_and_checkpoint(spec) {
+        // Log but don't fail - aggregation succeeded
+        eprintln!("Warning: checkpoint update failed: {}", e);
+    }
+
+    Ok(rows)
+}
+
+/// Verify expected outputs exist and append to checkpoint file.
+fn verify_and_checkpoint(spec: &ManhattanAggregateSpec) -> Result<()> {
+    use object_store::ObjectStore;
+    use object_store::path::Path as ObjPath;
+
+    // Build list of expected files
+    let mut expected = vec!["manifest.json"];
+    if spec.exome_results.is_some() {
+        expected.push("exome_manhattan.png");
+        expected.push("exome_significant.parquet");
+    }
+    if spec.genome_results.is_some() {
+        expected.push("genome_manhattan.png");
+        expected.push("genome_significant.parquet");
+    }
+
+    let url = url::Url::parse(&spec.output_path).map_err(|e| {
+        crate::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid output URL: {}", e),
+        ))
+    })?;
+
+    #[cfg(feature = "gcp")]
+    let store: std::sync::Arc<dyn ObjectStore> = {
+        let bucket = url.host_str().ok_or_else(|| {
+            crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing bucket in GCS URL",
+            ))
+        })?;
+        std::sync::Arc::new(
+            object_store::gcp::GoogleCloudStorageBuilder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to create GCS client: {}", e),
+                )))?
+        )
+    };
+
+    #[cfg(not(feature = "gcp"))]
+    return Ok(()); // Can't verify without GCS support
+
+    #[cfg(feature = "gcp")]
+    {
+        let base_path = url.path().trim_start_matches('/');
+
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            crate::HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        })?;
+
+        // Verify all expected files exist
+        for file in &expected {
+            let file_path = ObjPath::from(format!("{}/{}", base_path, file));
+            rt.block_on(async {
+                store.head(&file_path).await
+            }).map_err(|e| {
+                crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Missing expected output {}: {}", file, e),
+                ))
+            })?;
+        }
+
+        // Derive checkpoint path and relative phenotype path
+        // output_path: gs://bucket/manhattans/meta/1234
+        // checkpoint:  gs://bucket/manhattans/.completed
+        // rel_path:    meta/1234
+        let parts: Vec<&str> = base_path.rsplitn(3, '/').collect();
+        if parts.len() < 3 {
+            return Ok(()); // Can't determine checkpoint path
+        }
+
+        let phenotype_rel = format!("{}/{}", parts[1], parts[0]); // ancestry/id
+        let base_dir = parts[2]; // everything before ancestry
+        let checkpoint_path = ObjPath::from(format!("{}/.completed", base_dir));
+
+        // Append to checkpoint file (read-modify-write with newline)
+        let append_content = format!("{}\n", phenotype_rel);
+
+        rt.block_on(async {
+            // Try to read existing content
+            let existing = match store.get(&checkpoint_path).await {
+                Ok(result) => {
+                    let bytes = result.bytes().await.unwrap_or_default();
+                    String::from_utf8_lossy(&bytes).to_string()
+                }
+                Err(_) => String::new(),
+            };
+
+            // Check if already in checkpoint (idempotent)
+            if existing.lines().any(|line| line.trim() == phenotype_rel) {
+                return Ok::<(), object_store::Error>(());
+            }
+
+            // Append and write back
+            let new_content = format!("{}{}", existing, append_content);
+            store.put(&checkpoint_path, new_content.into()).await?;
+            Ok(())
+        }).map_err(|e| {
+            crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to update checkpoint: {}", e),
+            ))
+        })?;
+
+        println!("  Checkpoint: added {}", phenotype_rel);
+        Ok(())
+    }
 }

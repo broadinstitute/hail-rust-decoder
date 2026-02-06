@@ -1747,6 +1747,60 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 with_exome,
                 with_genome
             );
+
+            // Check for already-completed phenotypes via checkpoint file
+            let total_before = specs.len();
+            // Derive checkpoint path from first spec's output_path (clone to avoid borrow issues)
+            // output_path is like gs://bucket/manhattans/meta/1234
+            // checkpoint is at gs://bucket/manhattans/.completed
+            let base_dir: Option<String> = specs.first()
+                .and_then(|s| s.output_path.rsplit_once('/'))
+                .and_then(|(parent, _)| parent.rsplit_once('/'))
+                .map(|(base, _)| base.to_string());
+
+            if let Some(ref base_dir) = base_dir {
+                let checkpoint_path = format!("{}/.completed", base_dir);
+                println!("  {} Checking for completed phenotypes...", "Resume:".cyan());
+
+                match read_completed_checkpoint(&checkpoint_path) {
+                    Ok(completed) => {
+                        if !completed.is_empty() {
+                            let before = specs.len();
+                            specs.retain(|s| {
+                                // Extract relative path (ancestry/id) from output_path
+                                let rel_path = s.output_path
+                                    .strip_prefix(base_dir)
+                                    .map(|p| p.trim_start_matches('/'))
+                                    .unwrap_or(&s.output_path);
+                                !completed.contains(rel_path)
+                            });
+                            let skipped = before - specs.len();
+                            if skipped > 0 {
+                                println!(
+                                    "  {} {} phenotypes already complete, {} remaining",
+                                    "Skipped".yellow(),
+                                    skipped,
+                                    specs.len()
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // No checkpoint file or error reading - that's fine, process all
+                        println!("  {} No checkpoint file ({})", "Note:".dimmed(), e);
+                    }
+                }
+            }
+
+            // If all phenotypes are complete, exit early
+            if specs.is_empty() {
+                println!(
+                    "{} All {} phenotypes already complete!",
+                    "Done".green().bold(),
+                    total_before
+                );
+                return Ok(());
+            }
         }
 
         drop(engine);
@@ -2970,6 +3024,73 @@ enum WorkerMessage {
     Complete { worker_id: usize },
     /// Worker encountered an error
     Error { worker_id: usize, message: String },
+}
+
+/// Read the checkpoint file listing completed phenotypes.
+///
+/// The checkpoint file is a simple newline-delimited list of relative paths
+/// like "meta/height" or "afr/1234".
+fn read_completed_checkpoint(checkpoint_path: &str) -> Result<std::collections::HashSet<String>> {
+    use object_store::ObjectStore;
+    use object_store::path::Path as ObjPath;
+
+    let url = url::Url::parse(checkpoint_path).map_err(|e| {
+        HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Invalid checkpoint URL: {}", e),
+        ))
+    })?;
+
+    let (store, path): (std::sync::Arc<dyn ObjectStore>, ObjPath) = match url.scheme() {
+        #[cfg(feature = "gcp")]
+        "gs" => {
+            let bucket = url.host_str().ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Missing bucket in GCS URL",
+                ))
+            })?;
+            let path = url.path().trim_start_matches('/');
+            let store = object_store::gcp::GoogleCloudStorageBuilder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to create GCS client: {}", e),
+                )))?;
+            (std::sync::Arc::new(store), ObjPath::from(path))
+        }
+        scheme => {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Unsupported URL scheme for checkpoint: {}", scheme),
+            )));
+        }
+    };
+
+    // Read the file contents
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    })?;
+
+    let bytes = rt.block_on(async {
+        store.get(&path).await?.bytes().await
+    }).map_err(|e| {
+        HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to read checkpoint: {}", e),
+        ))
+    })?;
+
+    // Parse as newline-delimited list
+    let content = String::from_utf8_lossy(&bytes);
+    let completed: std::collections::HashSet<String> = content
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    Ok(completed)
 }
 
 #[cfg(test)]
