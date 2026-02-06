@@ -3,12 +3,9 @@
 //! This module handles the aggregation of scan phase outputs:
 //! 1. Compositing partial PNGs into final Manhattan plots
 //! 2. Processing gene burden table
-//! 3. Joining significant hits with annotations using DuckDB
+//! 3. Merging pre-annotated significant hits (annotations added during scan phase)
 //! 4. Generating locus plots for significant regions
 //! 5. Writing manifest.json
-
-#[cfg(feature = "duckdb")]
-use duckdb::Connection;
 
 use crate::distributed::message::ManhattanAggregateSpec;
 use crate::error::Result;
@@ -16,63 +13,20 @@ use crate::manhattan::data::{
     Manifest, ManifestInputs, ManifestManhattan, ManifestManhattans, ManifestSigHits,
     ManifestSignificantHits, ManifestStats, ManifestTopHit,
 };
+use arrow::array::{Array, Float64Array, StringArray};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use std::fs::File;
+use std::sync::Arc;
 use std::time::Instant;
-
-/// DuckDB wrapper for clean access in aggregate phase.
-#[cfg(feature = "duckdb")]
-pub struct Database {
-    conn: Connection,
-}
-
-#[cfg(feature = "duckdb")]
-impl Database {
-    /// Create a new in-memory DuckDB connection.
-    pub fn new() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        Ok(Self { conn })
-    }
-
-    /// Register a parquet file/directory as a view.
-    pub fn register_parquet(&self, name: &str, path: &str) -> Result<()> {
-        self.conn.execute(
-            &format!(
-                "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
-                name, path
-            ),
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Execute a query and write results to a parquet file.
-    pub fn query_to_parquet(&self, sql: &str, output: &str) -> Result<()> {
-        self.conn.execute(
-            &format!("COPY ({}) TO '{}' (FORMAT PARQUET)", sql, output),
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// Execute a query and return the row count.
-    pub fn count(&self, sql: &str) -> Result<u64> {
-        let mut stmt = self.conn.prepare(&format!("SELECT COUNT(*) FROM ({})", sql))?;
-        let count: i64 = stmt.query_row([], |row| row.get(0))?;
-        Ok(count as u64)
-    }
-
-    /// Get the connection for advanced queries.
-    pub fn conn(&self) -> &Connection {
-        &self.conn
-    }
-}
 
 /// Run the Manhattan aggregation phase.
 ///
 /// This is called by the worker when assigned a ManhattanAggregate job.
-#[cfg(feature = "duckdb")]
 pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
     use crate::io::is_cloud_path;
-    use std::path::Path;
 
     let start = Instant::now();
     let scan_duration = 0.0; // We don't know the scan duration here
@@ -104,24 +58,17 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
         0
     };
 
-    // Step 3: Join significant hits with annotations using DuckDB
-    println!("  Joining significant hits with annotations...");
+    // Step 3: Merge pre-annotated significant hits
+    // Annotations were added during the scan phase via streaming merge-join
+    println!("  Merging significant hits...");
     let (exome_sig_count, exome_top_hit) = if spec.exome_results.is_some() {
-        join_and_annotate_hits(
-            output_base,
-            "exome",
-            spec.exome_annotations.as_deref(),
-        )?
+        merge_significant_hits(output_base, "exome")?
     } else {
         (0, None)
     };
 
     let (genome_sig_count, genome_top_hit) = if spec.genome_results.is_some() {
-        join_and_annotate_hits(
-            output_base,
-            "genome",
-            spec.genome_annotations.as_deref(),
-        )?
+        merge_significant_hits(output_base, "genome")?
     } else {
         (0, None)
     };
@@ -130,6 +77,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
     let loci = if spec.locus_plots {
         println!("  Generating locus plots...");
         // TODO: Implement locus region computation and plotting
+        // This would query the original Hail tables using QueryEngine::query_iter_with_intervals
         vec![]
     } else {
         vec![]
@@ -231,14 +179,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
 }
 
 /// Composite partial PNGs for a source (exome or genome).
-#[cfg(feature = "duckdb")]
-fn composite_source_pngs(
-    output_base: &str,
-    source: &str,
-    width: u32,
-    height: u32,
-) -> Result<u64> {
-    use crate::io::is_cloud_path;
+fn composite_source_pngs(output_base: &str, source: &str, width: u32, height: u32) -> Result<u64> {
     use crate::manhattan::pipeline::composite_partial_pngs;
 
     let parts_dir = format!("{}/{}", output_base, source);
@@ -253,145 +194,355 @@ fn composite_source_pngs(
     Ok(0)
 }
 
-/// Join significant hits with annotations using DuckDB.
-#[cfg(feature = "duckdb")]
-fn join_and_annotate_hits(
+/// Merge pre-annotated significant hits from scan phase parquet files.
+///
+/// The sig.parquet files already contain gene and consequence columns from
+/// the streaming merge-join performed during scan phase.
+fn merge_significant_hits(
     output_base: &str,
     source: &str,
-    annotations_path: Option<&str>,
 ) -> Result<(u64, Option<ManifestTopHit>)> {
     use crate::io::is_cloud_path;
     use std::path::Path;
 
     let sig_dir = format!("{}/{}", output_base, source);
-    let sig_pattern = format!("{}/part-*-sig.parquet", sig_dir);
     let output_file = format!("{}/{}_significant.parquet", output_base, source);
 
-    // Check if we have any sig files
-    // For cloud paths, we'll just try the query
-    // For local paths, check if directory has files
-    if !is_cloud_path(&sig_dir) {
+    // Collect all sig parquet files
+    let sig_files = if is_cloud_path(&sig_dir) {
+        // For cloud paths, list objects
+        list_cloud_parquet_files(&sig_dir, "-sig.parquet")?
+    } else {
+        // For local paths, use filesystem
         let path = Path::new(&sig_dir);
         if !path.exists() {
             return Ok((0, None));
         }
-    }
+        list_local_parquet_files(&sig_dir, "-sig.parquet")?
+    };
 
-    let db = Database::new()?;
-
-    // Register significant hits from all partitions
-    db.conn.execute(
-        &format!(
-            "CREATE VIEW sig_hits AS SELECT * FROM read_parquet('{}')",
-            sig_pattern
-        ),
-        [],
-    )?;
-
-    // Get count
-    let count = db.count("SELECT * FROM sig_hits").unwrap_or(0);
-    if count == 0 {
+    if sig_files.is_empty() {
         return Ok((0, None));
     }
 
-    // Build the output query
-    let query = if let Some(annot_path) = annotations_path {
-        // Register annotations
-        let annot_pattern = if annot_path.ends_with('/') || !annot_path.ends_with(".parquet") {
-            format!("{}/*.parquet", annot_path.trim_end_matches('/'))
-        } else {
-            annot_path.to_string()
-        };
+    // Read and merge all parquet files
+    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    let mut schema = None;
 
-        db.conn.execute(
-            &format!(
-                "CREATE VIEW annotations AS SELECT * FROM read_parquet('{}')",
-                annot_pattern
-            ),
-            [],
-        )?;
+    for file_path in &sig_files {
+        let batches = read_parquet_file(file_path)?;
+        for batch in batches {
+            if schema.is_none() {
+                schema = Some(batch.schema());
+            }
+            all_batches.push(batch);
+        }
+    }
 
-        // Join with annotations
-        // Note: Annotation parquet may have locus as nested struct
-        // We handle both flat and nested schemas
-        format!(
-            r#"
-            SELECT
-                h.*,
-                a.gene_symbol,
-                a.consequence
-            FROM sig_hits h
-            LEFT JOIN annotations a
-                ON h.contig = COALESCE(a.contig, a.locus.contig)
-                AND h.position = COALESCE(a.position, a.locus.position)
-                AND h.ref = COALESCE(a.ref, a.alleles[1])
-                AND h.alt = COALESCE(a.alt, a.alleles[2])
-            ORDER BY h.pvalue ASC
-            "#
-        )
-    } else {
-        // No annotations, just output sorted hits
-        "SELECT * FROM sig_hits ORDER BY pvalue ASC".to_string()
-    };
+    if all_batches.is_empty() {
+        return Ok((0, None));
+    }
 
-    // Write to output parquet
-    db.query_to_parquet(&query, &output_file)?;
+    let schema = schema.unwrap();
 
-    // Get top hit
-    let top_hit = get_top_hit(&db, annotations_path.is_some())?;
+    // Count total rows
+    let total_count: u64 = all_batches.iter().map(|b| b.num_rows() as u64).sum();
 
-    Ok((count, top_hit))
+    if total_count == 0 {
+        return Ok((0, None));
+    }
+
+    // Sort by pvalue and write output
+    // For simplicity, collect all rows, sort, and write
+    let sorted_batches = sort_batches_by_pvalue(&all_batches)?;
+
+    // Write merged output
+    write_parquet_batches(&output_file, &schema, &sorted_batches)?;
+
+    // Extract top hit
+    let top_hit = extract_top_hit(&sorted_batches);
+
+    Ok((total_count, top_hit))
 }
 
-/// Get the top hit from the sig_hits view.
-#[cfg(feature = "duckdb")]
-fn get_top_hit(db: &Database, has_annotations: bool) -> Result<Option<ManifestTopHit>> {
-    let query = if has_annotations {
-        r#"
-        SELECT
-            contig || ':' || position || ':' || ref || ':' || alt as id,
-            pvalue,
-            gene_symbol,
-            consequence
-        FROM sig_hits h
-        LEFT JOIN annotations a
-            ON h.contig = COALESCE(a.contig, a.locus.contig)
-            AND h.position = COALESCE(a.position, a.locus.position)
-        ORDER BY pvalue ASC
-        LIMIT 1
-        "#
-    } else {
-        r#"
-        SELECT
-            contig || ':' || position || ':' || ref || ':' || alt as id,
-            pvalue,
-            NULL as gene_symbol,
-            NULL as consequence
-        FROM sig_hits
-        ORDER BY pvalue ASC
-        LIMIT 1
-        "#
+/// List parquet files matching a suffix in a local directory.
+fn list_local_parquet_files(dir: &str, suffix: &str) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if name.ends_with(suffix) {
+                files.push(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+/// List parquet files matching a suffix in a cloud directory.
+fn list_cloud_parquet_files(dir: &str, suffix: &str) -> Result<Vec<String>> {
+    use crate::HailError;
+    use object_store::path::Path as ObjPath;
+    use object_store::ObjectStore;
+    use url::Url;
+
+    let url = Url::parse(dir)
+        .map_err(|e| HailError::InvalidFormat(format!("Invalid URL: {}", e)))?;
+
+    let (store, prefix, base_url): (Arc<dyn object_store::ObjectStore>, ObjPath, String) = match url.scheme() {
+        #[cfg(feature = "gcp")]
+        "gs" => {
+            let bucket = url.host_str()
+                .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
+            let path = url.path().trim_start_matches('/');
+            let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
+            (Arc::new(gcs), ObjPath::from(path), format!("gs://{}/", bucket))
+        }
+        #[cfg(feature = "aws")]
+        "s3" => {
+            let bucket = url.host_str()
+                .ok_or_else(|| HailError::InvalidFormat("Missing bucket in S3 URL".to_string()))?;
+            let path = url.path().trim_start_matches('/');
+            let s3 = object_store::aws::AmazonS3Builder::new()
+                .with_bucket_name(bucket)
+                .build()
+                .map_err(|e| HailError::InvalidFormat(format!("Failed to create S3 client: {}", e)))?;
+            (Arc::new(s3), ObjPath::from(path), format!("s3://{}/", bucket))
+        }
+        scheme => {
+            return Err(HailError::InvalidFormat(format!("Unsupported URL scheme: {}", scheme)));
+        }
     };
 
-    let mut stmt = db.conn.prepare(query)?;
-    let result = stmt.query_row([], |row| {
-        Ok(ManifestTopHit {
-            id: row.get(0)?,
-            pvalue: row.get(1)?,
-            gene: row.get::<_, Option<String>>(2)?,
-            consequence: row.get::<_, Option<String>>(3)?,
-        })
+    // Use blocking runtime for object_store async operations
+    let rt = tokio::runtime::Runtime::new()?;
+    let list_result = rt.block_on(async {
+        let mut files = Vec::new();
+        let stream = store.list(Some(&prefix));
+        use futures::StreamExt;
+        let results: Vec<_> = stream.collect().await;
+        for result in results {
+            if let Ok(meta) = result {
+                let path = meta.location.to_string();
+                if path.ends_with(suffix) {
+                    // Reconstruct full URL
+                    let full_path = format!("{}{}", base_url, path);
+                    files.push(full_path);
+                }
+            }
+        }
+        files
     });
 
-    match result {
-        Ok(hit) => Ok(Some(hit)),
-        Err(duckdb::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
+    let mut files = list_result;
+    files.sort();
+    Ok(files)
+}
+
+/// Read all record batches from a parquet file.
+fn read_parquet_file(path: &str) -> Result<Vec<RecordBatch>> {
+    use crate::io::is_cloud_path;
+
+    if is_cloud_path(path) {
+        read_cloud_parquet_file(path)
+    } else {
+        read_local_parquet_file(path)
     }
 }
 
+/// Read parquet from local filesystem.
+fn read_local_parquet_file(path: &str) -> Result<Vec<RecordBatch>> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let batches: Vec<RecordBatch> = reader.collect::<std::result::Result<_, _>>()?;
+    Ok(batches)
+}
+
+/// Read parquet from cloud storage.
+fn read_cloud_parquet_file(path: &str) -> Result<Vec<RecordBatch>> {
+    use crate::io::{get_file_size, range_read};
+
+    // Download entire file to memory (sig.parquet files are small)
+    let file_size = get_file_size(path)?;
+    let data = range_read(path, 0, file_size as usize)?;
+
+    // bytes::Bytes implements ChunkReader
+    let bytes = bytes::Bytes::from(data);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)?;
+    let reader = builder.build()?;
+
+    let batches: Vec<RecordBatch> = reader.collect::<std::result::Result<_, _>>()?;
+    Ok(batches)
+}
+
+/// Sort record batches by pvalue column.
+fn sort_batches_by_pvalue(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
+    use arrow::compute::concat_batches;
+    use arrow::compute::sort_to_indices;
+    use arrow::compute::take;
+
+    if batches.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let schema = batches[0].schema();
+
+    // Concatenate all batches
+    let combined = concat_batches(&schema, batches)?;
+
+    // Get pvalue column index
+    let pvalue_idx = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == "pvalue")
+        .ok_or_else(|| crate::HailError::InvalidFormat("Missing pvalue column".into()))?;
+
+    let pvalue_col = combined.column(pvalue_idx);
+
+    // Sort indices by pvalue (ascending)
+    let sort_options = arrow::compute::SortOptions {
+        descending: false,
+        nulls_first: false,
+    };
+    let indices = sort_to_indices(pvalue_col, Some(sort_options), None)?;
+
+    // Apply sort to all columns
+    let sorted_columns: Vec<Arc<dyn Array>> = combined
+        .columns()
+        .iter()
+        .map(|col| take(col.as_ref(), &indices, None).map(Arc::from))
+        .collect::<std::result::Result<_, _>>()?;
+
+    let sorted_batch = RecordBatch::try_new(schema, sorted_columns)?;
+    Ok(vec![sorted_batch])
+}
+
+/// Write record batches to a parquet file.
+fn write_parquet_batches(
+    path: &str,
+    schema: &Arc<arrow::datatypes::Schema>,
+    batches: &[RecordBatch],
+) -> Result<()> {
+    use crate::io::is_cloud_path;
+
+    if is_cloud_path(path) {
+        write_cloud_parquet_batches(path, schema, batches)
+    } else {
+        write_local_parquet_batches(path, schema, batches)
+    }
+}
+
+/// Write parquet to local filesystem.
+fn write_local_parquet_batches(
+    path: &str,
+    schema: &Arc<arrow::datatypes::Schema>,
+    batches: &[RecordBatch],
+) -> Result<()> {
+    let file = File::create(path)?;
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::ZSTD(Default::default()))
+        .build();
+
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
+
+    for batch in batches {
+        writer.write(batch)?;
+    }
+
+    writer.close()?;
+    Ok(())
+}
+
+/// Write parquet to cloud storage.
+fn write_cloud_parquet_batches(
+    path: &str,
+    schema: &Arc<arrow::datatypes::Schema>,
+    batches: &[RecordBatch],
+) -> Result<()> {
+    use crate::io::CloudWriter;
+
+    let cloud_writer = CloudWriter::new(path)?;
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::ZSTD(Default::default()))
+        .build();
+
+    let mut writer = ArrowWriter::try_new(cloud_writer, schema.clone(), Some(props))?;
+
+    for batch in batches {
+        writer.write(batch)?;
+    }
+
+    let cloud_writer = writer.into_inner()?;
+    cloud_writer.finish()?;
+    Ok(())
+}
+
+/// Extract top hit from sorted batches.
+fn extract_top_hit(batches: &[RecordBatch]) -> Option<ManifestTopHit> {
+    if batches.is_empty() {
+        return None;
+    }
+
+    let batch = &batches[0];
+    if batch.num_rows() == 0 {
+        return None;
+    }
+
+    // Get columns by name
+    let schema = batch.schema();
+    let get_string = |name: &str| -> Option<String> {
+        let idx = schema.fields().iter().position(|f| f.name() == name)?;
+        let col = batch.column(idx);
+        let arr = col.as_any().downcast_ref::<StringArray>()?;
+        if arr.is_null(0) {
+            None
+        } else {
+            Some(arr.value(0).to_string())
+        }
+    };
+
+    let get_f64 = |name: &str| -> Option<f64> {
+        let idx = schema.fields().iter().position(|f| f.name() == name)?;
+        let col = batch.column(idx);
+        let arr = col.as_any().downcast_ref::<Float64Array>()?;
+        if arr.is_null(0) {
+            None
+        } else {
+            Some(arr.value(0))
+        }
+    };
+
+    let contig = get_string("contig")?;
+    let position = {
+        let idx = schema.fields().iter().position(|f| f.name() == "position")?;
+        let col = batch.column(idx);
+        let arr = col
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()?;
+        arr.value(0)
+    };
+    let ref_allele = get_string("ref")?;
+    let alt_allele = get_string("alt")?;
+    let pvalue = get_f64("pvalue")?;
+    let gene = get_string("gene");
+    let consequence = get_string("consequence");
+
+    Some(ManifestTopHit {
+        id: format!("{}:{}:{}:{}", contig, position, ref_allele, alt_allele),
+        pvalue,
+        gene,
+        consequence,
+    })
+}
+
 /// Clean up intermediate partition files.
-#[cfg(feature = "duckdb")]
 fn cleanup_intermediates(output_base: &str) -> Result<()> {
     use crate::io::is_cloud_path;
 
@@ -433,12 +584,4 @@ fn chrono_now_iso() -> String {
     let secs = duration.as_secs();
     // Simple ISO format without chrono dependency
     format!("{}", secs) // TODO: Proper ISO format
-}
-
-// Stub for non-duckdb builds
-#[cfg(not(feature = "duckdb"))]
-pub fn run_aggregation(_spec: &ManhattanAggregateSpec) -> Result<usize> {
-    Err(crate::HailError::InvalidFormat(
-        "Manhattan aggregate requires the 'duckdb' feature".into(),
-    ))
 }

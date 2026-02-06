@@ -156,6 +156,12 @@ pub struct ManhattanScanSpec {
     /// Field name for P-value (Y-axis)
     pub y_field: String,
 
+    /// Path to annotation Hail table for streaming merge-join during scan.
+    /// When provided, workers will join results with annotations on-the-fly
+    /// to populate gene and consequence fields in sig.parquet files.
+    #[serde(default)]
+    pub annotation_path: Option<String>,
+
     // Pre-computed layout from coordinator
     /// Chromosome layout for mapping genomic positions to pixel X coordinates
     pub layout: crate::manhattan::layout::ChromosomeLayout,
@@ -172,7 +178,7 @@ pub struct ManhattanScanSpec {
 /// A single worker receives this to:
 /// 1. Composite partial PNGs into final Manhattan plots
 /// 2. Process gene burden table
-/// 3. Join significant hits with annotations using DuckDB
+/// 3. Merge pre-annotated significant hits (annotations added during scan phase)
 /// 4. Generate locus plots for significant regions
 /// 5. Write manifest.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,24 +187,24 @@ pub struct ManhattanAggregateSpec {
     pub output_path: String,
 
     // Input tables for targeted reads (locus plots)
-    /// Path to Exome results table
+    /// Path to Exome results Hail table
     #[serde(default)]
     pub exome_results: Option<String>,
-    /// Path to Genome results table
+    /// Path to Genome results Hail table
     #[serde(default)]
     pub genome_results: Option<String>,
-    /// Path to gene burden results table
+    /// Path to gene burden results Hail table
     #[serde(default)]
     pub gene_burden: Option<String>,
 
-    // Annotation tables (pre-exported Parquet directories)
-    /// Path to exome annotations parquet directory
+    // Annotation tables (original Hail tables - for locus plot annotation)
+    /// Path to exome annotations Hail table
     #[serde(default)]
     pub exome_annotations: Option<String>,
-    /// Path to genome annotations parquet directory
+    /// Path to genome annotations Hail table
     #[serde(default)]
     pub genome_annotations: Option<String>,
-    /// Path to gnomAD genes parquet directory
+    /// Path to gnomAD genes Hail table
     #[serde(default)]
     pub genes: Option<String>,
 

@@ -44,8 +44,4 @@ pub enum HailError {
 
     #[error("Parse error: {0}")]
     ParseError(String),
-
-    #[cfg(feature = "duckdb")]
-    #[error("DuckDB error: {0}")]
-    DuckDb(#[from] duckdb::Error),
 }

@@ -740,6 +740,12 @@ fn get_manhattan_work(
                 source_name, partitions, worker_id
             );
 
+            // Determine annotation path based on source
+            let annotation_path = match source {
+                ManhattanSource::Exome => manhattan.original_spec.exome_annotations.clone(),
+                ManhattanSource::Genome => manhattan.original_spec.genome_annotations.clone(),
+            };
+
             // Build ManhattanScanSpec
             let scan_spec = ManhattanScanSpec {
                 source,
@@ -747,6 +753,7 @@ fn get_manhattan_work(
                 output_path: manhattan.original_spec.output_path.clone(),
                 threshold: manhattan.original_spec.threshold,
                 y_field: manhattan.original_spec.y_field.clone(),
+                annotation_path,
                 layout: manhattan.layout.clone().unwrap_or_default(),
                 y_scale: manhattan.y_scale.clone().unwrap_or_default(),
                 width: manhattan.original_spec.width,

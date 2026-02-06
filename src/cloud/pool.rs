@@ -2096,10 +2096,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             // Use shell to set ulimit first (fixes "too many open files" during linking)
             // cargo linux is an alias for cargo-zigbuild
             // Suppress compiler warnings (already seen during local build) with RUSTFLAGS
-            // Include duckdb-bundled for aggregate phase (annotation joins)
-            // Note: duckdb-bundled requires high ulimit due to many object files
             let status = std::process::Command::new("sh")
-                .args(["-c", "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release --features duckdb-bundled"])
+                .args(["-c", "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release"])
                 .status()
                 .map_err(|e| {
                     HailError::Io(std::io::Error::new(

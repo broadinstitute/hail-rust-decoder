@@ -1003,6 +1003,7 @@ fn process_manhattan_scan(
 /// This is the Phase 1 worker task. For each partition, it:
 /// 1. Renders plot points to a partial PNG (transparent background)
 /// 2. Writes significant hits (below threshold) to a Parquet file
+/// 3. If annotation_path is provided, looks up gene/consequence from annotation table
 ///
 /// Output structure:
 /// - {output_path}/{source}/part-{id}.png
@@ -1018,6 +1019,7 @@ fn process_manhattan_scan_v2(
     use crate::manhattan::render::ManhattanRenderer;
     use crate::manhattan::sig_writer::SigHitWriter;
     use rayon::prelude::*;
+    use std::collections::HashMap;
     use std::io::Write;
 
     let source_name = match spec.source {
@@ -1034,6 +1036,7 @@ fn process_manhattan_scan_v2(
     let layout = &spec.layout;
     let y_scale = &spec.y_scale;
     let table_path = &spec.table_path;
+    let annotation_path = &spec.annotation_path;
     let output_base = format!("{}/{}", spec.output_path.trim_end_matches('/'), source_name);
     let width = spec.width;
     let height = spec.height;
@@ -1053,6 +1056,14 @@ fn process_manhattan_scan_v2(
         .map(|&partition_id| {
             let engine = QueryEngine::open_path(table_path)?;
             let iter = engine.scan_partition_iter(partition_id, &[])?;
+
+            // Build annotation lookup if annotation_path is provided
+            let annotation_lookup: HashMap<(String, i32, String, String), (Option<String>, Option<String>)> =
+                if let Some(annot_path) = annotation_path {
+                    build_annotation_lookup(&engine, partition_id, annot_path)?
+                } else {
+                    HashMap::new()
+                };
 
             // Each thread has its own renderer with transparent background
             let mut renderer = ManhattanRenderer::new_transparent(width, height);
@@ -1086,6 +1097,12 @@ fn process_manhattan_scan_v2(
                         let (ref_allele, alt_allele, beta, se, af) =
                             extract_sig_hit_fields(&row);
 
+                        // Look up annotations if available
+                        let (gene, consequence) = annotation_lookup
+                            .get(&(contig_name.to_string(), point.position, ref_allele.clone(), alt_allele.clone()))
+                            .cloned()
+                            .unwrap_or((None, None));
+
                         sig_hits.push(SigHitRow {
                             contig: contig_name.to_string(),
                             position: point.position,
@@ -1095,6 +1112,8 @@ fn process_manhattan_scan_v2(
                             beta,
                             se,
                             af,
+                            gene,
+                            consequence,
                         });
                     }
                 }
@@ -1154,6 +1173,196 @@ fn process_manhattan_scan_v2(
     );
 
     Ok((total_rows, None))
+}
+
+/// Build an annotation lookup table for the genomic interval covered by a partition.
+///
+/// This loads annotations (gene_symbol, consequence) from the annotation Hail table
+/// for the genomic range covered by the results partition, creating a HashMap for O(1) lookup.
+fn build_annotation_lookup(
+    results_engine: &QueryEngine,
+    partition_id: usize,
+    annotation_path: &str,
+) -> Result<std::collections::HashMap<(String, i32, String, String), (Option<String>, Option<String>)>> {
+    use std::collections::HashMap;
+
+    // Get the interval covered by this results partition
+    let interval = results_engine.get_partition_interval(partition_id)?;
+
+    // Convert interval to KeyRange for querying
+    let ranges = interval_to_key_ranges(&interval);
+
+    // Open annotation table and query for this interval
+    let mut annot_engine = QueryEngine::open_path(annotation_path)?;
+
+    let mut lookup = HashMap::new();
+
+    // Query annotation table for this interval
+    if let Ok(result) = annot_engine.query(&ranges) {
+        for row in result.rows {
+            // Extract key: (contig, position, ref, alt)
+            if let Some((contig, position, ref_allele, alt_allele)) = extract_variant_key(&row) {
+                // Normalize contig name
+                let contig = if contig.starts_with("chr") {
+                    contig[3..].to_string()
+                } else {
+                    contig
+                };
+
+                // Extract gene_symbol and consequence
+                let gene = extract_string_field(&row, "gene_symbol");
+                let consequence = extract_string_field(&row, "consequence")
+                    .or_else(|| extract_string_field(&row, "most_severe_consequence"));
+
+                lookup.insert((contig, position, ref_allele, alt_allele), (gene, consequence));
+            }
+        }
+    }
+
+    Ok(lookup)
+}
+
+/// Convert an Interval to KeyRanges for querying.
+fn interval_to_key_ranges(interval: &crate::metadata::Interval) -> Vec<crate::query::KeyRange> {
+    use crate::query::{KeyRange, KeyValue, QueryBound};
+
+    // Extract contig and positions from the interval
+    // The interval values are serde_json::Value objects with nested structure
+    let (start_contig, start_pos) = extract_locus_from_value(&interval.start);
+    let (end_contig, end_pos) = extract_locus_from_value(&interval.end);
+
+    // Build KeyRanges for contig and position separately
+    // First, filter by contig
+    let contig_start = if interval.include_start {
+        QueryBound::Included(KeyValue::String(start_contig.clone()))
+    } else {
+        QueryBound::Excluded(KeyValue::String(start_contig.clone()))
+    };
+    let contig_end = if interval.include_end {
+        QueryBound::Included(KeyValue::String(end_contig.clone()))
+    } else {
+        QueryBound::Excluded(KeyValue::String(end_contig.clone()))
+    };
+
+    let contig_range = KeyRange {
+        field_path: vec!["locus".to_string(), "contig".to_string()],
+        start: contig_start,
+        end: contig_end,
+    };
+
+    // For same-contig ranges, also filter by position
+    if start_contig == end_contig {
+        let pos_start = if interval.include_start {
+            QueryBound::Included(KeyValue::Int32(start_pos))
+        } else {
+            QueryBound::Excluded(KeyValue::Int32(start_pos))
+        };
+        let pos_end = if interval.include_end {
+            QueryBound::Included(KeyValue::Int32(end_pos))
+        } else {
+            QueryBound::Excluded(KeyValue::Int32(end_pos))
+        };
+
+        let pos_range = KeyRange {
+            field_path: vec!["locus".to_string(), "position".to_string()],
+            start: pos_start,
+            end: pos_end,
+        };
+
+        vec![contig_range, pos_range]
+    } else {
+        // Cross-contig range - just use contig range
+        vec![contig_range]
+    }
+}
+
+/// Extract locus (contig, position) from a serde_json::Value.
+fn extract_locus_from_value(value: &serde_json::Value) -> (String, i32) {
+    if let serde_json::Value::Object(map) = value {
+        let contig = map.get("contig")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let position = map.get("position")
+            .and_then(|v| v.as_i64())
+            .map(|p| p as i32)
+            .unwrap_or(0);
+        (contig, position)
+    } else {
+        (String::new(), 0)
+    }
+}
+
+/// Extract variant key (contig, position, ref, alt) from an encoded row.
+fn extract_variant_key(row: &crate::codec::EncodedValue) -> Option<(String, i32, String, String)> {
+    use crate::codec::EncodedValue;
+
+    fn get_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a EncodedValue> {
+        let mut current = value;
+        for &field_name in path {
+            if let EncodedValue::Struct(fields) = current {
+                current = fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v)?;
+            } else {
+                return None;
+            }
+        }
+        Some(current)
+    }
+
+    // Extract locus
+    let contig = get_field(row, &["locus", "contig"])?.as_string()?;
+    let position = get_field(row, &["locus", "position"])?.as_i32()?;
+
+    // Extract alleles
+    let (ref_allele, alt_allele) = if let Some(EncodedValue::Array(alleles)) = get_field(row, &["alleles"]) {
+        let ref_a = alleles.first().and_then(|v| v.as_string()).unwrap_or_default();
+        let alt_a = alleles.get(1).and_then(|v| v.as_string()).unwrap_or_default();
+        (ref_a, alt_a)
+    } else {
+        return None;
+    };
+
+    Some((contig, position, ref_allele, alt_allele))
+}
+
+/// Extract a string field from an encoded row.
+/// Handles both top-level fields and common nested patterns.
+fn extract_string_field(row: &crate::codec::EncodedValue, field_name: &str) -> Option<String> {
+    use crate::codec::EncodedValue;
+
+    if let EncodedValue::Struct(fields) = row {
+        // First try top-level field
+        for (name, value) in fields {
+            if name == field_name {
+                return value.as_string();
+            }
+        }
+
+        // Special handling for gene_symbol: look in transcript_consequences array
+        if field_name == "gene_symbol" {
+            for (name, value) in fields {
+                if name == "transcript_consequences" {
+                    if let EncodedValue::Array(consequences) = value {
+                        // Get gene_symbol from first non-null entry
+                        for consequence in consequences {
+                            if let EncodedValue::Struct(csq_fields) = consequence {
+                                for (csq_name, csq_value) in csq_fields {
+                                    if csq_name == "gene_symbol" {
+                                        if let Some(s) = csq_value.as_string() {
+                                            if !s.is_empty() {
+                                                return Some(s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Extract fields for a significant hit from an encoded row.
@@ -1218,22 +1427,12 @@ fn extract_sig_hit_fields(row: &crate::codec::EncodedValue) -> (String, String, 
 /// This is the Phase 2 worker task. It:
 /// 1. Composites partial PNGs into final Manhattan plots
 /// 2. Processes gene burden table (if provided)
-/// 3. Joins significant hits with annotations using DuckDB
+/// 3. Merges pre-annotated significant hits
 /// 4. Generates locus plots for significant regions
 /// 5. Writes manifest.json
-#[cfg(feature = "duckdb")]
 fn process_manhattan_aggregate(
     spec: &ManhattanAggregateSpec,
 ) -> Result<usize> {
     use crate::manhattan::aggregate::run_aggregation;
     run_aggregation(spec)
-}
-
-#[cfg(not(feature = "duckdb"))]
-fn process_manhattan_aggregate(
-    _spec: &ManhattanAggregateSpec,
-) -> Result<usize> {
-    Err(crate::HailError::InvalidFormat(
-        "Manhattan aggregate requires the 'duckdb' feature. Build with --features duckdb".into()
-    ))
 }

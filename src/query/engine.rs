@@ -127,6 +127,38 @@ impl QueryEngine {
         self.hail_source.as_ref().map(|h| h.rvd_spec())
     }
 
+    /// Get the genomic interval covered by a specific partition (Hail tables only)
+    ///
+    /// This allows querying the annotation table for the same genomic range
+    /// during streaming merge-join operations.
+    ///
+    /// # Arguments
+    /// * `partition_idx` - The partition index
+    ///
+    /// # Returns
+    /// The interval covered by this partition, or an error if not a Hail table
+    /// or if the partition index is out of bounds.
+    pub fn get_partition_interval(
+        &self,
+        partition_idx: usize,
+    ) -> Result<crate::metadata::Interval> {
+        let hail = self
+            .hail_source
+            .as_ref()
+            .ok_or_else(|| crate::HailError::InvalidFormat("Not a Hail table".into()))?;
+
+        let range_bounds = &hail.rvd_spec().range_bounds;
+        if partition_idx >= range_bounds.len() {
+            return Err(crate::HailError::InvalidFormat(format!(
+                "Partition index {} out of bounds (table has {} partitions)",
+                partition_idx,
+                range_bounds.len()
+            )));
+        }
+
+        Ok(range_bounds[partition_idx].clone())
+    }
+
     /// Get the row type (schema) for this table
     pub fn row_type(&self) -> &EncodedType {
         self.source.row_type()
