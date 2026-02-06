@@ -123,6 +123,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(config.poll_interval_ms)).await;
             }
             WorkResponse::Task {
+                task_id,
                 partitions,
                 input_path,
                 job_spec,
@@ -130,11 +131,19 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 filters,
                 intervals,
             } => {
+                // Build description including batch info for aggregate batch jobs
+                let desc = if let JobSpec::ManhattanAggregateBatch(specs) = &job_spec {
+                    format!("batch of {} aggregation tasks", specs.len())
+                } else {
+                    job_spec.description().to_string()
+                };
+
                 println!(
-                    "Received work: {} partition(s) {:?} ({})",
+                    "Received work {}: {} partition(s) {:?} ({})",
+                    if task_id.is_empty() { "-" } else { &task_id },
                     partitions.len(),
                     partitions,
-                    job_spec.description()
+                    desc
                 );
 
                 // Update telemetry: mark first partition as active
@@ -179,6 +188,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                         // Report failure to coordinator so it can track and display the error
                         let fail_req = CompleteRequest {
                             worker_id: config.worker_id.clone(),
+                            task_id: task_id.clone(),
                             partitions: partitions.clone(),
                             rows_processed: 0,
                             result_json: None,
@@ -209,6 +219,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                     &client,
                     &complete_url,
                     &config.worker_id,
+                    task_id,
                     &partitions,
                     rows_processed,
                     result_json,
@@ -271,12 +282,14 @@ async fn report_completion(
     client: &reqwest::Client,
     url: &str,
     worker_id: &str,
+    task_id: String,
     partitions: &[usize],
     rows_processed: usize,
     result_json: Option<serde_json::Value>,
 ) -> Result<()> {
     let request = CompleteRequest {
         worker_id: worker_id.to_string(),
+        task_id,
         partitions: partitions.to_vec(),
         rows_processed,
         result_json,
@@ -520,6 +533,13 @@ fn dispatch_job(
             )?;
             Ok((rows, None, engine))
         }
+        JobSpec::ManhattanBatch(_) => {
+            // ManhattanBatch is a coordinator-level job spec for submission
+            // It should never be dispatched directly to workers
+            Err(crate::HailError::InvalidFormat(
+                "ManhattanBatch should not be dispatched to worker - it's for coordinator batch submission".to_string()
+            ))
+        }
         JobSpec::ManhattanScan(spec) => {
             let (rows, engine) = process_manhattan_scan_v2(
                 cached_engine,
@@ -532,6 +552,27 @@ fn dispatch_job(
         JobSpec::ManhattanAggregate(spec) => {
             let rows = process_manhattan_aggregate(spec)?;
             Ok((rows, None, None))
+        }
+        JobSpec::ManhattanAggregateBatch(specs) => {
+            use rayon::prelude::*;
+
+            println!("Processing batch of {} aggregation tasks...", specs.len());
+
+            // Execute all aggregations in parallel using the worker's thread pool
+            // This allows nested parallelism:
+            // - Top level: parallel phenotypes
+            // - Inner level: parallel locus plots (within process_manhattan_aggregate)
+            let results: Vec<Result<usize>> = specs.par_iter()
+                .map(|spec| process_manhattan_aggregate(spec))
+                .collect();
+
+            // Sum rows and check for errors
+            let mut total_rows = 0;
+            for res in results {
+                total_rows += res?;
+            }
+
+            Ok((total_rows, None, None))
         }
         JobSpec::Loci(spec) => {
             let rows = process_loci(spec)?;

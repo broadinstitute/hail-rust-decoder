@@ -29,10 +29,14 @@ pub enum JobSpec {
     },
     /// Generate Manhattan plot (high-level submission - coordinator splits into phases)
     Manhattan(ManhattanSpec),
+    /// Submit a batch of Manhattan plots (coordinator queues them)
+    ManhattanBatch(Vec<ManhattanSpec>),
     /// Phase 1: Worker scans partitions, outputs partial PNGs + sig.parquet
     ManhattanScan(ManhattanScanSpec),
     /// Phase 2: Single worker aggregates results, joins annotations, generates locus plots
     ManhattanAggregate(ManhattanAggregateSpec),
+    /// Phase 2 (Batch): Worker executes multiple aggregation tasks in parallel
+    ManhattanAggregateBatch(Vec<ManhattanAggregateSpec>),
     /// Generate locus plots from existing Manhattan output
     Loci(LociSpec),
 }
@@ -306,8 +310,10 @@ impl JobSpec {
             JobSpec::Summary => "summary",
             JobSpec::Validate { .. } => "validate",
             JobSpec::Manhattan(_) => "manhattan plot",
+            JobSpec::ManhattanBatch(_) => "manhattan batch",
             JobSpec::ManhattanScan(_) => "manhattan scan",
             JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
+            JobSpec::ManhattanAggregateBatch(_) => "manhattan aggregate batch",
             JobSpec::Loci(_) => "loci plots",
         }
     }
@@ -320,8 +326,10 @@ impl JobSpec {
             JobSpec::Summary => None,
             JobSpec::Validate { .. } => None,
             JobSpec::Manhattan(spec) => Some(&spec.output_path),
+            JobSpec::ManhattanBatch(specs) => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::ManhattanScan(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
+            JobSpec::ManhattanAggregateBatch(specs) => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::Loci(spec) => Some(&spec.output_dir),
         }
     }
@@ -341,6 +349,9 @@ pub enum WorkResponse {
     /// Work is available - process these partitions
     #[serde(rename = "task")]
     Task {
+        /// Unique task identifier (for tracking in batch mode)
+        #[serde(default)]
+        task_id: String,
         /// Partition indices to process
         partitions: Vec<usize>,
         /// Path to input Hail table
@@ -369,6 +380,9 @@ pub enum WorkResponse {
 pub struct CompleteRequest {
     /// Worker that completed the work
     pub worker_id: String,
+    /// Unique task identifier (matches WorkResponse)
+    #[serde(default)]
+    pub task_id: String,
     /// Partitions that were completed (or failed)
     pub partitions: Vec<usize>,
     /// Number of rows processed

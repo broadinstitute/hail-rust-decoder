@@ -10,7 +10,7 @@ mod cli;
 mod config;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LociArgs, LocusArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LociArgs, LocusArgs, ManhattanArgs, ManhattanBatchArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -49,6 +49,7 @@ fn main() -> Result<()> {
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
         Commands::Manhattan(args) => run_manhattan(args)?,
+        Commands::ManhattanBatch(args) => run_manhattan_batch(args)?,
         Commands::Loci(args) => run_loci(args)?,
         Commands::Locus(args) => run_locus(args)?,
         #[cfg(feature = "validation")]
@@ -2407,6 +2408,46 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
         png_path.bright_white(),
         json_path.bright_white()
     );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Manhattan batch processing
+// ---------------------------------------------------------------------------
+
+/// Run a batch of Manhattan plots from assets JSON.
+///
+/// This command parses the assets JSON file, groups entries by phenotype,
+/// and submits a batch job to the coordinator for parallel processing.
+///
+/// Phase 1: Stub implementation - actual logic comes in Phase 3.
+fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
+    println!(
+        "{} Manhattan batch processing",
+        "Starting".green().bold()
+    );
+    println!("  Assets JSON: {}", args.assets_json);
+    println!("  Output dir: {}", args.output_dir);
+
+    if let Some(ref ids) = args.analysis_ids {
+        println!("  Analysis IDs filter: {:?}", ids);
+    }
+
+    if let Some(limit) = args.limit {
+        println!("  Limit: {}", limit);
+    }
+
+    println!();
+    println!(
+        "{}: manhattan-batch CLI is not yet implemented (Phase 3)",
+        "Note".yellow().bold()
+    );
+    println!("This command will:");
+    println!("  1. Parse the assets JSON file");
+    println!("  2. Group entries by analysis_id + ancestry_group");
+    println!("  3. Construct ManhattanSpec for each phenotype");
+    println!("  4. Submit a ManhattanBatch job to the coordinator");
 
     Ok(())
 }

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 /// Configuration for the coordinator.
 pub struct CoordinatorConfig {
@@ -640,7 +641,11 @@ async fn get_work(
             }
         };
 
+        // Generate unique task ID for tracking
+        let task_id = Uuid::new_v4().to_string();
+
         axum::Json(WorkResponse::Task {
+            task_id,
             partitions,
             input_path: data.config.input_path.clone(),
             job_spec,
@@ -672,6 +677,9 @@ fn get_manhattan_work(
 ) -> axum::Json<WorkResponse> {
     let now = Instant::now();
     let batch_size = data.config.batch_size;
+
+    // Generate unique task ID for tracking
+    let task_id = Uuid::new_v4().to_string();
 
     match manhattan.phase {
         ManhattanPhase::Scan => {
@@ -754,6 +762,7 @@ fn get_manhattan_work(
             };
 
             axum::Json(WorkResponse::Task {
+                task_id,
                 partitions,
                 input_path: String::new(), // Not used for ManhattanScan
                 job_spec: JobSpec::ManhattanScan(scan_spec),
@@ -812,6 +821,7 @@ fn get_manhattan_work(
             };
 
             axum::Json(WorkResponse::Task {
+                task_id,
                 partitions: vec![0], // Single aggregate task
                 input_path: String::new(),
                 job_spec: JobSpec::ManhattanAggregate(aggregate_spec),

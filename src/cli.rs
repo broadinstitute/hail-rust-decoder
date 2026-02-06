@@ -51,6 +51,9 @@ pub enum Commands {
     /// Generate Manhattan plots (PNG + JSON sidecar)
     Manhattan(ManhattanArgs),
 
+    /// Generate a batch of Manhattan plots from assets JSON
+    ManhattanBatch(ManhattanBatchArgs),
+
     /// Generate locus plots from existing Manhattan output directory
     Loci(LociArgs),
 
@@ -462,6 +465,81 @@ pub struct ManhattanArgs {
     pub partitioning: PartitioningArgs,
 
     /// Output progress as JSON lines (for distributed job coordination)
+    #[arg(long, hide = true)]
+    pub progress_json: bool,
+}
+
+/// Arguments for generating a batch of Manhattan plots from assets JSON.
+///
+/// This command reads an assets JSON file (from axaou-server query-assets) and
+/// submits a batch of Manhattan plot jobs to the coordinator for parallel processing.
+#[derive(Args, Debug)]
+pub struct ManhattanBatchArgs {
+    /// Path to assets JSON file (from axaou-server query-assets)
+    #[arg(long)]
+    pub assets_json: String,
+
+    /// Base output directory (e.g., gs://bucket/manhattans)
+    #[arg(long)]
+    pub output_dir: String,
+
+    /// Filter to specific analysis IDs (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub analysis_ids: Option<Vec<String>>,
+
+    /// Limit number of phenotypes to process
+    #[arg(long)]
+    pub limit: Option<usize>,
+
+    // Common Manhattan Options (Global overrides)
+
+    /// P-value threshold for significant variants (default: 5e-8)
+    #[arg(long, default_value = "5e-8")]
+    pub threshold: f64,
+
+    /// Significance threshold for gene burden results (default: 2.5e-6)
+    #[arg(long, default_value = "2.5e-6")]
+    pub gene_threshold: f64,
+
+    /// P-value threshold to buffer variants for locus plots (default: 0.01)
+    #[arg(long, default_value = "0.01")]
+    pub locus_threshold: f64,
+
+    /// Window size (bp) around significant hits for locus plots (default: 1MB)
+    #[arg(long, default_value = "1000000")]
+    pub locus_window: i32,
+
+    /// Generate locus-zoom style plots for significant regions
+    #[arg(long)]
+    pub locus_plots: bool,
+
+    /// Image width in pixels
+    #[arg(long, default_value = "3000")]
+    pub width: u32,
+
+    /// Image height in pixels
+    #[arg(long, default_value = "800")]
+    pub height: u32,
+
+    /// Path to gnomAD genes table
+    #[arg(long)]
+    pub genes: Option<String>,
+
+    /// Path to Exome annotations Hail Table
+    #[arg(long)]
+    pub exome_annotations: Option<String>,
+
+    /// Path to Genome annotations Hail Table
+    #[arg(long)]
+    pub genome_annotations: Option<String>,
+
+    // Distributed Processing
+
+    /// Partitioning arguments for distributed processing
+    #[command(flatten)]
+    pub partitioning: PartitioningArgs,
+
+    /// Output progress as JSON lines
     #[arg(long, hide = true)]
     pub progress_json: bool,
 }
