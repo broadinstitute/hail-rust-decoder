@@ -219,6 +219,7 @@ pub fn locus_definition_schema() -> Schema {
 /// - phenotype: string
 /// - ancestry: string
 /// - sequencing_type: string ("exome" or "genome")
+/// - contig: string (chr-prefixed)
 /// - xpos: int64
 /// - position: int32
 /// - pvalue: float64
@@ -328,6 +329,7 @@ impl<W: Write + Send> LocusVariantWriter<W> {
         let mut phenotype_builder = StringBuilder::new();
         let mut ancestry_builder = StringBuilder::new();
         let mut sequencing_type_builder = StringBuilder::new();
+        let mut contig_builder = StringBuilder::new();
         let mut xpos_builder = Int64Builder::new();
         let mut position_builder = Int32Builder::new();
         let mut pvalue_builder = Float64Builder::new();
@@ -339,6 +341,7 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             phenotype_builder.append_value(&row.phenotype);
             ancestry_builder.append_value(&row.ancestry);
             sequencing_type_builder.append_value(&row.sequencing_type);
+            contig_builder.append_value(&row.contig);
             xpos_builder.append_value(row.xpos);
             position_builder.append_value(row.position);
             pvalue_builder.append_value(row.pvalue);
@@ -351,6 +354,7 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             Arc::new(phenotype_builder.finish()),
             Arc::new(ancestry_builder.finish()),
             Arc::new(sequencing_type_builder.finish()),
+            Arc::new(contig_builder.finish()),
             Arc::new(xpos_builder.finish()),
             Arc::new(position_builder.finish()),
             Arc::new(pvalue_builder.finish()),
@@ -370,6 +374,7 @@ pub fn locus_variant_schema() -> Schema {
         Field::new("phenotype", DataType::Utf8, false),
         Field::new("ancestry", DataType::Utf8, false),
         Field::new("sequencing_type", DataType::Utf8, false),
+        Field::new("contig", DataType::Utf8, false),
         Field::new("xpos", DataType::Int64, false),
         Field::new("position", DataType::Int32, false),
         Field::new("pvalue", DataType::Float64, false),
@@ -447,6 +452,7 @@ mod tests {
                 phenotype: "height".to_string(),
                 ancestry: "meta".to_string(),
                 sequencing_type: "exome".to_string(),
+                contig: "chr1".to_string(),
                 xpos: 1_000_150_000,
                 position: 150000,
                 pvalue: 1e-10,
@@ -461,6 +467,7 @@ mod tests {
                 phenotype: "height".to_string(),
                 ancestry: "meta".to_string(),
                 sequencing_type: "genome".to_string(),
+                contig: "chr1".to_string(),
                 xpos: 1_000_160_000,
                 position: 160000,
                 pvalue: 1e-5,

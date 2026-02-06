@@ -377,6 +377,8 @@ pub struct LocusVariantRow {
     pub ancestry: String,
     /// Sequencing type ("exome" or "genome")
     pub sequencing_type: String,
+    /// Chromosome (chr-prefixed)
+    pub contig: String,
     /// Pre-computed xpos
     pub xpos: i64,
     /// Position (1-based)
