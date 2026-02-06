@@ -2643,6 +2643,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             })?;
 
         let spec = ManhattanSpec {
+            // Identity metadata - None for single mode, extracted from output path by coordinator
+            phenotype: None,
+            ancestry: None,
             exome,
             exome_annotations,
             genome,

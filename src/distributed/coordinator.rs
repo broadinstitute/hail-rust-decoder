@@ -864,8 +864,16 @@ fn get_batch_work(
             source_name, partitions, worker_id, phenotype_id, &task_id[..8]
         );
 
-        // Build ManhattanScanSpec
+        // Build ManhattanScanSpec with identity metadata
+        // Extract phenotype and ancestry from the original spec, with fallbacks
+        let phenotype = state.original_spec.phenotype.clone()
+            .unwrap_or_else(|| phenotype_id.clone());
+        let ancestry = state.original_spec.ancestry.clone()
+            .unwrap_or_else(|| "unknown".to_string());
+
         let scan_spec = ManhattanScanSpec {
+            phenotype,
+            ancestry,
             source,
             table_path,
             output_path: state.original_spec.output_path.clone(),
@@ -1098,8 +1106,24 @@ fn get_manhattan_work(
                 source_name, partitions, worker_id
             );
 
-            // Build ManhattanScanSpec
+            // Build ManhattanScanSpec with identity metadata
+            // For single mode, extract phenotype from output path if not set
+            let phenotype = manhattan.original_spec.phenotype.clone()
+                .unwrap_or_else(|| {
+                    // Extract last segment of output path as phenotype ID
+                    manhattan.original_spec.output_path
+                        .trim_end_matches('/')
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string()
+                });
+            let ancestry = manhattan.original_spec.ancestry.clone()
+                .unwrap_or_else(|| "unknown".to_string());
+
             let scan_spec = ManhattanScanSpec {
+                phenotype,
+                ancestry,
                 source,
                 table_path,
                 output_path: manhattan.original_spec.output_path.clone(),

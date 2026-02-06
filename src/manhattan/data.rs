@@ -302,7 +302,16 @@ pub struct ManifestStats {
 /// This is the flat schema used for partition-level sig.parquet files.
 #[derive(Debug, Clone)]
 pub struct SigHitRow {
-    /// Chromosome (e.g., "1", "X")
+    // Identity fields (for ClickHouse partitioning)
+    /// Phenotype identifier
+    pub phenotype: String,
+    /// Ancestry group (e.g., "meta", "EUR", "AFR")
+    pub ancestry: String,
+    /// Sequencing type ("exome" or "genome")
+    pub sequencing_type: String,
+
+    // Variant key fields
+    /// Chromosome (chr-prefixed, e.g., "chr1", "chrX")
     pub contig: String,
     /// Position (1-based)
     pub position: i32,
@@ -310,6 +319,10 @@ pub struct SigHitRow {
     pub ref_allele: String,
     /// Alternate allele
     pub alt_allele: String,
+    /// Pre-computed xpos for efficient ordering (contig_num * 1e9 + position)
+    pub xpos: i64,
+
+    // Association stats
     /// P-value
     pub pvalue: f64,
     /// Effect size (beta)
@@ -318,4 +331,60 @@ pub struct SigHitRow {
     pub se: Option<f64>,
     /// Allele frequency
     pub af: Option<f64>,
+}
+
+/// A locus definition row for the loci.parquet file.
+/// This captures the metadata for each significant locus region.
+#[derive(Debug, Clone)]
+pub struct LocusDefinitionRow {
+    /// Unique locus identifier (e.g., "chr6_32000000_34000000")
+    pub locus_id: String,
+    /// Phenotype identifier
+    pub phenotype: String,
+    /// Ancestry group
+    pub ancestry: String,
+    /// Chromosome (chr-prefixed)
+    pub contig: String,
+    /// Region start position
+    pub start: i32,
+    /// Region end position
+    pub stop: i32,
+    /// xpos for start position
+    pub xstart: i64,
+    /// xpos for end position
+    pub xstop: i64,
+    /// Source of the lead signal ("exome", "genome", or "both")
+    pub source: String,
+    /// Lead variant ID (e.g., "chr2:21234567:A:G")
+    pub lead_variant: String,
+    /// Lead variant p-value
+    pub lead_pvalue: f64,
+    /// Count of exome variants in this locus
+    pub exome_count: u32,
+    /// Count of genome variants in this locus
+    pub genome_count: u32,
+}
+
+/// A locus variant row for the loci_variants.parquet file.
+/// This captures all variants within a locus region.
+#[derive(Debug, Clone)]
+pub struct LocusVariantRow {
+    /// Locus identifier (links to LocusDefinitionRow)
+    pub locus_id: String,
+    /// Phenotype identifier
+    pub phenotype: String,
+    /// Ancestry group
+    pub ancestry: String,
+    /// Sequencing type ("exome" or "genome")
+    pub sequencing_type: String,
+    /// Pre-computed xpos
+    pub xpos: i64,
+    /// Position (1-based)
+    pub position: i32,
+    /// P-value
+    pub pvalue: f64,
+    /// -log10(pvalue) for plotting
+    pub neg_log10_p: f32,
+    /// Whether this variant is significant (p < threshold)
+    pub is_significant: bool,
 }

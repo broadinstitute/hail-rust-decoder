@@ -142,6 +142,14 @@ fn default_threshold() -> f64 {
 /// Matches the fields in `PipelineConfig` from `src/manhattan/pipeline.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManhattanSpec {
+    // Identity metadata (for ClickHouse partitioning)
+    /// Phenotype identifier (e.g., analysis ID)
+    #[serde(default)]
+    pub phenotype: Option<String>,
+    /// Ancestry group (e.g., "meta", "EUR", "AFR")
+    #[serde(default)]
+    pub ancestry: Option<String>,
+
     // Data inputs
     /// Path to Exome results table
     #[serde(default)]
@@ -247,6 +255,12 @@ pub enum ManhattanSource {
 /// - Significant hits Parquet (variants below threshold)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManhattanScanSpec {
+    // Identity metadata (for significant hits Parquet)
+    /// Phenotype identifier
+    pub phenotype: String,
+    /// Ancestry group
+    pub ancestry: String,
+
     /// Which data source this scan is for
     pub source: ManhattanSource,
     /// Path to the results table (exome or genome)

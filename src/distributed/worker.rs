@@ -1097,6 +1097,7 @@ fn process_manhattan_scan_v2(
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
     use crate::io::{is_cloud_path, StreamingCloudWriter};
     use crate::manhattan::data::{extract_plot_data, SigHitRow};
+    use crate::manhattan::reference::{calculate_xpos, normalize_contig_name};
     use crate::manhattan::render::ManhattanRenderer;
     use crate::manhattan::sig_writer::SigHitWriter;
     use rayon::prelude::*;
@@ -1106,6 +1107,9 @@ fn process_manhattan_scan_v2(
         ManhattanSource::Exome => "exome",
         ManhattanSource::Genome => "genome",
     };
+
+    // Get sequencing_type string for SigHitRow
+    let sequencing_type = source_name.to_string();
 
     println!(
         "Processing {} partitions for Manhattan scan ({})...",
@@ -1121,6 +1125,8 @@ fn process_manhattan_scan_v2(
     let height = spec.height;
     let threshold = spec.threshold;
     let y_field = &spec.y_field;
+    let phenotype = &spec.phenotype;
+    let ancestry = &spec.ancestry;
 
     // Update telemetry with first partition
     if let Some(ref ts) = telemetry {
@@ -1148,17 +1154,17 @@ fn process_manhattan_scan_v2(
                 rows += 1;
 
                 if let Some(point) = extract_plot_data(&row, y_field) {
-                    // Normalize contig name (strip "chr" prefix)
-                    let contig_name = if point.contig.starts_with("chr") {
+                    // For layout lookups, strip "chr" prefix if present
+                    let contig_for_layout = if point.contig.starts_with("chr") {
                         &point.contig[3..]
                     } else {
                         &point.contig
                     };
 
                     // Map to pixel coordinates and render
-                    if let Some(x) = layout.get_x(contig_name, point.position) {
+                    if let Some(x) = layout.get_x(contig_for_layout, point.position) {
                         let y = y_scale.get_y(point.neg_log10_p);
-                        let color = layout.get_color(contig_name);
+                        let color = layout.get_color(contig_for_layout);
                         renderer.render_point(x, y, color, 0.6);
                     }
 
@@ -1168,11 +1174,20 @@ fn process_manhattan_scan_v2(
                         let (ref_allele, alt_allele, beta, se, af) =
                             extract_sig_hit_fields(&row);
 
+                        // Normalize contig to chr-prefixed format for output
+                        let contig_normalized = normalize_contig_name(&point.contig);
+                        // Calculate xpos for efficient ordering
+                        let xpos = calculate_xpos(&point.contig, point.position);
+
                         sig_hits.push(SigHitRow {
-                            contig: contig_name.to_string(),
+                            phenotype: phenotype.clone(),
+                            ancestry: ancestry.clone(),
+                            sequencing_type: sequencing_type.clone(),
+                            contig: contig_normalized,
                             position: point.position,
                             ref_allele,
                             alt_allele,
+                            xpos,
                             pvalue: point.pvalue,
                             beta,
                             se,

@@ -198,6 +198,10 @@ pub fn create_specs(inputs: Vec<PhenotypeInput>, config: &BatchConfig) -> Vec<Ma
             );
 
             ManhattanSpec {
+                // Identity metadata (for ClickHouse ingestion)
+                phenotype: Some(input.id.clone()),
+                ancestry: Some(input.ancestry.clone()),
+
                 exome: input.exome_path,
                 exome_annotations: config.exome_annotations.clone(),
                 genome: input.genome_path,
@@ -318,6 +322,9 @@ mod tests {
         assert_eq!(specs[0].output_path, "gs://bucket/output/meta/1001");
         assert_eq!(specs[0].exome, Some("gs://bucket/exome.ht".to_string()));
         assert_eq!(specs[0].genome, Some("gs://bucket/genome.ht".to_string()));
+        // Verify identity metadata is set
+        assert_eq!(specs[0].phenotype, Some("1001".to_string()));
+        assert_eq!(specs[0].ancestry, Some("meta".to_string()));
     }
 
     #[test]

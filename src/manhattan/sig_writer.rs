@@ -5,7 +5,7 @@
 
 use crate::error::Result;
 use crate::manhattan::data::SigHitRow;
-use arrow::array::{ArrayRef, Float64Builder, Int32Builder, StringBuilder};
+use arrow::array::{ArrayRef, Float64Builder, Int32Builder, Int64Builder, StringBuilder};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -17,7 +17,11 @@ use std::sync::Arc;
 /// A writer for significant hit rows during the scan phase.
 ///
 /// Buffers rows and writes them as Parquet with a flat schema:
-/// - contig: string
+/// - phenotype: string (identity)
+/// - ancestry: string (identity)
+/// - sequencing_type: string (identity: "exome" or "genome")
+/// - xpos: int64 (pre-computed for efficient ordering)
+/// - contig: string (chr-prefixed)
 /// - position: int32
 /// - ref: string
 /// - alt: string
@@ -123,20 +127,38 @@ impl<W: Write + Send> SigHitWriter<W> {
 
     /// Build a RecordBatch from the buffered rows.
     fn build_batch(&self) -> Result<RecordBatch> {
+        // Identity fields
+        let mut phenotype_builder = StringBuilder::new();
+        let mut ancestry_builder = StringBuilder::new();
+        let mut sequencing_type_builder = StringBuilder::new();
+
+        // Variant key fields
+        let mut xpos_builder = Int64Builder::new();
         let mut contig_builder = StringBuilder::new();
         let mut position_builder = Int32Builder::new();
         let mut ref_builder = StringBuilder::new();
         let mut alt_builder = StringBuilder::new();
+
+        // Association stats
         let mut pvalue_builder = Float64Builder::new();
         let mut beta_builder = Float64Builder::new();
         let mut se_builder = Float64Builder::new();
         let mut af_builder = Float64Builder::new();
 
         for row in &self.buffer {
+            // Identity fields
+            phenotype_builder.append_value(&row.phenotype);
+            ancestry_builder.append_value(&row.ancestry);
+            sequencing_type_builder.append_value(&row.sequencing_type);
+
+            // Variant key fields
+            xpos_builder.append_value(row.xpos);
             contig_builder.append_value(&row.contig);
             position_builder.append_value(row.position);
             ref_builder.append_value(&row.ref_allele);
             alt_builder.append_value(&row.alt_allele);
+
+            // Association stats
             pvalue_builder.append_value(row.pvalue);
 
             match row.beta {
@@ -154,10 +176,17 @@ impl<W: Write + Send> SigHitWriter<W> {
         }
 
         let columns: Vec<ArrayRef> = vec![
+            // Identity fields
+            Arc::new(phenotype_builder.finish()),
+            Arc::new(ancestry_builder.finish()),
+            Arc::new(sequencing_type_builder.finish()),
+            // Variant key fields
+            Arc::new(xpos_builder.finish()),
             Arc::new(contig_builder.finish()),
             Arc::new(position_builder.finish()),
             Arc::new(ref_builder.finish()),
             Arc::new(alt_builder.finish()),
+            // Association stats
             Arc::new(pvalue_builder.finish()),
             Arc::new(beta_builder.finish()),
             Arc::new(se_builder.finish()),
@@ -172,10 +201,17 @@ impl<W: Write + Send> SigHitWriter<W> {
 /// Create the Arrow schema for significant hit rows.
 pub fn sig_hit_schema() -> Schema {
     Schema::new(vec![
+        // Identity fields (for ClickHouse partitioning)
+        Field::new("phenotype", DataType::Utf8, false),
+        Field::new("ancestry", DataType::Utf8, false),
+        Field::new("sequencing_type", DataType::Utf8, false),
+        // Variant key fields
+        Field::new("xpos", DataType::Int64, false),
         Field::new("contig", DataType::Utf8, false),
         Field::new("position", DataType::Int32, false),
         Field::new("ref", DataType::Utf8, false),
         Field::new("alt", DataType::Utf8, false),
+        // Association stats
         Field::new("pvalue", DataType::Float64, false),
         Field::new("beta", DataType::Float64, true),
         Field::new("se", DataType::Float64, true),
@@ -197,10 +233,14 @@ mod tests {
 
         writer
             .write(SigHitRow {
-                contig: "1".to_string(),
+                phenotype: "height".to_string(),
+                ancestry: "meta".to_string(),
+                sequencing_type: "exome".to_string(),
+                contig: "chr1".to_string(),
                 position: 12345,
                 ref_allele: "A".to_string(),
                 alt_allele: "G".to_string(),
+                xpos: 1_000_012_345,
                 pvalue: 1e-10,
                 beta: Some(0.5),
                 se: Some(0.1),
@@ -210,10 +250,14 @@ mod tests {
 
         writer
             .write(SigHitRow {
-                contig: "2".to_string(),
+                phenotype: "height".to_string(),
+                ancestry: "meta".to_string(),
+                sequencing_type: "genome".to_string(),
+                contig: "chr2".to_string(),
                 position: 67890,
                 ref_allele: "C".to_string(),
                 alt_allele: "T".to_string(),
+                xpos: 2_000_067_890,
                 pvalue: 5e-9,
                 beta: None,
                 se: None,
