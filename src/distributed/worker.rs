@@ -550,8 +550,8 @@ fn dispatch_job(
             Ok((rows, None, engine))
         }
         JobSpec::ManhattanAggregate(spec) => {
-            let rows = process_manhattan_aggregate(spec)?;
-            Ok((rows, None, None))
+            let (rows, summary) = process_manhattan_aggregate(spec)?;
+            Ok((rows, Some(summary), None))
         }
         JobSpec::ManhattanAggregateBatch { specs } => {
             use rayon::prelude::*;
@@ -562,17 +562,26 @@ fn dispatch_job(
             // This allows nested parallelism:
             // - Top level: parallel phenotypes
             // - Inner level: parallel locus plots (within process_manhattan_aggregate)
-            let results: Vec<Result<usize>> = specs.par_iter()
+            let results: Vec<Result<(usize, serde_json::Value)>> = specs.par_iter()
                 .map(|spec| process_manhattan_aggregate(spec))
                 .collect();
 
-            // Sum rows and check for errors
+            // Sum rows and collect summaries
             let mut total_rows = 0;
+            let mut summaries = Vec::new();
+
             for res in results {
-                total_rows += res?;
+                let (rows, summary) = res?;
+                total_rows += rows;
+                summaries.push(summary);
             }
 
-            Ok((total_rows, None, None))
+            // Combine summaries into a wrapper
+            let combined_summary = serde_json::json!({
+                "batch_results": summaries
+            });
+
+            Ok((total_rows, Some(combined_summary), None))
         }
         JobSpec::Loci(spec) => {
             let rows = process_loci(spec)?;
@@ -1298,10 +1307,10 @@ fn extract_sig_hit_fields(row: &crate::codec::EncodedValue) -> (String, String, 
 /// 6. Verifies outputs and writes to checkpoint
 fn process_manhattan_aggregate(
     spec: &ManhattanAggregateSpec,
-) -> Result<usize> {
+) -> Result<(usize, serde_json::Value)> {
     use crate::manhattan::aggregate::run_aggregation;
 
-    let rows = run_aggregation(spec)?;
+    let (rows, summary) = run_aggregation(spec)?;
 
     // Verify expected outputs exist and write to checkpoint
     if let Err(e) = verify_and_checkpoint(spec) {
@@ -1309,7 +1318,7 @@ fn process_manhattan_aggregate(
         eprintln!("Warning: checkpoint update failed: {}", e);
     }
 
-    Ok(rows)
+    Ok((rows, summary))
 }
 
 /// Verify expected outputs exist and append to checkpoint file.

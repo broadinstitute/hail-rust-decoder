@@ -41,6 +41,36 @@ pub enum JobSpec {
     Loci(LociSpec),
 }
 
+/// Progress stats for batch Manhattan jobs (multi-phenotype mode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardBatchProgress {
+    pub total: usize,
+    pub queued: usize,
+    pub active_scan: usize,
+    pub active_aggregate: usize,
+    pub completed: usize,
+    pub failed: usize,
+}
+
+/// Status of a single phenotype in a batch job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhenotypeStatus {
+    pub id: String,
+    /// Stage: "queued", "scanning", "aggregating", "completed", "failed"
+    pub stage: String,
+    pub partitions_done: usize,
+    pub partitions_total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+/// Response containing status of all phenotypes in a batch.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BatchStatusResponse {
+    pub phenotypes: Vec<PhenotypeStatus>,
+}
+
 /// Configuration for distributed locus plot generation (coordinator-level).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LociSpec {
@@ -524,6 +554,9 @@ pub struct DashboardSummary {
     /// Last error message (if any task failed)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Batch progress stats (for batch Manhattan jobs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_progress: Option<DashboardBatchProgress>,
 }
 
 /// Request to submit a new job to an idle coordinator.

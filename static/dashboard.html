@@ -289,6 +289,77 @@
 
   .no-data { text-align: center; color: var(--text-dim); padding: 40px; font-size: 12px; }
 
+  /* Batch progress section */
+  .batch-section { margin-bottom: 12px; }
+  .batch-section.hidden { display: none; }
+  .batch-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 900px) { .batch-stats-grid { grid-template-columns: repeat(3, 1fr); } }
+  .batch-stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+    text-align: center;
+  }
+  .batch-stat-label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+  .batch-stat-value { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .batch-stat-value.total { color: var(--text); }
+  .batch-stat-value.queued { color: var(--text-dim); }
+  .batch-stat-value.scanning { color: var(--cyan); }
+  .batch-stat-value.aggregating { color: var(--yellow); }
+  .batch-stat-value.completed { color: var(--green); }
+  .batch-stat-value.failed { color: var(--red); }
+
+  /* Phenotype list */
+  .phenotype-list {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .phenotype-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .phenotype-item:last-child { border-bottom: none; }
+  .phenotype-id {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--accent);
+  }
+  .phenotype-progress {
+    width: 80px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    text-align: right;
+  }
+  .phenotype-stage {
+    width: 80px;
+    text-align: center;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+  .phenotype-stage.queued { background: rgba(125,133,144,0.15); color: var(--text-dim); }
+  .phenotype-stage.scanning { background: rgba(57,197,207,0.15); color: var(--cyan); }
+  .phenotype-stage.aggregating { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .phenotype-stage.completed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .phenotype-stage.failed { background: rgba(248,81,73,0.15); color: var(--red); }
+
   /* Idle overlay */
   .idle-overlay {
     position: fixed;
@@ -385,6 +456,40 @@
     <div class="stat-card">
       <div class="stat-label">Partitions</div>
       <div class="stat-value" id="total-partitions">0</div>
+    </div>
+  </div>
+
+  <!-- Batch progress section (shown for batch jobs only) -->
+  <div class="batch-section hidden" id="batch-section">
+    <h2>Batch Progress (Phenotypes)</h2>
+    <div class="batch-stats-grid">
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Total</div>
+        <div class="batch-stat-value total" id="batch-total">0</div>
+      </div>
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Queued</div>
+        <div class="batch-stat-value queued" id="batch-queued">0</div>
+      </div>
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Scanning</div>
+        <div class="batch-stat-value scanning" id="batch-scanning">0</div>
+      </div>
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Aggregating</div>
+        <div class="batch-stat-value aggregating" id="batch-aggregating">0</div>
+      </div>
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Completed</div>
+        <div class="batch-stat-value completed" id="batch-completed">0</div>
+      </div>
+      <div class="batch-stat-card">
+        <div class="batch-stat-label">Failed</div>
+        <div class="batch-stat-value failed" id="batch-failed">0</div>
+      </div>
+    </div>
+    <div class="phenotype-list" id="phenotype-list">
+      <div class="no-data">Loading phenotypes...</div>
     </div>
   </div>
 
@@ -704,6 +809,9 @@ async function update() {
       if (spec.type === 'Manhattan') {
         jobType = '🗻 MANHATTAN';
         outputPath = spec.output_path || '--';
+      } else if (spec.type === 'ManhattanBatch') {
+        jobType = '🗻 MANHATTAN BATCH';
+        outputPath = spec.specs && spec.specs[0] ? spec.specs[0].output_path : '--';
       } else if (spec.type === 'ManhattanScan') {
         jobType = '🗻 MANHATTAN (Scan Phase)';
         outputPath = spec.output_path || '--';
@@ -733,6 +841,60 @@ async function update() {
       document.getElementById('error-message').textContent = summary.last_error;
     } else {
       errorSection.classList.add('hidden');
+    }
+
+    // Batch progress section (for batch Manhattan jobs)
+    const batchSection = document.getElementById('batch-section');
+    if (summary.batch_progress) {
+      batchSection.classList.remove('hidden');
+      const bp = summary.batch_progress;
+      document.getElementById('batch-total').textContent = bp.total;
+      document.getElementById('batch-queued').textContent = bp.queued;
+      document.getElementById('batch-scanning').textContent = bp.active_scan;
+      document.getElementById('batch-aggregating').textContent = bp.active_aggregate;
+      document.getElementById('batch-completed').textContent = bp.completed;
+      document.getElementById('batch-failed').textContent = bp.failed;
+
+      // Fetch detailed phenotype list
+      try {
+        const batchData = await fetchJSON('/api/dashboard/batch');
+        const phenoList = document.getElementById('phenotype-list');
+        if (batchData.phenotypes && batchData.phenotypes.length > 0) {
+          // Sort: in-progress first, then completed, then queued
+          const sortOrder = { 'scanning': 0, 'aggregating': 1, 'failed': 2, 'completed': 3, 'queued': 4 };
+          const sorted = [...batchData.phenotypes].sort((a, b) => {
+            const ao = sortOrder[a.stage] ?? 5;
+            const bo = sortOrder[b.stage] ?? 5;
+            return ao - bo;
+          });
+
+          // Show only top 50 to avoid DOM bloat
+          const displayed = sorted.slice(0, 50);
+          phenoList.innerHTML = displayed.map(p => {
+            const shortId = p.id.split('/').slice(-2).join('/'); // Show last 2 path parts
+            const progress = p.partitions_total > 0
+              ? `${p.partitions_done}/${p.partitions_total}`
+              : '--';
+            return `
+              <div class="phenotype-item">
+                <span class="phenotype-id" title="${p.id}">${shortId}</span>
+                <span class="phenotype-progress">${progress}</span>
+                <span class="phenotype-stage ${p.stage}">${p.stage}</span>
+              </div>
+            `;
+          }).join('');
+
+          if (batchData.phenotypes.length > 50) {
+            phenoList.innerHTML += `<div class="phenotype-item" style="justify-content:center;color:var(--text-dim)">...and ${batchData.phenotypes.length - 50} more</div>`;
+          }
+        } else {
+          phenoList.innerHTML = '<div class="no-data">No phenotypes yet</div>';
+        }
+      } catch (err) {
+        console.error('Failed to fetch batch data:', err);
+      }
+    } else {
+      batchSection.classList.add('hidden');
     }
 
     // Worker cards

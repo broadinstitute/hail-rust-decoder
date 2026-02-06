@@ -101,7 +101,8 @@ fn update_manifest_with_loci(output_base: &str, loci: &[ManifestLocus]) -> Resul
 /// Run the Manhattan aggregation phase.
 ///
 /// This is called by the worker when assigned a ManhattanAggregate job.
-pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
+/// Returns (row_count, summary_json) where summary_json contains stats about the aggregation.
+pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_json::Value)> {
     use crate::io::is_cloud_path;
 
     let start = Instant::now();
@@ -248,7 +249,16 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
         aggregate_duration
     );
 
-    Ok((exome_count + genome_count) as usize)
+    // Build summary for return
+    let summary = serde_json::json!({
+        "phenotype": extract_phenotype_name(output_base),
+        "exome_sig_count": exome_sig_count,
+        "genome_sig_count": genome_sig_count,
+        "total_loci": loci.len(),
+        "aggregate_duration_sec": aggregate_duration,
+    });
+
+    Ok(((exome_count + genome_count) as usize, summary))
 }
 
 /// Composite partial PNGs for a source (exome or genome).

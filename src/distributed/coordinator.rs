@@ -9,11 +9,12 @@
 //! A background task monitors for timed-out workers and reschedules their work.
 
 use crate::distributed::message::{
-    CancelRequest, CancelResponse, CompleteRequest, CompleteResponse, DashboardMetrics,
-    DashboardSummary, DashboardWorker, ExportMetricsRequest, ExportMetricsResponse,
-    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, JobResultResponse,
-    JobSpec, ManhattanAggregateSpec, ManhattanScanSpec, ManhattanSource, ManhattanSpec,
-    StatusResponse, TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
+    BatchStatusResponse, CancelRequest, CancelResponse, CompleteRequest, CompleteResponse,
+    DashboardBatchProgress, DashboardMetrics, DashboardSummary, DashboardWorker,
+    ExportMetricsRequest, ExportMetricsResponse, HeartbeatRequest, HeartbeatResponse,
+    JobConfigRequest, JobConfigResponse, JobResultResponse, JobSpec, ManhattanAggregateSpec,
+    ManhattanScanSpec, ManhattanSource, ManhattanSpec, PhenotypeStatus, StatusResponse,
+    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::Result;
@@ -122,6 +123,9 @@ enum ActiveTask {
 /// State for managing a batch of Manhattan phenotypes.
 #[derive(Debug)]
 struct BatchState {
+    /// Tracking status for all phenotypes (for dashboard)
+    phenotype_statuses: HashMap<String, PhenotypeStatus>,
+
     /// Phenotypes waiting to be activated (lazy loading)
     pending_queue: VecDeque<ManhattanSpec>,
     /// Currently active phenotypes: phenotype_id -> pipeline state
@@ -533,6 +537,7 @@ pub async fn run_coordinator(
         .route("/api/dashboard/summary", get(get_dashboard_summary))
         .route("/api/dashboard/workers", get(get_dashboard_workers))
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
+        .route("/api/dashboard/batch", get(get_batch_status))
         .route("/api/job", post(submit_job))
         .route("/api/cancel", post(cancel_job))
         .route("/api/result", get(get_job_result))
@@ -676,6 +681,11 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
                 phenotype_id
             );
             batch.failed_count += 1;
+            // Update status to failed
+            if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
+                status.stage = "failed".to_string();
+                status.error = Some("No partition counts set".to_string());
+            }
             continue;
         }
 
@@ -683,6 +693,12 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
             "Activating phenotype {} ({} exome, {} genome partitions)",
             phenotype_id, exome_partitions, genome_partitions
         );
+
+        // Update status tracking
+        if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
+            status.stage = "scanning".to_string();
+            status.partitions_total = exome_partitions + genome_partitions;
+        }
 
         // Initialize the pipeline state
         let pipeline_state = ManhattanPipelineState {
@@ -736,6 +752,13 @@ fn get_batch_work(
         let aggregate_specs: Vec<ManhattanAggregateSpec> = specs_to_aggregate.into_iter().map(|(_, spec)| spec).collect();
 
         let task_id = Uuid::new_v4().to_string();
+
+        // Update status for all phenotypes in this batch
+        for pid in &phenotype_ids {
+            if let Some(status) = batch.phenotype_statuses.get_mut(pid) {
+                status.stage = "aggregating".to_string();
+            }
+        }
 
         // Track this task
         data.active_tasks.insert(
@@ -859,9 +882,12 @@ fn get_batch_work(
     }
 
     // Step 4: Check if batch is complete
+    // Must verify all phenotypes are actually done, not just that queues are empty
+    // (queues can be empty while aggregate tasks are still in-flight with workers)
     let all_done = batch.pending_queue.is_empty()
         && batch.active_phenotypes.is_empty()
-        && batch.ready_to_aggregate.is_empty();
+        && batch.ready_to_aggregate.is_empty()
+        && (batch.completed_count + batch.failed_count) == batch.total_phenotypes;
 
     if all_done {
         println!(
@@ -1277,6 +1303,11 @@ fn complete_batch_work(
                 }
             }
 
+            // Update status partitions count
+            if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
+                status.partitions_done = state.exome_completed.len() + state.genome_completed.len();
+            }
+
             // Check if scan phase is complete for this phenotype
             let exome_done = state.exome_completed.len() == state.exome_total_partitions;
             let genome_done = state.genome_completed.len() == state.genome_total_partitions;
@@ -1339,9 +1370,40 @@ fn complete_batch_work(
         }
 
         ActiveTask::AggregateBatch { phenotype_ids } => {
+            // Extract individual summaries if available
+            let results_map: HashMap<String, serde_json::Value> =
+                if let Some(ref json) = req.result_json {
+                    if let Some(results_array) = json.get("batch_results").and_then(|v| v.as_array())
+                    {
+                        // Results array corresponds to phenotype_ids order
+                        if results_array.len() == phenotype_ids.len() {
+                            phenotype_ids
+                                .iter()
+                                .zip(results_array.iter())
+                                .map(|(id, res)| (id.clone(), res.clone()))
+                                .collect()
+                        } else {
+                            HashMap::new()
+                        }
+                    } else {
+                        HashMap::new()
+                    }
+                } else {
+                    HashMap::new()
+                };
+
             // Aggregate batch completed - mark all phenotypes as done
             for phenotype_id in phenotype_ids {
                 batch.completed_count += 1;
+
+                // Update status
+                if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
+                    status.stage = "completed".to_string();
+                    if let Some(res) = results_map.get(&phenotype_id) {
+                        status.result = Some(res.clone());
+                    }
+                }
+
                 // Clean up retry tracking
                 batch.aggregate_specs.remove(&phenotype_id);
                 batch.aggregate_retry_counts.remove(&phenotype_id);
@@ -1737,7 +1799,25 @@ async fn submit_job(
             BATCH_ACTIVE_LIMIT
         );
 
+        // Initialize status map for all phenotypes
+        let mut phenotype_statuses = HashMap::new();
+        for spec in specs {
+            let id = spec.output_path.clone();
+            phenotype_statuses.insert(
+                id.clone(),
+                PhenotypeStatus {
+                    id,
+                    stage: "queued".to_string(),
+                    partitions_done: 0,
+                    partitions_total: 0, // Updated when activated
+                    result: None,
+                    error: None,
+                },
+            );
+        }
+
         data.batch_state = Some(BatchState {
+            phenotype_statuses,
             pending_queue: specs.iter().cloned().collect(),
             active_phenotypes: HashMap::new(),
             ready_to_aggregate: Vec::new(),
@@ -1977,6 +2057,27 @@ async fn get_dashboard_summary(
         None
     };
 
+    // Compute batch progress if in batch mode
+    let batch_progress = if let Some(ref batch) = data.batch_state {
+        // Count phenotypes in each aggregation state
+        let in_aggregate = batch
+            .phenotype_statuses
+            .values()
+            .filter(|s| s.stage == "aggregating")
+            .count();
+
+        Some(DashboardBatchProgress {
+            total: batch.total_phenotypes,
+            queued: batch.pending_queue.len(),
+            active_scan: batch.active_phenotypes.len(),
+            active_aggregate: in_aggregate,
+            completed: batch.completed_count,
+            failed: batch.failed_count,
+        })
+    } else {
+        None
+    };
+
     axum::Json(DashboardSummary {
         progress_percent,
         total_partitions: total,
@@ -1993,6 +2094,7 @@ async fn get_dashboard_summary(
         job_spec: data.config.job_spec.clone(),
         idle: data.idle,
         last_error: data.last_error.clone(),
+        batch_progress,
     })
 }
 
@@ -2052,6 +2154,22 @@ async fn get_dashboard_metrics(
         .collect();
 
     axum::Json(DashboardMetrics { workers })
+}
+
+/// Handler for GET /api/dashboard/batch - get status of batch phenotypes.
+async fn get_batch_status(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<BatchStatusResponse> {
+    let data = state.lock().unwrap();
+    let phenotypes = if let Some(ref batch) = data.batch_state {
+        let mut list: Vec<PhenotypeStatus> = batch.phenotype_statuses.values().cloned().collect();
+        // Sort by ID for stability
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        list
+    } else {
+        Vec::new()
+    };
+    axum::Json(BatchStatusResponse { phenotypes })
 }
 
 /// Handler for GET /dashboard - serve the embedded dashboard HTML.
