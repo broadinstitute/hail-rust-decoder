@@ -427,6 +427,11 @@ pub struct ManhattanArgs {
     #[arg(long, default_value = "2.5e-6")]
     pub gene_threshold: f64,
 
+    /// Filter gene burden results to specific max_MAF value (e.g., 0.001).
+    /// If not specified, all MAF levels are exported.
+    #[arg(long)]
+    pub gene_maf_filter: Option<f64>,
+
     /// P-value threshold to buffer variants for locus plots (default: 0.01)
     #[arg(long, default_value = "0.01")]
     pub locus_threshold: f64,

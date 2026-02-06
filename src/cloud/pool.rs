@@ -2712,6 +2712,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             genome_annotations,
             gene_burden,
             genes,
+            exome_exp_p: None,  // Not supported in single-job CLI mode
+            genome_exp_p: None, // Not supported in single-job CLI mode
             threshold,
             gene_threshold,
             locus_threshold,

@@ -4,11 +4,14 @@
 //! - Gene definitions loaded from gnomAD/GENCODE Hail tables
 //! - Gene burden table processing for gene-level Manhattan plots
 //! - Identification of significant regions of interest
+//! - Parquet export for ClickHouse ingestion
 
 use crate::codec::EncodedValue;
-use crate::manhattan::data::PlotPoint;
+use crate::io::{is_cloud_path, StreamingCloudWriter};
+use crate::manhattan::data::{GeneAssociationRow, GenePlotPoint, PlotPoint};
+use crate::manhattan::gene_writer::GeneAssociationWriter;
 use crate::manhattan::layout::{ChromosomeLayout, YScale};
-use crate::manhattan::reference::get_contig_lengths;
+use crate::manhattan::reference::{calculate_xpos, get_contig_lengths, normalize_contig_name};
 use crate::manhattan::render::ManhattanRenderer;
 use crate::query::{IntervalList, QueryEngine};
 use crate::Result;
@@ -413,4 +416,605 @@ pub fn process_complex_gene_burden(
 
     regions.optimize();
     Ok((significant_genes, regions))
+}
+
+// =============================================================================
+// Gene Burden Parquet Export and Manhattan Rendering
+// =============================================================================
+
+/// Result of scanning a gene burden table to Parquet.
+pub struct GeneScanResult {
+    /// Total number of rows written to Parquet (all annotation × MAF combinations)
+    pub total_rows: usize,
+    /// Genes with at least one test passing the significance threshold
+    pub significant_genes: Vec<SignificantGene>,
+    /// Plot points (one per gene, using best p-value) for Manhattan rendering
+    pub plot_points: Vec<GenePlotPoint>,
+}
+
+/// Internal tracker for gene-level statistics during scanning.
+struct GeneTracker {
+    symbol: String,
+    contig: String,
+    start: i32,
+    end: i32,
+    best_pvalue: f64,
+    best_test_desc: String,
+    sig_tests: Vec<SignificantTest>,
+}
+
+/// Scan a gene burden table, export ALL rows to Parquet, and collect plotting data.
+///
+/// This function:
+/// 1. Streams all rows from the gene_results.ht table
+/// 2. Writes every row to Parquet (full export for ClickHouse ingestion)
+/// 3. Tracks the best p-value per gene (for Manhattan rendering)
+/// 4. Collects genes where best_pvalue < gene_threshold (for locus regions)
+///
+/// # Arguments
+/// * `path` - Path to the gene burden Hail table
+/// * `phenotype` - Phenotype identifier for the Parquet output
+/// * `ancestry` - Ancestry group (e.g., "meta", "EUR")
+/// * `output_path` - Path to write the Parquet file (local or cloud)
+/// * `gene_threshold` - P-value threshold for significance tracking
+/// * `maf_filter` - Optional: only export rows with this max_MAF value
+///
+/// # Returns
+/// A `GeneScanResult` containing row count, significant genes, and plot points.
+pub fn scan_gene_burden_to_parquet(
+    path: &str,
+    phenotype: &str,
+    ancestry: &str,
+    output_path: &str,
+    gene_threshold: f64,
+    maf_filter: Option<f64>,
+) -> Result<GeneScanResult> {
+    let engine = QueryEngine::open_path(path)?;
+
+    // Initialize writer based on output path type
+    let mut writer: Box<dyn GeneWriterTrait> = if is_cloud_path(output_path) {
+        let cloud_writer = StreamingCloudWriter::new(output_path)?;
+        Box::new(CloudGeneWriter {
+            writer: GeneAssociationWriter::from_writer(cloud_writer)?,
+        })
+    } else {
+        Box::new(LocalGeneWriter {
+            writer: GeneAssociationWriter::new(output_path)?,
+        })
+    };
+
+    let iter = engine.query_iter(&[])?;
+    let mut total_rows = 0;
+
+    // Tracking for significance and plotting (keyed by gene_id)
+    let mut gene_tracking: HashMap<String, GeneTracker> = HashMap::new();
+
+    for row_res in iter {
+        let row = row_res?;
+        if let EncodedValue::Struct(fields) = row {
+            // Helper closures for field extraction
+            let get_str = |k: &str| -> Option<String> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.as_string())
+            };
+            let get_f64 = |k: &str| -> Option<f64> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| encoded_as_f64(v))
+            };
+            #[allow(dead_code)]
+            let _get_i32 = |k: &str| -> Option<i32> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.as_i32())
+            };
+            let get_i64 = |k: &str| -> Option<i64> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.as_i64())
+            };
+
+            // Extract key fields
+            let gene_id = get_str("gene_id").unwrap_or_default();
+            let gene_symbol = get_str("gene_symbol").unwrap_or_default();
+            let annotation = get_str("annotation").unwrap_or_default();
+            let max_maf = get_f64("max_MAF").unwrap_or(0.0);
+
+            // Apply MAF filter if specified
+            if let Some(filter_maf) = maf_filter {
+                if (max_maf - filter_maf).abs() > 1e-9 {
+                    continue;
+                }
+            }
+
+            // Extract p-values and stats
+            let pvalue = get_f64("Pvalue");
+            let pvalue_burden = get_f64("Pvalue_Burden");
+            let pvalue_skat = get_f64("Pvalue_SKAT");
+            let beta_burden = get_f64("BETA_Burden");
+            let mac = get_i64("MAC");
+
+            // Extract location - try interval first, then CHR/POS
+            let (contig, start, end) = extract_gene_location(&fields);
+
+            // Build and write the row
+            let row_out = GeneAssociationRow {
+                gene_id: gene_id.clone(),
+                gene_symbol: gene_symbol.clone(),
+                annotation: annotation.clone(),
+                max_maf,
+                phenotype: phenotype.to_string(),
+                ancestry: ancestry.to_string(),
+                pvalue,
+                pvalue_burden,
+                pvalue_skat,
+                beta_burden,
+                mac,
+                contig: normalize_contig_name(&contig),
+                gene_start_position: start,
+                xpos: calculate_xpos(&contig, start),
+            };
+
+            writer.write(row_out)?;
+            total_rows += 1;
+
+            // Track best p-value per gene for plotting
+            let mut min_p = 1.0;
+            let mut best_field = "";
+
+            if let Some(p) = pvalue {
+                if p > 0.0 && p.is_finite() && p < min_p {
+                    min_p = p;
+                    best_field = "Pvalue";
+                }
+            }
+            if let Some(p) = pvalue_burden {
+                if p > 0.0 && p.is_finite() && p < min_p {
+                    min_p = p;
+                    best_field = "Pvalue_Burden";
+                }
+            }
+            if let Some(p) = pvalue_skat {
+                if p > 0.0 && p.is_finite() && p < min_p {
+                    min_p = p;
+                    best_field = "Pvalue_SKAT";
+                }
+            }
+
+            if min_p < 1.0 {
+                let tracker = gene_tracking.entry(gene_id.clone()).or_insert(GeneTracker {
+                    symbol: gene_symbol.clone(),
+                    contig: contig.clone(),
+                    start,
+                    end,
+                    best_pvalue: 1.0,
+                    best_test_desc: String::new(),
+                    sig_tests: Vec::new(),
+                });
+
+                // Update best p-value if this is lower
+                if min_p < tracker.best_pvalue {
+                    tracker.best_pvalue = min_p;
+                    tracker.best_test_desc = format!("{}:{}:maf{:.4}", annotation, best_field, max_maf);
+                }
+
+                // Track significant tests
+                if min_p < gene_threshold {
+                    tracker.sig_tests.push(SignificantTest {
+                        annotation: annotation.clone(),
+                        max_maf,
+                        pvalue_field: best_field.to_string(),
+                        pvalue: min_p,
+                    });
+                }
+            }
+        }
+    }
+
+    // Finalize the writer
+    writer.finish()?;
+
+    // Convert tracking to results
+    let mut significant_genes = Vec::new();
+    let mut plot_points = Vec::new();
+
+    for (gene_id, tracker) in gene_tracking {
+        // Create plot point for every gene with valid p-value
+        plot_points.push(GenePlotPoint {
+            gene_id: gene_id.clone(),
+            gene_symbol: tracker.symbol.clone(),
+            contig: tracker.contig.clone(),
+            position: tracker.start,
+            best_pvalue: tracker.best_pvalue,
+            best_test: tracker.best_test_desc.clone(),
+        });
+
+        // Only include genes with significant tests in significant_genes list
+        if !tracker.sig_tests.is_empty() {
+            significant_genes.push(SignificantGene {
+                gene_id,
+                gene_symbol: tracker.symbol,
+                best_pvalue: tracker.best_pvalue,
+                best_test: tracker.best_test_desc,
+                interval: (tracker.contig, tracker.start, tracker.end),
+                plot_position: tracker.start,
+                significant_tests: tracker.sig_tests,
+            });
+        }
+    }
+
+    Ok(GeneScanResult {
+        total_rows,
+        significant_genes,
+        plot_points,
+    })
+}
+
+/// Extract gene location from row fields.
+/// Tries interval first, then falls back to CHR/POS fields.
+fn extract_gene_location(fields: &[(String, EncodedValue)]) -> (String, i32, i32) {
+    // Try to extract from interval field
+    if let Some((_, EncodedValue::Struct(ivl))) = fields.iter().find(|(n, _)| n == "interval") {
+        let mut contig = String::new();
+        let mut start = 0i32;
+        let mut end = 0i32;
+
+        // Extract start locus
+        if let Some((_, EncodedValue::Struct(s))) = ivl.iter().find(|(n, _)| n == "start") {
+            if let Some((_, EncodedValue::Binary(c))) = s.iter().find(|(n, _)| n == "contig") {
+                contig = String::from_utf8_lossy(c).to_string();
+            }
+            if let Some((_, EncodedValue::Int32(p))) = s.iter().find(|(n, _)| n == "position") {
+                start = *p;
+            }
+        }
+
+        // Extract end locus
+        if let Some((_, EncodedValue::Struct(e))) = ivl.iter().find(|(n, _)| n == "end") {
+            if let Some((_, EncodedValue::Int32(p))) = e.iter().find(|(n, _)| n == "position") {
+                end = *p;
+            }
+        }
+
+        if !contig.is_empty() && start > 0 {
+            return (contig, start, end.max(start + 1000));
+        }
+    }
+
+    // Fallback to CHR/POS fields
+    let chr = fields
+        .iter()
+        .find(|(n, _)| n == "CHR")
+        .and_then(|(_, v)| v.as_string())
+        .unwrap_or_default();
+
+    let pos = fields
+        .iter()
+        .find(|(n, _)| n == "POS")
+        .and_then(|(_, v)| v.as_i32())
+        .unwrap_or(0);
+
+    (chr, pos, pos + 1000)
+}
+
+/// Render a Manhattan plot for gene results.
+///
+/// # Arguments
+/// * `points` - Gene plot points (one per gene, using best p-value)
+/// * `width` - Image width in pixels
+/// * `height` - Image height in pixels
+/// * `threshold` - P-value threshold for significance line
+/// * `layout` - Chromosome layout for x-axis positioning
+///
+/// # Returns
+/// PNG image data as bytes.
+pub fn render_gene_manhattan(
+    points: &[GenePlotPoint],
+    width: u32,
+    height: u32,
+    threshold: f64,
+    layout: &ChromosomeLayout,
+) -> Result<Vec<u8>> {
+    let mut renderer = ManhattanRenderer::new(width, height);
+
+    // Y-Scale: cap at 30 or max value in data
+    let max_log_p = points
+        .iter()
+        .filter(|p| p.best_pvalue > 0.0 && p.best_pvalue.is_finite())
+        .map(|p| -p.best_pvalue.log10())
+        .fold(0.0f64, |a, b| a.max(b));
+
+    let y_scale = YScale::new(height, max_log_p.max(10.0).min(50.0));
+
+    // Draw threshold line
+    renderer.render_threshold_line(y_scale.threshold_y(threshold), width);
+
+    // Draw points
+    for pt in points {
+        if pt.best_pvalue <= 0.0 || !pt.best_pvalue.is_finite() {
+            continue;
+        }
+
+        // Normalize contig name (strip chr prefix for layout lookup)
+        let contig = if pt.contig.starts_with("chr") {
+            &pt.contig[3..]
+        } else {
+            &pt.contig
+        };
+
+        if let Some(x) = layout.get_x(contig, pt.position) {
+            let neg_log_p = -pt.best_pvalue.log10();
+            let y = y_scale.get_y(neg_log_p);
+            let color = layout.get_color(contig);
+
+            // Use slightly larger points for genes (0.9 vs 0.6 for variants)
+            renderer.render_point(x, y, color, 0.9);
+        }
+    }
+
+    renderer.encode_png()
+}
+
+// =============================================================================
+// Writer abstraction for local vs cloud output
+// =============================================================================
+
+/// Trait to abstract over local and cloud gene writers.
+trait GeneWriterTrait {
+    fn write(&mut self, row: GeneAssociationRow) -> Result<()>;
+    fn finish(self: Box<Self>) -> Result<usize>;
+}
+
+/// Local file writer wrapper.
+struct LocalGeneWriter {
+    writer: GeneAssociationWriter<std::fs::File>,
+}
+
+impl GeneWriterTrait for LocalGeneWriter {
+    fn write(&mut self, row: GeneAssociationRow) -> Result<()> {
+        self.writer.write(row)
+    }
+
+    fn finish(self: Box<Self>) -> Result<usize> {
+        self.writer.finish()
+    }
+}
+
+/// Cloud writer wrapper.
+struct CloudGeneWriter {
+    writer: GeneAssociationWriter<StreamingCloudWriter>,
+}
+
+impl GeneWriterTrait for CloudGeneWriter {
+    fn write(&mut self, row: GeneAssociationRow) -> Result<()> {
+        self.writer.write(row)
+    }
+
+    fn finish(self: Box<Self>) -> Result<usize> {
+        let cloud_writer = self.writer.into_inner()?;
+        let rows = cloud_writer.bytes_written(); // Approximate
+        cloud_writer.finish()?;
+        Ok(rows)
+    }
+}
+
+// =============================================================================
+// QQ Plot Data Export
+// =============================================================================
+
+use crate::manhattan::data::{QQPointRow, QQStats};
+use crate::manhattan::qq_writer::QQPointWriter;
+
+/// Result of scanning a QQ table to Parquet.
+pub struct QQScanResult {
+    /// Total number of rows written
+    pub total_rows: usize,
+    /// Lambda GC statistics from globals
+    pub stats: QQStats,
+}
+
+/// Scan a variant_exp_p table and export to Parquet for QQ plots.
+///
+/// # Arguments
+/// * `path` - Path to the variant_exp_p Hail table
+/// * `phenotype` - Phenotype identifier
+/// * `ancestry` - Ancestry group
+/// * `sequencing_type` - "exomes" or "genomes"
+/// * `output_path` - Path to write the Parquet file
+///
+/// # Returns
+/// A `QQScanResult` containing row count and lambda stats.
+pub fn scan_qq_to_parquet(
+    path: &str,
+    phenotype: &str,
+    ancestry: &str,
+    sequencing_type: &str,
+    output_path: &str,
+) -> Result<QQScanResult> {
+    let engine = QueryEngine::open_path(path)?;
+
+    // Extract lambda stats from globals
+    let stats = extract_qq_stats(&engine);
+
+    // Initialize writer
+    let mut writer: Box<dyn QQWriterTrait> = if is_cloud_path(output_path) {
+        let cloud_writer = StreamingCloudWriter::new(output_path)?;
+        Box::new(CloudQQWriter {
+            writer: QQPointWriter::from_writer(cloud_writer)?,
+        })
+    } else {
+        Box::new(LocalQQWriter {
+            writer: QQPointWriter::new(output_path)?,
+        })
+    };
+
+    let iter = engine.query_iter(&[])?;
+    let mut total_rows = 0;
+
+    for row_res in iter {
+        let row = row_res?;
+        if let EncodedValue::Struct(fields) = row {
+            // Helper closures
+            let get_str = |k: &str| -> Option<String> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.as_string())
+            };
+            let get_f64 = |k: &str| -> Option<f64> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| encoded_as_f64(v))
+            };
+            let get_i32 = |k: &str| -> Option<i32> {
+                fields
+                    .iter()
+                    .find(|(n, _)| n == k)
+                    .and_then(|(_, v)| v.as_i32())
+            };
+
+            // Extract p-values (required)
+            let pvalue_log10 = get_f64("Pvalue_log10");
+            let pvalue_expected_log10 = get_f64("Pvalue_expected_log10");
+
+            // Skip rows without valid p-values
+            let (pv_obs, pv_exp) = match (pvalue_log10, pvalue_expected_log10) {
+                (Some(obs), Some(exp)) if obs.is_finite() && exp.is_finite() => (obs, exp),
+                _ => continue,
+            };
+
+            // Extract location - try locus first, then CHR/POS
+            let (contig, position) = extract_locus_fields(&fields)
+                .unwrap_or_else(|| {
+                    let chr = get_str("CHR").unwrap_or_default();
+                    let pos = get_i32("POS").unwrap_or(0);
+                    (chr, pos)
+                });
+
+            // Extract alleles
+            let (ref_allele, alt_allele) = extract_alleles(&fields);
+
+            let row_out = QQPointRow {
+                phenotype: phenotype.to_string(),
+                ancestry: ancestry.to_string(),
+                sequencing_type: sequencing_type.to_string(),
+                contig: normalize_contig_name(&contig),
+                position,
+                ref_allele,
+                alt_allele,
+                pvalue_log10: pv_obs,
+                pvalue_expected_log10: pv_exp,
+            };
+
+            writer.write(row_out)?;
+            total_rows += 1;
+        }
+    }
+
+    writer.finish()?;
+
+    Ok(QQScanResult { total_rows, stats })
+}
+
+/// Extract locus fields from a row.
+fn extract_locus_fields(fields: &[(String, EncodedValue)]) -> Option<(String, i32)> {
+    if let Some((_, EncodedValue::Struct(locus))) = fields.iter().find(|(n, _)| n == "locus") {
+        let contig = locus
+            .iter()
+            .find(|(n, _)| n == "contig")
+            .and_then(|(_, v)| match v {
+                EncodedValue::Binary(b) => Some(String::from_utf8_lossy(b).to_string()),
+                _ => v.as_string(),
+            })?;
+        let position = locus
+            .iter()
+            .find(|(n, _)| n == "position")
+            .and_then(|(_, v)| v.as_i32())?;
+        Some((contig, position))
+    } else {
+        None
+    }
+}
+
+/// Extract ref/alt alleles from the alleles array.
+fn extract_alleles(fields: &[(String, EncodedValue)]) -> (String, String) {
+    if let Some((_, EncodedValue::Array(alleles))) = fields.iter().find(|(n, _)| n == "alleles") {
+        let ref_allele = alleles
+            .first()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let alt_allele = alleles
+            .get(1)
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        (ref_allele, alt_allele)
+    } else {
+        (String::new(), String::new())
+    }
+}
+
+/// Extract QQ statistics from table globals.
+///
+/// TODO: Implement globals reading from Hail table metadata.
+/// For now, returns empty stats - lambda values would need to be
+/// read from the globals/part-0-... file in the Hail table directory.
+fn extract_qq_stats(_engine: &QueryEngine) -> QQStats {
+    // Lambda statistics are stored in the table globals, which requires
+    // additional implementation to read. For now, return empty stats.
+    QQStats {
+        lambda_gc: None,
+        lambda_q0_5: None,
+        lambda_q0_1: None,
+        lambda_q0_01: None,
+        lambda_q0_001: None,
+    }
+}
+
+// =============================================================================
+// QQ Writer abstraction for local vs cloud output
+// =============================================================================
+
+/// Trait to abstract over local and cloud QQ writers.
+trait QQWriterTrait {
+    fn write(&mut self, row: QQPointRow) -> Result<()>;
+    fn finish(self: Box<Self>) -> Result<usize>;
+}
+
+/// Local file writer wrapper.
+struct LocalQQWriter {
+    writer: QQPointWriter<std::fs::File>,
+}
+
+impl QQWriterTrait for LocalQQWriter {
+    fn write(&mut self, row: QQPointRow) -> Result<()> {
+        self.writer.write(row)
+    }
+
+    fn finish(self: Box<Self>) -> Result<usize> {
+        self.writer.finish()
+    }
+}
+
+/// Cloud writer wrapper.
+struct CloudQQWriter {
+    writer: QQPointWriter<StreamingCloudWriter>,
+}
+
+impl QQWriterTrait for CloudQQWriter {
+    fn write(&mut self, row: QQPointRow) -> Result<()> {
+        self.writer.write(row)
+    }
+
+    fn finish(self: Box<Self>) -> Result<usize> {
+        let cloud_writer = self.writer.into_inner()?;
+        let rows = cloud_writer.bytes_written();
+        cloud_writer.finish()?;
+        Ok(rows)
+    }
 }

@@ -190,6 +190,12 @@ pub struct ManhattanSpec {
     /// Path to gnomAD genes table
     #[serde(default)]
     pub genes: Option<String>,
+    /// Path to exome expected p-values table (for QQ plots)
+    #[serde(default)]
+    pub exome_exp_p: Option<String>,
+    /// Path to genome expected p-values table (for QQ plots)
+    #[serde(default)]
+    pub genome_exp_p: Option<String>,
 
     // Thresholds
     /// P-value threshold for significant variants (default: 5e-8)
@@ -327,6 +333,12 @@ pub struct ManhattanAggregateSpec {
     /// Path to gene burden results Hail table
     #[serde(default)]
     pub gene_burden: Option<String>,
+    /// Path to exome expected p-values table (for QQ plots)
+    #[serde(default)]
+    pub exome_exp_p: Option<String>,
+    /// Path to genome expected p-values table (for QQ plots)
+    #[serde(default)]
+    pub genome_exp_p: Option<String>,
 
     // Annotation tables (original Hail tables - for locus plot annotation)
     /// Path to exome annotations Hail table

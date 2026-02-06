@@ -390,3 +390,81 @@ pub struct LocusVariantRow {
     /// Whether this variant is significant (p < threshold)
     pub is_significant: bool,
 }
+
+// =============================================================================
+// Gene Association Data Structures
+// =============================================================================
+
+/// A row in the gene associations Parquet file.
+/// Matches the ClickHouse `gene_associations` table schema.
+#[derive(Debug, Clone)]
+pub struct GeneAssociationRow {
+    // Key fields (match ClickHouse ORDER BY)
+    pub gene_id: String,
+    pub gene_symbol: String,
+    pub annotation: String,
+    pub max_maf: f64,
+    pub phenotype: String,
+    pub ancestry: String,
+
+    // Association stats
+    pub pvalue: Option<f64>,
+    pub pvalue_burden: Option<f64>,
+    pub pvalue_skat: Option<f64>,
+    pub beta_burden: Option<f64>,
+    pub mac: Option<i64>,
+
+    // Coordinates (for Manhattan + joins)
+    pub contig: String,
+    pub gene_start_position: i32,
+    /// Pre-computed xpos for efficient sorting/joining (contig_num * 1e9 + position)
+    pub xpos: i64,
+}
+
+/// A point for the gene Manhattan plot.
+/// Represents the best (lowest) p-value for a single gene across all tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenePlotPoint {
+    pub gene_id: String,
+    pub gene_symbol: String,
+    pub contig: String,
+    pub position: i32,
+    pub best_pvalue: f64,
+    /// Description of the test that produced the best p-value (e.g., "pLoF:Pvalue:0.001")
+    pub best_test: String,
+}
+
+// =============================================================================
+// QQ Plot Data Structures
+// =============================================================================
+
+/// A row in the QQ plot points Parquet file.
+/// Contains observed and expected p-values for QQ plot rendering,
+/// plus variant key fields for annotation joins.
+#[derive(Debug, Clone)]
+pub struct QQPointRow {
+    // Identity fields
+    pub phenotype: String,
+    pub ancestry: String,
+    pub sequencing_type: String,
+
+    // Variant key fields (for annotation joins)
+    pub contig: String,
+    pub position: i32,
+    pub ref_allele: String,
+    pub alt_allele: String,
+
+    // QQ plot values
+    pub pvalue_log10: f64,
+    pub pvalue_expected_log10: f64,
+}
+
+/// Lambda GC statistics extracted from QQ table globals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QQStats {
+    pub lambda_gc: Option<f64>,
+    pub lambda_q0_5: Option<f64>,
+    pub lambda_q0_1: Option<f64>,
+    pub lambda_q0_01: Option<f64>,
+    pub lambda_q0_001: Option<f64>,
+}

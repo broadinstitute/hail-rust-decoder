@@ -2152,6 +2152,7 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
             genes: args.genes.clone(),
             threshold: args.threshold,
             gene_threshold: args.gene_threshold,
+            gene_maf_filter: args.gene_maf_filter,
             locus_threshold: args.locus_threshold,
             locus_window: args.locus_window,
             locus_plots: args.locus_plots,

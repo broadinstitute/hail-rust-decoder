@@ -27,6 +27,10 @@ pub struct PhenotypeInput {
     pub exome_path: Option<String>,
     pub genome_path: Option<String>,
     pub gene_burden_path: Option<String>,
+    /// Expected p-values for exome QQ plots
+    pub exome_exp_p_path: Option<String>,
+    /// Expected p-values for genome QQ plots
+    pub genome_exp_p_path: Option<String>,
 }
 
 /// Configuration for batch generation (subset of CLI args).
@@ -145,8 +149,11 @@ pub fn load_and_group_assets(
             }
         }
 
-        // Only process variant and gene assets
-        if asset.asset_type != "variant" && asset.asset_type != "gene" {
+        // Only process variant, gene, and variant_exp_p assets
+        if asset.asset_type != "variant"
+            && asset.asset_type != "gene"
+            && asset.asset_type != "variant_exp_p"
+        {
             continue;
         }
 
@@ -158,16 +165,25 @@ pub fn load_and_group_assets(
             exome_path: None,
             genome_path: None,
             gene_burden_path: None,
+            exome_exp_p_path: None,
+            genome_exp_p_path: None,
         });
 
-        if asset.asset_type == "gene" {
-            entry.gene_burden_path = Some(asset.uri);
-        } else if asset.asset_type == "variant" {
-            match asset.sequencing_type.as_deref() {
+        match asset.asset_type.as_str() {
+            "gene" => {
+                entry.gene_burden_path = Some(asset.uri);
+            }
+            "variant" => match asset.sequencing_type.as_deref() {
                 Some("exomes") => entry.exome_path = Some(asset.uri),
                 Some("genomes") => entry.genome_path = Some(asset.uri),
-                _ => {} // Unknown sequencing type
-            }
+                _ => {}
+            },
+            "variant_exp_p" => match asset.sequencing_type.as_deref() {
+                Some("exomes") => entry.exome_exp_p_path = Some(asset.uri),
+                Some("genomes") => entry.genome_exp_p_path = Some(asset.uri),
+                _ => {}
+            },
+            _ => {}
         }
     }
 
@@ -208,6 +224,8 @@ pub fn create_specs(inputs: Vec<PhenotypeInput>, config: &BatchConfig) -> Vec<Ma
                 genome_annotations: config.genome_annotations.clone(),
                 gene_burden: input.gene_burden_path,
                 genes: config.genes_path.clone(),
+                exome_exp_p: input.exome_exp_p_path,
+                genome_exp_p: input.genome_exp_p_path,
 
                 threshold: config.threshold,
                 gene_threshold: config.gene_threshold,

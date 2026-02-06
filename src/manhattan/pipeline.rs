@@ -9,7 +9,9 @@
 
 use crate::codec::EncodedValue;
 use crate::manhattan::data::{BufferedVariant, VariantSource, SigHitRow, LocusDefinitionRow, LocusVariantRow, ManifestLocus, ManifestRegion, ManifestLocusVariants};
-use crate::manhattan::genes::{process_complex_gene_burden, GeneMap, SignificantGene};
+use crate::manhattan::genes::{
+    render_gene_manhattan, scan_gene_burden_to_parquet, GeneMap, SignificantGene,
+};
 use crate::manhattan::layout::{ChromosomeLayout, YScale};
 use crate::manhattan::sig_writer::SigHitWriter;
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
@@ -41,6 +43,7 @@ pub struct PipelineConfig {
     // Thresholds
     pub threshold: f64,
     pub gene_threshold: f64,
+    pub gene_maf_filter: Option<f64>,
     pub locus_threshold: f64,
     pub locus_window: i32,
     pub locus_plots: bool,
@@ -63,6 +66,7 @@ impl Default for PipelineConfig {
             genes: None,
             threshold: 5e-8,
             gene_threshold: 2.5e-6,
+            gene_maf_filter: None,
             locus_threshold: 0.01,
             locus_window: 1_000_000,
             locus_plots: false,
@@ -82,8 +86,8 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     let output_base = Path::new(config.output.as_deref().unwrap_or("."));
     fs::create_dir_all(output_base)?;
 
-    // 1. Load Gene Map if provided
-    let gene_map = if let Some(path) = &config.genes {
+    // 1. Load Gene Map if provided (used for locus gene tracks)
+    let _gene_map = if let Some(path) = &config.genes {
         println!("Loading genes from: {}", path);
         Some(GeneMap::load(path)?)
     } else {
@@ -93,18 +97,49 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     // 2. Process Gene Burden (if provided)
     let mut interest_regions = IntervalList::new();
     let mut sig_genes: Vec<SignificantGene> = Vec::new();
+    let mut gene_plot_points: Vec<crate::manhattan::data::GenePlotPoint> = Vec::new();
 
     if let Some(burden_path) = &config.gene_burden {
         println!("Processing gene burden: {}", burden_path);
-        let (genes, regions) = process_complex_gene_burden(burden_path, config.gene_threshold)?;
-        println!("Found {} significant genes", genes.len());
+
+        // Extract phenotype from output path
+        let phenotype = output_base
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        // Scan and export to Parquet
+        let parquet_path = output_base.join("gene_associations.parquet");
+        let scan_result = scan_gene_burden_to_parquet(
+            burden_path,
+            phenotype,
+            "meta", // Default ancestry
+            parquet_path.to_str().unwrap(),
+            config.gene_threshold,
+            config.gene_maf_filter,
+        )?;
+
+        println!(
+            "Exported {} gene rows to Parquet, found {} significant genes",
+            scan_result.total_rows,
+            scan_result.significant_genes.len()
+        );
 
         // Write significant genes JSON
-        let genes_json = serde_json::to_string_pretty(&genes)?;
+        let genes_json = serde_json::to_string_pretty(&scan_result.significant_genes)?;
         fs::write(output_base.join("significant_genes.json"), &genes_json)?;
 
-        sig_genes = genes;
-        interest_regions.merge(regions);
+        sig_genes = scan_result.significant_genes;
+        gene_plot_points = scan_result.plot_points;
+
+        // Add significant gene regions to interest regions
+        for gene in &sig_genes {
+            interest_regions.add(
+                gene.interval.0.clone(),
+                gene.interval.1,
+                gene.interval.2,
+            );
+        }
     }
 
     // Prepare Buffers
@@ -143,6 +178,19 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             "No variant tables provided".into(),
         ));
     };
+
+    // 2b. Render Gene Manhattan plot (now that we have the layout)
+    if !gene_plot_points.is_empty() {
+        println!("Rendering gene Manhattan plot ({} genes)...", gene_plot_points.len());
+        let gene_png = render_gene_manhattan(
+            &gene_plot_points,
+            config.width,
+            config.height,
+            config.gene_threshold,
+            &chrom_layout,
+        )?;
+        fs::write(output_base.join("gene_manhattan.png"), &gene_png)?;
+    }
 
     // 3. Scan Exomes (if provided) - NO annotations during main scan for speed
     if let Some(res_path) = &config.exome {

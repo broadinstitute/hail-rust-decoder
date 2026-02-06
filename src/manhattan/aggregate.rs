@@ -9,16 +9,19 @@
 
 use crate::distributed::message::ManhattanAggregateSpec;
 use crate::error::Result;
+use crate::io::is_cloud_path;
 use crate::manhattan::data::{
     LocusDefinitionRow, LocusVariantRow, Manifest, ManifestInputs, ManifestLocus,
     ManifestLocusVariants, ManifestManhattan, ManifestManhattans, ManifestRegion, ManifestSigHits,
     ManifestSignificantHits, ManifestStats, ManifestTopHit,
 };
+use crate::manhattan::genes::{render_gene_manhattan, scan_gene_burden_to_parquet, scan_qq_to_parquet};
+use crate::manhattan::layout::ChromosomeLayout;
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::data::VariantSource;
 use crate::manhattan::reference::calculate_xpos;
-use crate::query::IntervalList;
+use crate::query::{IntervalList, QueryEngine};
 use arrow::array::{Array, Float64Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -136,13 +139,146 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
     };
 
     // Step 2: Process gene burden (if provided)
-    let gene_count = if let Some(ref _gene_burden_path) = spec.gene_burden {
-        // TODO: Call process_complex_gene_burden and render gene manhattan
+    let (gene_count, _gene_sig_regions) = if let Some(ref gene_burden_path) = spec.gene_burden {
         println!("  Processing gene burden table...");
-        0u64
+
+        let phenotype = extract_phenotype_name(output_base);
+        let ancestry = "meta";
+
+        // Export to Parquet
+        let parquet_path = format!("{}/gene_associations.parquet", output_base);
+        let scan_result = scan_gene_burden_to_parquet(
+            gene_burden_path,
+            &phenotype,
+            ancestry,
+            &parquet_path,
+            spec.gene_threshold,
+            None, // No MAF filter during aggregation
+        )?;
+
+        println!(
+            "    Exported {} gene rows, {} significant genes",
+            scan_result.total_rows,
+            scan_result.significant_genes.len()
+        );
+
+        // Write significant genes JSON
+        let genes_json = serde_json::to_string_pretty(&scan_result.significant_genes)?;
+        let genes_path = format!("{}/significant_genes.json", output_base);
+        if is_cloud_path(&genes_path) {
+            use crate::io::CloudWriter;
+            use std::io::Write;
+            let mut writer = CloudWriter::new(&genes_path)?;
+            writer.write_all(genes_json.as_bytes())?;
+            writer.finish()?;
+        } else {
+            std::fs::write(&genes_path, &genes_json)?;
+        }
+
+        // Build layout from reference genome (GRCh38)
+        let contigs = crate::manhattan::reference::get_contig_lengths(
+            // Dummy engine - we just need the default contig lengths
+            &QueryEngine::open_path(gene_burden_path)?,
+        );
+        let layout = ChromosomeLayout::new(&contigs, spec.width, 4);
+
+        // Render gene Manhattan plot
+        if !scan_result.plot_points.is_empty() {
+            let gene_png = render_gene_manhattan(
+                &scan_result.plot_points,
+                spec.width,
+                spec.height,
+                spec.gene_threshold,
+                &layout,
+            )?;
+
+            let png_path = format!("{}/gene_manhattan.png", output_base);
+            if is_cloud_path(&png_path) {
+                use crate::io::CloudWriter;
+                use std::io::Write;
+                let mut writer = CloudWriter::new(&png_path)?;
+                writer.write_all(&gene_png)?;
+                writer.finish()?;
+            } else {
+                std::fs::write(&png_path, &gene_png)?;
+            }
+        }
+
+        // Collect significant gene regions for locus plots
+        let mut gene_regions = IntervalList::new();
+        for gene in &scan_result.significant_genes {
+            gene_regions.add(
+                gene.interval.0.clone(),
+                gene.interval.1,
+                gene.interval.2,
+            );
+        }
+
+        (scan_result.total_rows as u64, gene_regions)
     } else {
-        0
+        (0u64, IntervalList::new())
     };
+
+    // Step 2b: Process QQ tables (expected p-values for QQ plots)
+    let phenotype = extract_phenotype_name(output_base);
+    let ancestry = "meta"; // Default ancestry
+
+    let mut qq_stats_map = serde_json::Map::new();
+
+    if let Some(ref exome_exp_p_path) = spec.exome_exp_p {
+        println!("  Processing exome QQ table...");
+        let parquet_path = format!("{}/qq_exome.parquet", output_base);
+        match scan_qq_to_parquet(
+            exome_exp_p_path,
+            &phenotype,
+            ancestry,
+            "exomes",
+            &parquet_path,
+        ) {
+            Ok(result) => {
+                println!("    Exported {} QQ points for exome", result.total_rows);
+                qq_stats_map.insert("exome".to_string(), serde_json::to_value(&result.stats).unwrap_or_default());
+            }
+            Err(e) => {
+                eprintln!("    Warning: Failed to process exome QQ table: {}", e);
+            }
+        }
+    }
+
+    if let Some(ref genome_exp_p_path) = spec.genome_exp_p {
+        println!("  Processing genome QQ table...");
+        let parquet_path = format!("{}/qq_genome.parquet", output_base);
+        match scan_qq_to_parquet(
+            genome_exp_p_path,
+            &phenotype,
+            ancestry,
+            "genomes",
+            &parquet_path,
+        ) {
+            Ok(result) => {
+                println!("    Exported {} QQ points for genome", result.total_rows);
+                qq_stats_map.insert("genome".to_string(), serde_json::to_value(&result.stats).unwrap_or_default());
+            }
+            Err(e) => {
+                eprintln!("    Warning: Failed to process genome QQ table: {}", e);
+            }
+        }
+    }
+
+    // Write QQ stats JSON if we have any
+    if !qq_stats_map.is_empty() {
+        let qq_stats_json = serde_json::to_string_pretty(&qq_stats_map)?;
+        let stats_path = format!("{}/qq_stats.json", output_base);
+        if is_cloud_path(&stats_path) {
+            use crate::io::CloudWriter;
+            use std::io::Write;
+            let mut writer = CloudWriter::new(&stats_path)?;
+            writer.write_all(qq_stats_json.as_bytes())?;
+            writer.finish()?;
+        } else {
+            std::fs::write(&stats_path, &qq_stats_json)?;
+        }
+    }
 
     // Step 3: Merge significant hits (combined exome + genome into one file)
     println!("  Merging significant hits (combined exome + genome)...");
