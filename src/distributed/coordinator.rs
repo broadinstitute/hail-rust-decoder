@@ -125,6 +125,10 @@ enum ActiveTask {
 struct BatchState {
     /// Tracking status for all phenotypes (for dashboard)
     phenotype_statuses: HashMap<String, PhenotypeStatus>,
+    /// Start times for phenotypes (for duration calculation)
+    phenotype_start_times: HashMap<String, Instant>,
+    /// Accumulated CPU core-seconds per phenotype
+    phenotype_cpu_secs: HashMap<String, f64>,
 
     /// Phenotypes waiting to be activated (lazy loading)
     pending_queue: VecDeque<ManhattanSpec>,
@@ -695,11 +699,13 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
             phenotype_id, exome_partitions, genome_partitions
         );
 
-        // Update status tracking
+        // Update status tracking and record start time
         if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
             status.stage = "scanning".to_string();
             status.partitions_total = exome_partitions + genome_partitions;
         }
+        batch.phenotype_start_times.insert(phenotype_id.clone(), Instant::now());
+        batch.phenotype_cpu_secs.insert(phenotype_id.clone(), 0.0);
 
         // Initialize the pipeline state
         let pipeline_state = ManhattanPipelineState {
@@ -1397,20 +1403,37 @@ fn complete_batch_work(
             for phenotype_id in phenotype_ids {
                 batch.completed_count += 1;
 
+                // Calculate duration from start time
+                let duration_secs = batch
+                    .phenotype_start_times
+                    .get(&phenotype_id)
+                    .map(|start| start.elapsed().as_secs_f64());
+
+                // Get accumulated CPU core-seconds
+                let cpu_core_secs = batch.phenotype_cpu_secs.get(&phenotype_id).copied();
+
                 // Update status
                 if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
                     status.stage = "completed".to_string();
+                    status.duration_secs = duration_secs;
+                    status.cpu_core_secs = cpu_core_secs;
                     if let Some(res) = results_map.get(&phenotype_id) {
                         status.result = Some(res.clone());
                     }
                 }
 
-                // Clean up retry tracking
+                // Clean up tracking data
+                batch.phenotype_start_times.remove(&phenotype_id);
+                batch.phenotype_cpu_secs.remove(&phenotype_id);
                 batch.aggregate_specs.remove(&phenotype_id);
                 batch.aggregate_retry_counts.remove(&phenotype_id);
+
+                let duration_str = duration_secs
+                    .map(|d| format!("{:.1}s", d))
+                    .unwrap_or_else(|| "--".to_string());
                 println!(
-                    "Phenotype {} aggregate complete ({}/{})",
-                    phenotype_id, batch.completed_count, batch.total_phenotypes
+                    "Phenotype {} complete ({}/{}) [{}]",
+                    phenotype_id, batch.completed_count, batch.total_phenotypes, duration_str
                 );
             }
         }
@@ -1813,12 +1836,16 @@ async fn submit_job(
                     partitions_total: 0, // Updated when activated
                     result: None,
                     error: None,
+                    duration_secs: None,
+                    cpu_core_secs: None,
                 },
             );
         }
 
         data.batch_state = Some(BatchState {
             phenotype_statuses,
+            phenotype_start_times: HashMap::new(),
+            phenotype_cpu_secs: HashMap::new(),
             pending_queue: specs.iter().cloned().collect(),
             active_phenotypes: HashMap::new(),
             ready_to_aggregate: Vec::new(),

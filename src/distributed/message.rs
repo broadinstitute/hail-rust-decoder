@@ -63,6 +63,12 @@ pub struct PhenotypeStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// Total duration in seconds (from scan start to completion)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<f64>,
+    /// Accumulated CPU core-seconds for this phenotype
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_core_secs: Option<f64>,
 }
 
 /// Response containing status of all phenotypes in a batch.

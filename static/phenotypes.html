@@ -134,6 +134,7 @@
   .stage.failed { background: rgba(248,81,73,0.15); color: var(--red); }
 
   .progress { font-variant-numeric: tabular-nums; }
+  .duration { font-variant-numeric: tabular-nums; color: var(--text-dim); }
   .result-info { font-size: 10px; color: var(--text-dim); }
   .result-info span { margin-right: 8px; }
   .sig-count { color: var(--green); }
@@ -167,11 +168,12 @@
             <th>Phenotype</th>
             <th>Stage</th>
             <th>Progress</th>
+            <th>Duration</th>
             <th>Results</th>
           </tr>
         </thead>
         <tbody id="phenotype-table">
-          <tr><td colspan="4" class="no-data">Loading phenotypes...</td></tr>
+          <tr><td colspan="5" class="no-data">Loading phenotypes...</td></tr>
         </tbody>
       </table>
     </div>
@@ -191,7 +193,7 @@ async function fetchPhenotypes() {
   } catch (err) {
     console.error('Failed to fetch phenotypes:', err);
     document.getElementById('phenotype-table').innerHTML =
-      '<tr><td colspan="4" class="no-data">Failed to load phenotypes</td></tr>';
+      '<tr><td colspan="5" class="no-data">Failed to load phenotypes</td></tr>';
   }
 }
 
@@ -227,7 +229,7 @@ function render() {
   // Render table
   const tbody = document.getElementById('phenotype-table');
   if (filtered.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4" class="no-data">No phenotypes match filter</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="5" class="no-data">No phenotypes match filter</td></tr>';
     return;
   }
 
@@ -236,6 +238,19 @@ function render() {
     const progress = p.partitions_total > 0
       ? `${p.partitions_done} / ${p.partitions_total}`
       : '--';
+
+    // Format duration
+    let durationStr = '--';
+    if (p.duration_secs) {
+      const secs = p.duration_secs;
+      if (secs >= 3600) {
+        durationStr = `${(secs / 3600).toFixed(1)}h`;
+      } else if (secs >= 60) {
+        durationStr = `${(secs / 60).toFixed(1)}m`;
+      } else {
+        durationStr = `${secs.toFixed(0)}s`;
+      }
+    }
 
     let resultInfo = '';
     if (p.result) {
@@ -251,6 +266,7 @@ function render() {
         <td class="phenotype-id" title="${p.id}">${shortId}</td>
         <td><span class="stage ${p.stage}">${p.stage}</span></td>
         <td class="progress">${progress}</td>
+        <td class="duration">${durationStr}</td>
         <td class="result-info">${resultInfo}</td>
       </tr>
     `;
