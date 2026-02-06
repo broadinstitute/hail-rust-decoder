@@ -587,7 +587,200 @@ fn dispatch_job(
             let rows = process_loci(spec)?;
             Ok((rows, None, None))
         }
+        JobSpec::ExportClickhouse { clickhouse_url, table_name } => {
+            #[cfg(feature = "clickhouse")]
+            {
+                let (rows, engine) = process_clickhouse_export(
+                    cached_engine,
+                    partitions,
+                    input_path,
+                    clickhouse_url,
+                    table_name,
+                    telemetry,
+                )?;
+                Ok((rows, None, engine))
+            }
+            #[cfg(not(feature = "clickhouse"))]
+            {
+                let _ = (clickhouse_url, table_name); // suppress unused warning
+                Err(crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Worker binary not built with 'clickhouse' feature. Rebuild with --features clickhouse"
+                )))
+            }
+        }
     }
+}
+
+/// Process partitions and export to ClickHouse.
+///
+/// Uses chunked in-memory uploads to avoid disk space issues:
+/// - Rows are collected into chunks of CHUNK_SIZE rows
+/// - Each chunk is written to an in-memory Parquet buffer
+/// - The buffer is uploaded to ClickHouse immediately
+/// - Memory is bounded to ~CHUNK_SIZE rows per thread
+#[cfg(feature = "clickhouse")]
+fn process_clickhouse_export(
+    _cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    input_path: &str,
+    url: &str,
+    table: &str,
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    use crate::export::ClickHouseClient;
+    use rayon::prelude::*;
+
+    println!("Processing {} partitions to ClickHouse table '{}'...", partitions.len(), table);
+
+    // Clone refs for the parallel closure
+    let input_path = input_path.to_string();
+    let url = url.to_string();
+    let table = table.to_string();
+
+    // Process partitions in parallel
+    let results: Vec<Result<usize>> = partitions
+        .par_iter()
+        .map(|&partition_id| {
+            let engine = QueryEngine::open_path(&input_path)?;
+            let row_type = engine.row_type().clone();
+            let arrow_schema = Arc::new(crate::parquet::schema::create_schema(&row_type)?);
+
+            // Chunk size: ~100K rows per upload
+            // This bounds memory usage while still being efficient for ClickHouse
+            const CHUNK_SIZE: usize = 100_000;
+            const BATCH_SIZE: usize = 4096; // Internal batching for Parquet writing
+
+            let mut chunk_rows = Vec::with_capacity(CHUNK_SIZE);
+            let mut partition_rows = 0;
+            let mut chunks_uploaded = 0;
+
+            // Stream rows from partition
+            let iter = engine.scan_partition_iter(partition_id, &[])?;
+
+            // Clone telemetry and create client for this thread
+            let ts = telemetry.clone();
+            let client = ClickHouseClient::new(&url);
+
+            for row_result in iter {
+                let row = row_result?;
+                chunk_rows.push(row);
+
+                // When chunk is full, upload it
+                if chunk_rows.len() >= CHUNK_SIZE {
+                    let uploaded = upload_chunk_to_clickhouse(
+                        &client,
+                        &table,
+                        &chunk_rows,
+                        &row_type,
+                        arrow_schema.clone(),
+                        BATCH_SIZE,
+                    )?;
+
+                    partition_rows += uploaded;
+                    chunks_uploaded += 1;
+
+                    if let Some(ref t) = ts {
+                        t.total_rows.fetch_add(uploaded, Ordering::Relaxed);
+                    }
+
+                    chunk_rows.clear();
+                }
+            }
+
+            // Upload remaining rows
+            if !chunk_rows.is_empty() {
+                let uploaded = upload_chunk_to_clickhouse(
+                    &client,
+                    &table,
+                    &chunk_rows,
+                    &row_type,
+                    arrow_schema.clone(),
+                    BATCH_SIZE,
+                )?;
+
+                partition_rows += uploaded;
+                chunks_uploaded += 1;
+
+                if let Some(ref t) = ts {
+                    t.total_rows.fetch_add(uploaded, Ordering::Relaxed);
+                }
+            }
+
+            println!(
+                "  Partition {} complete: {} rows in {} chunk(s) uploaded to ClickHouse",
+                partition_id, partition_rows, chunks_uploaded
+            );
+
+            Ok(partition_rows)
+        })
+        .collect();
+
+    // Check errors
+    for result in &results {
+        if let Err(e) = result {
+            return Err(crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Partition processing failed: {}", e),
+            )));
+        }
+    }
+
+    let total: usize = results.iter().filter_map(|r| r.as_ref().ok()).sum();
+    Ok((total, None))
+}
+
+/// Upload a chunk of rows to ClickHouse as an in-memory Parquet buffer.
+///
+/// This avoids writing to disk entirely - the Parquet data is built in memory
+/// and streamed directly to ClickHouse via HTTP POST.
+#[cfg(feature = "clickhouse")]
+fn upload_chunk_to_clickhouse(
+    client: &crate::export::ClickHouseClient,
+    table: &str,
+    rows: &[crate::codec::EncodedValue],
+    row_type: &crate::codec::EncodedType,
+    arrow_schema: std::sync::Arc<arrow::datatypes::Schema>,
+    batch_size: usize,
+) -> Result<usize> {
+    use crate::parquet::InMemoryParquetWriter;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    // Write rows to in-memory Parquet buffer
+    let mut writer = InMemoryParquetWriter::new(row_type)?;
+
+    for batch_start in (0..rows.len()).step_by(batch_size) {
+        let batch_end = (batch_start + batch_size).min(rows.len());
+        let batch_rows = &rows[batch_start..batch_end];
+        let record_batch = build_record_batch(batch_rows, row_type, arrow_schema.clone())?;
+        writer.write_batch(&record_batch)?;
+    }
+
+    let parquet_bytes = writer.finish()?;
+    let row_count = rows.len();
+
+    // Upload to ClickHouse with retry logic
+    let mut attempts = 0;
+    loop {
+        match client.insert_parquet_bytes(table, parquet_bytes.clone()) {
+            Ok(_) => break,
+            Err(e) => {
+                attempts += 1;
+                if attempts >= 3 {
+                    return Err(crate::HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Failed to upload chunk to ClickHouse after 3 attempts: {}", e)
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2 * attempts as u64));
+            }
+        }
+    }
+
+    Ok(row_count)
 }
 
 /// Process a loci generation job.

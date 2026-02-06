@@ -40,7 +40,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     pub fn create(&self, config: &PoolConfig, wait: bool, skip_build: bool) -> Result<()> {
         // Build Linux binary first (needed for deployment)
         if !skip_build {
-            Self::build_linux_binary()?;
+            Self::build_linux_binary(&[])?;
         } else {
             println!("{}", "Skipping binary build (--skip-build)".dimmed());
         }
@@ -730,7 +730,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Build binary first if needed (fail fast before creating VMs)
             if !skip_build {
-                Self::build_linux_binary()?;
+                Self::build_linux_binary(&[])?;
             }
             let binary = self.locate_binary(binary_path.clone())?;
 
@@ -945,8 +945,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         skip_build: bool,
     ) -> Result<()> {
         // Build Linux binary first (unless skipped)
+        // Note: update_binary doesn't know about job features, defaulting to none.
+        // Users needing features should use pool create or manual build.
         if !skip_build {
-            Self::build_linux_binary()?;
+            Self::build_linux_binary(&[])?;
         } else {
             println!("{}", "Skipping binary build (--skip-build)".dimmed());
         }
@@ -1122,9 +1124,16 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         config: Option<&crate::cloud::ScalingConfig>,
         command: &[String],
     ) -> Result<()> {
+        // Determine required features based on command
+        let features: Vec<&str> = if command.len() >= 2 && command[0] == "export" && command[1] == "clickhouse" {
+            vec!["clickhouse"]
+        } else {
+            vec![]
+        };
+
         // Build binary if redeploying (ensures latest code is used)
         if force_redeploy {
-            Self::build_linux_binary()?;
+            Self::build_linux_binary(&features)?;
         }
 
         // Handle autoscaling
@@ -1146,7 +1155,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Build binary once (skip if already built for redeploy), then scale
             if !force_redeploy {
-                Self::build_linux_binary()?;
+                Self::build_linux_binary(&features)?;
             }
             self.scale(name, target, zone, binary_path.clone(), true, pool_config)?;
         }
@@ -2234,17 +2243,29 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     ///
     /// On macOS, uses `cargo linux` (cargo-zigbuild) to cross-compile.
     /// On Linux, uses regular `cargo build`.
-    fn build_linux_binary() -> Result<()> {
+    fn build_linux_binary(features: &[&str]) -> Result<()> {
         let is_macos = cfg!(target_os = "macos");
 
         if is_macos {
             println!("{}", "Building Linux binary (cross-compiling)...".dimmed());
 
+            // Build feature flag string if features are specified
+            let features_flag = if features.is_empty() {
+                String::new()
+            } else {
+                format!(" --features {}", features.join(","))
+            };
+
             // Use shell to set ulimit first (fixes "too many open files" during linking)
             // cargo linux is an alias for cargo-zigbuild
             // Suppress compiler warnings (already seen during local build) with RUSTFLAGS
+            let cmd = format!(
+                "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release{}",
+                features_flag
+            );
+
             let status = std::process::Command::new("sh")
-                .args(["-c", "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release"])
+                .args(["-c", &cmd])
                 .status()
                 .map_err(|e| {
                     HailError::Io(std::io::Error::new(
@@ -2282,10 +2303,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         } else {
             println!("{}", "Building release binary...".dimmed());
 
-            let status = std::process::Command::new("cargo")
-                .args(["build", "--release", "--bin", "hail-decoder"])
-                .status()
-                .map_err(HailError::Io)?;
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.args(["build", "--release", "--bin", "hail-decoder"]);
+
+            if !features.is_empty() {
+                cmd.arg("--features");
+                cmd.arg(features.join(","));
+            }
+
+            let status = cmd.status().map_err(HailError::Io)?;
 
             if !status.success() {
                 return Err(HailError::Io(std::io::Error::new(
@@ -2451,12 +2477,30 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 output_path,
                 group_by: None,
             },
+            "clickhouse" => {
+                // Format: export clickhouse <input> <url> <table>
+                // command[2] = input, command[3] = url, command[4] = table
+                if command.len() < 5 {
+                    return Err(HailError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Export clickhouse requires: export clickhouse <input> <url> <table>\n\
+                         Example: export clickhouse gs://bucket/input.ht http://clickhouse:8123 my_table",
+                    )));
+                }
+                let clickhouse_url = command[3].clone();
+                let table_name = command[4].clone();
+
+                JobSpec::ExportClickhouse {
+                    clickhouse_url,
+                    table_name,
+                }
+            },
             other => {
                 return Err(HailError::Io(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
                         "Unsupported export type for distributed mode: '{}'\n\
-                         Supported types: parquet, json",
+                         Supported types: parquet, json, clickhouse",
                         other
                     ),
                 )));

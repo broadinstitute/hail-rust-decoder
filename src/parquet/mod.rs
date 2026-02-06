@@ -14,4 +14,4 @@ pub mod schema;
 pub mod writer;
 
 pub use converter::{hail_to_parquet, hail_to_parquet_sharded, hail_to_parquet_sharded_with_metrics, hail_to_parquet_sharded_full, hail_to_parquet_with_options, hail_to_parquet_with_progress, ConversionMetadata, ConversionOptions};
-pub use writer::{build_record_batch, ParquetWriter};
+pub use writer::{build_record_batch, InMemoryParquetWriter, ParquetWriter};

@@ -39,6 +39,11 @@ pub enum JobSpec {
     ManhattanAggregateBatch { specs: Vec<ManhattanAggregateSpec> },
     /// Generate locus plots from existing Manhattan output
     Loci(LociSpec),
+    /// Export to ClickHouse (requires clickhouse feature)
+    ExportClickhouse {
+        clickhouse_url: String,
+        table_name: String,
+    },
 }
 
 /// Progress stats for batch Manhattan jobs (multi-phenotype mode).
@@ -365,6 +370,7 @@ impl JobSpec {
             JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
             JobSpec::ManhattanAggregateBatch { .. } => "manhattan aggregate batch",
             JobSpec::Loci(_) => "loci plots",
+            JobSpec::ExportClickhouse { .. } => "export clickhouse",
         }
     }
 
@@ -381,6 +387,7 @@ impl JobSpec {
             JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregateBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::Loci(spec) => Some(&spec.output_dir),
+            JobSpec::ExportClickhouse { table_name, .. } => Some(table_name),
         }
     }
 }

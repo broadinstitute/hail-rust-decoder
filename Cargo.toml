@@ -16,7 +16,7 @@ http = ["object_store/http"]
 
 # Optional commands
 validation = ["dep:jsonschema"]
-clickhouse = []  # reqwest is now always included for distributed workers
+clickhouse = ["reqwest/blocking"]  # enables blocking HTTP client for ClickHouse export
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
 benchmark = []  # sysinfo is now always included
 

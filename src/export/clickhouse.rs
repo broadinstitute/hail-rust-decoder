@@ -207,6 +207,19 @@ impl ClickHouseClient {
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
 
+        self.insert_parquet_bytes(table_name, data)
+    }
+
+    /// Insert Parquet data from bytes into a table
+    ///
+    /// This is useful for streaming uploads where the Parquet data is already in memory,
+    /// avoiding the need to write temporary files to disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - Target table name
+    /// * `data` - Parquet file contents as bytes
+    pub fn insert_parquet_bytes(&self, table_name: &str, data: Vec<u8>) -> Result<()> {
         // Build the insert URL
         let url = format!(
             "{}/?query=INSERT%20INTO%20`{}`%20FORMAT%20Parquet",

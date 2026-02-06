@@ -332,6 +332,48 @@ fn arrow_type_to_encoded(dtype: &arrow::datatypes::DataType, required: bool) -> 
     }
 }
 
+/// A Parquet writer that writes to an in-memory buffer.
+///
+/// This is useful for scenarios where you want to build Parquet data in memory
+/// and then upload it directly (e.g., to ClickHouse) without writing to disk.
+///
+/// # Example
+/// ```ignore
+/// let mut writer = InMemoryParquetWriter::new(&row_type)?;
+/// writer.write_batch(&batch)?;
+/// let bytes = writer.finish()?;
+/// // Now upload `bytes` somewhere
+/// ```
+pub struct InMemoryParquetWriter {
+    inner: ParquetWriter<std::io::Cursor<Vec<u8>>>,
+}
+
+impl InMemoryParquetWriter {
+    /// Create a new in-memory Parquet writer.
+    ///
+    /// # Arguments
+    /// * `hail_schema` - The EncodedType describing the row structure (must be a struct)
+    pub fn new(hail_schema: &EncodedType) -> Result<Self> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let inner = ParquetWriter::from_writer(cursor, hail_schema)?;
+        Ok(Self { inner })
+    }
+
+    /// Write a pre-built RecordBatch to the Parquet buffer.
+    pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.inner.write_batch(batch)
+    }
+
+    /// Finish writing and return the Parquet file contents as bytes.
+    ///
+    /// This consumes the writer. The returned bytes are a complete, valid
+    /// Parquet file that can be written to disk or uploaded to a service.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        let cursor = self.inner.into_inner()?;
+        Ok(cursor.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
