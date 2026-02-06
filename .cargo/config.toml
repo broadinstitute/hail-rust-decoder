@@ -9,21 +9,11 @@
 [build]
 rustc-wrapper = "sccache"
 
-# macOS ARM64: Homebrew DuckDB paths (for local dev with --features duckdb)
-[target.aarch64-apple-darwin]
-rustflags = ["-L", "/opt/homebrew/opt/duckdb/lib"]
-
-[target.aarch64-apple-darwin.env]
-DUCKDB_LIB_DIR = "/opt/homebrew/opt/duckdb/lib"
-DUCKDB_INCLUDE_DIR = "/opt/homebrew/opt/duckdb/include"
-
-# macOS x86_64: Homebrew DuckDB paths (Intel Macs)
-[target.x86_64-apple-darwin]
-rustflags = ["-L", "/usr/local/opt/duckdb/lib"]
-
-[target.x86_64-apple-darwin.env]
-DUCKDB_LIB_DIR = "/usr/local/opt/duckdb/lib"
-DUCKDB_INCLUDE_DIR = "/usr/local/opt/duckdb/include"
+# DuckDB paths are set via environment variables when needed, not rustflags
+# (rustflags would cause full recompile on every build)
+# For local dev with --features duckdb: brew install duckdb
+# Then set: export DUCKDB_LIB_DIR=/opt/homebrew/opt/duckdb/lib (ARM64)
+#       or: export DUCKDB_LIB_DIR=/usr/local/opt/duckdb/lib (x86_64)
 
 # Linux x86_64: mold linker settings (only used when building ON Linux)
 # When cross-compiling from macOS, zigbuild handles linking automatically

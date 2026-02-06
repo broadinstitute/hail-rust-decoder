@@ -1995,12 +1995,16 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         zone: &str,
     ) -> Result<()> {
         workers.par_iter().try_for_each(|worker| {
-            // Download binary from coordinator and install it
+            // Download binary from coordinator, install it, and restart worker process
+            // The worker process must be restarted to pick up the new binary!
             let curl_cmd = format!(
                 "curl -sL --retry 3 --retry-delay 2 http://{}:3000/api/binary -o /tmp/hail-decoder && \
                  chmod +x /tmp/hail-decoder && \
-                 sudo mv /tmp/hail-decoder /usr/local/bin/hail-decoder",
-                coordinator_ip
+                 sudo mv /tmp/hail-decoder /usr/local/bin/hail-decoder && \
+                 pkill -f 'hail-decoder service start-worker' || true && \
+                 sleep 1 && \
+                 nohup /usr/local/bin/hail-decoder service start-worker --url http://{}:3000 --worker-id {} > /tmp/worker.log 2>&1 &",
+                coordinator_ip, coordinator_ip, worker.name
             );
 
             let status = self
