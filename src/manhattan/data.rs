@@ -383,6 +383,10 @@ pub struct LocusVariantRow {
     pub xpos: i64,
     /// Position (1-based)
     pub position: i32,
+    /// Reference allele
+    pub ref_allele: String,
+    /// Alternate allele
+    pub alt_allele: String,
     /// P-value
     pub pvalue: f64,
     /// -log10(pvalue) for plotting

@@ -13,6 +13,8 @@ use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 #[derive(Clone)]
 pub struct RenderVariant {
     pub position: i32,
+    pub ref_allele: String,
+    pub alt_allele: String,
     pub pvalue: f64,
     pub source: VariantSource,
     pub is_significant: bool,
@@ -208,18 +210,24 @@ mod tests {
             // Genome background (noise)
             RenderVariant {
                 position: 110_000,
+                ref_allele: "A".to_string(),
+                alt_allele: "G".to_string(),
                 pvalue: 1e-1,
                 source: VariantSource::Genome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 120_000,
+                ref_allele: "C".to_string(),
+                alt_allele: "T".to_string(),
                 pvalue: 1e-2,
                 source: VariantSource::Genome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 130_000,
+                ref_allele: "G".to_string(),
+                alt_allele: "A".to_string(),
                 pvalue: 1e-3,
                 source: VariantSource::Genome,
                 is_significant: false,
@@ -227,6 +235,8 @@ mod tests {
             // Genome Significant Hit
             RenderVariant {
                 position: 150_000,
+                ref_allele: "T".to_string(),
+                alt_allele: "C".to_string(),
                 pvalue: 1e-9,
                 source: VariantSource::Genome,
                 is_significant: true,
@@ -234,18 +244,24 @@ mod tests {
             // Exome Signal (should appear on top of genome)
             RenderVariant {
                 position: 148_000,
+                ref_allele: "A".to_string(),
+                alt_allele: "T".to_string(),
                 pvalue: 1e-5,
                 source: VariantSource::Exome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 150_000,
+                ref_allele: "G".to_string(),
+                alt_allele: "C".to_string(),
                 pvalue: 1e-12,
                 source: VariantSource::Exome,
                 is_significant: true,
             },
             RenderVariant {
                 position: 152_000,
+                ref_allele: "C".to_string(),
+                alt_allele: "A".to_string(),
                 pvalue: 1e-6,
                 source: VariantSource::Exome,
                 is_significant: false,

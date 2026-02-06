@@ -2746,6 +2746,8 @@ fn run_locus(args: LocusArgs) -> Result<()> {
                 {
                     variants.push(RenderVariant {
                         position: pt.position,
+                        ref_allele: String::new(),
+                        alt_allele: String::new(),
                         pvalue: pt.pvalue,
                         source,
                         is_significant: pt.pvalue < threshold,

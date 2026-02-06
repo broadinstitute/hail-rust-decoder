@@ -318,6 +318,8 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             contig: contig.to_string(),
                             xpos: calculate_xpos(contig, v.position),
                             position: v.position,
+                            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+                            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
                             pvalue: v.pvalue,
                             neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
                             is_significant: v.pvalue < config.threshold,
@@ -330,6 +332,8 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             contig: contig.to_string(),
                             xpos: calculate_xpos(contig, v.position),
                             position: v.position,
+                            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+                            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
                             pvalue: v.pvalue,
                             neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
                             is_significant: v.pvalue < config.threshold,
@@ -816,6 +820,8 @@ fn render_locus_plot(
     for v in genome_variants {
         render_variants.push(RenderVariant {
             position: v.position,
+            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
             pvalue: v.pvalue,
             source: VariantSource::Genome,
             is_significant: v.pvalue < threshold,
@@ -825,6 +831,8 @@ fn render_locus_plot(
     for v in exome_variants {
         render_variants.push(RenderVariant {
             position: v.position,
+            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
             pvalue: v.pvalue,
             source: VariantSource::Exome,
             is_significant: v.pvalue < threshold,

@@ -332,6 +332,8 @@ impl<W: Write + Send> LocusVariantWriter<W> {
         let mut contig_builder = StringBuilder::new();
         let mut xpos_builder = Int64Builder::new();
         let mut position_builder = Int32Builder::new();
+        let mut ref_builder = StringBuilder::new();
+        let mut alt_builder = StringBuilder::new();
         let mut pvalue_builder = Float64Builder::new();
         let mut neg_log10_p_builder = Float32Builder::new();
         let mut is_significant_builder = BooleanBuilder::new();
@@ -344,6 +346,8 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             contig_builder.append_value(&row.contig);
             xpos_builder.append_value(row.xpos);
             position_builder.append_value(row.position);
+            ref_builder.append_value(&row.ref_allele);
+            alt_builder.append_value(&row.alt_allele);
             pvalue_builder.append_value(row.pvalue);
             neg_log10_p_builder.append_value(row.neg_log10_p);
             is_significant_builder.append_value(row.is_significant);
@@ -357,6 +361,8 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             Arc::new(contig_builder.finish()),
             Arc::new(xpos_builder.finish()),
             Arc::new(position_builder.finish()),
+            Arc::new(ref_builder.finish()),
+            Arc::new(alt_builder.finish()),
             Arc::new(pvalue_builder.finish()),
             Arc::new(neg_log10_p_builder.finish()),
             Arc::new(is_significant_builder.finish()),
@@ -377,6 +383,8 @@ pub fn locus_variant_schema() -> Schema {
         Field::new("contig", DataType::Utf8, false),
         Field::new("xpos", DataType::Int64, false),
         Field::new("position", DataType::Int32, false),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
         Field::new("pvalue", DataType::Float64, false),
         Field::new("neg_log10_p", DataType::Float32, false),
         Field::new("is_significant", DataType::Boolean, false),
@@ -455,6 +463,8 @@ mod tests {
                 contig: "chr1".to_string(),
                 xpos: 1_000_150_000,
                 position: 150000,
+                ref_allele: "A".to_string(),
+                alt_allele: "G".to_string(),
                 pvalue: 1e-10,
                 neg_log10_p: 10.0,
                 is_significant: true,
@@ -470,6 +480,8 @@ mod tests {
                 contig: "chr1".to_string(),
                 xpos: 1_000_160_000,
                 position: 160000,
+                ref_allele: "C".to_string(),
+                alt_allele: "T".to_string(),
                 pvalue: 1e-5,
                 neg_log10_p: 5.0,
                 is_significant: false,

@@ -1311,6 +1311,8 @@ fn generate_single_locus_core(
             contig: contig.to_string(),
             xpos: calculate_xpos(contig, v.position),
             position: v.position,
+            ref_allele: v.ref_allele.clone(),
+            alt_allele: v.alt_allele.clone(),
             pvalue: v.pvalue,
             neg_log10_p: if v.pvalue > 0.0 {
                 -v.pvalue.log10() as f32
@@ -1327,6 +1329,8 @@ fn generate_single_locus_core(
             contig: contig.to_string(),
             xpos: calculate_xpos(contig, v.position),
             position: v.position,
+            ref_allele: v.ref_allele.clone(),
+            alt_allele: v.alt_allele.clone(),
             pvalue: v.pvalue,
             neg_log10_p: if v.pvalue > 0.0 {
                 -v.pvalue.log10() as f32
@@ -1664,11 +1668,13 @@ fn read_locus_variants(
         row_count += 1;
         let row = row_result?;
 
-        // Extract locus and pvalue
-        if let Some((pos, pvalue)) = extract_locus_pvalue(&row) {
+        // Extract locus, pvalue, and alleles
+        if let Some((pos, pvalue, ref_allele, alt_allele)) = extract_locus_info(&row) {
             if pvalue > 0.0 && pvalue <= 1.0 && pvalue.is_finite() {
                 variants.push(RenderVariant {
                     position: pos,
+                    ref_allele,
+                    alt_allele,
                     pvalue,
                     source,
                     is_significant: pvalue < threshold,
@@ -1686,8 +1692,8 @@ fn read_locus_variants(
     Ok(variants)
 }
 
-/// Extract position and p-value from an encoded row.
-fn extract_locus_pvalue(row: &crate::codec::EncodedValue) -> Option<(i32, f64)> {
+/// Extract position, p-value, and alleles from an encoded row.
+fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<(i32, f64, String, String)> {
     use crate::codec::EncodedValue;
 
     fn get_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a EncodedValue> {
@@ -1715,7 +1721,16 @@ fn extract_locus_pvalue(row: &crate::codec::EncodedValue) -> Option<(i32, f64)> 
             _ => None,
         })?;
 
-    Some((position, pvalue))
+    // Extract alleles from the "alleles" array field
+    let (ref_allele, alt_allele) = if let Some(EncodedValue::Array(alleles)) = get_field(row, &["alleles"]) {
+        let r = alleles.first().and_then(|v| v.as_string()).unwrap_or_default();
+        let a = alleles.get(1).and_then(|v| v.as_string()).unwrap_or_default();
+        (r, a)
+    } else {
+        (String::new(), String::new())
+    };
+
+    Some((position, pvalue, ref_allele, alt_allele))
 }
 
 /// Render a locus plot and return PNG bytes.

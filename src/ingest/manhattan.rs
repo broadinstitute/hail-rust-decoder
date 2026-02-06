@@ -176,6 +176,20 @@ pub fn run_ingest_task(
         }
     }
 
+    // 5. Ingest loci variants (all variants in locus regions with ref/alt)
+    let loci_variants_path = format!("{}/loci_variants.parquet", base);
+    if file_exists(&loci_variants_path)? {
+        match ingest_loci_variants(&loci_variants_path, &client) {
+            Ok(rows) => {
+                total_rows += rows;
+                println!("  Ingested {} loci variants", rows);
+            }
+            Err(e) => {
+                eprintln!("  Warning: Failed to ingest loci variants: {}", e);
+            }
+        }
+    }
+
     println!(
         "Completed ingestion for {} ({}): {} total rows",
         phenotype_id, ancestry, total_rows
@@ -546,6 +560,38 @@ fn ingest_variants(
     }
 
     Ok(total_rows)
+}
+
+/// Ingest loci variants from parquet file into ClickHouse.
+///
+/// The loci_variants.parquet file is already fully prepared with all columns
+/// (locus_id, phenotype, ancestry, sequencing_type, contig, xpos, position,
+/// ref, alt, pvalue, neg_log10_p, is_significant), so we can upload it directly.
+fn ingest_loci_variants(
+    parquet_path: &str,
+    client: &ClickHouseClient,
+) -> Result<usize> {
+    // Read raw bytes to upload directly (file already has correct schema)
+    let data = read_file_bytes(parquet_path)?;
+    if data.is_empty() {
+        return Ok(0);
+    }
+
+    // Get row count from bytes
+    let bytes = bytes::Bytes::from(data.clone());
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes)?;
+    let reader = builder.build()?;
+    let mut row_count = 0;
+    for batch in reader {
+        row_count += batch?.num_rows();
+    }
+
+    // Upload to ClickHouse
+    client
+        .insert_parquet_bytes("loci_variants", data)
+        .map_err(|e| crate::HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+    Ok(row_count)
 }
 
 /// Read parquet file (local or cloud) into record batches.
