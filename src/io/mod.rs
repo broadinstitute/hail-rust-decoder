@@ -31,4 +31,6 @@ pub use adapter::{
     get_file_size, get_reader, is_cloud_path, join_path, range_read, read_single_block,
     BoxedReader, CloudReader, MmapReader, PrefetchingCloudReader,
 };
+#[cfg(feature = "gcp")]
+pub use adapter::get_gcs_client;
 pub use writer::{CloudWriter, OutputWriter, StreamingCloudWriter};

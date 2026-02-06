@@ -467,11 +467,7 @@ fn list_cloud_parquet_files(dir: &str, suffix: &str) -> Result<Vec<String>> {
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
             let path = url.path().trim_start_matches('/');
-            let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
-            (Arc::new(gcs), ObjPath::from(path), format!("gs://{}/", bucket))
+            (crate::io::get_gcs_client(bucket)?, ObjPath::from(path), format!("gs://{}/", bucket))
         }
         #[cfg(feature = "aws")]
         "s3" => {

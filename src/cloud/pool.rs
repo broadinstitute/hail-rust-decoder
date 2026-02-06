@@ -3051,14 +3051,7 @@ fn read_completed_checkpoint(checkpoint_path: &str) -> Result<std::collections::
                 ))
             })?;
             let path = url.path().trim_start_matches('/');
-            let store = object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| HailError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create GCS client: {}", e),
-                )))?;
-            (std::sync::Arc::new(store), ObjPath::from(path))
+            (crate::io::get_gcs_client(bucket)?, ObjPath::from(path))
         }
         scheme => {
             return Err(HailError::Io(std::io::Error::new(

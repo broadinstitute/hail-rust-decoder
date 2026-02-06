@@ -18,9 +18,10 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use object_store::path::Path as ObjPath;
 use object_store::ObjectStore;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tracing::trace;
 use url::Url;
@@ -41,6 +42,50 @@ const PREFETCH_DEPTH: usize = 4;
 pub(crate) static IO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     Runtime::new().expect("Failed to create IO runtime")
 });
+
+/// Global cache of GCS clients by bucket name.
+///
+/// Clients are thread-safe and can be shared across all readers/writers.
+/// This avoids repeated metadata token fetches on high-core VMs which can
+/// cause rate limiting errors from the GCP metadata service.
+#[cfg(feature = "gcp")]
+static GCS_CLIENT_CACHE: Lazy<Mutex<HashMap<String, Arc<dyn ObjectStore>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Get or create a GCS client for the given bucket.
+///
+/// Clients are cached and reused to avoid repeated token fetches from
+/// the metadata server. The `object_store` crate handles token refresh
+/// internally per client, so sharing clients also reduces token storms.
+///
+/// Supports `GOOGLE_APPLICATION_CREDENTIALS` environment variable for
+/// service account key files, which bypasses the metadata service entirely.
+#[cfg(feature = "gcp")]
+pub fn get_gcs_client(bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    let mut cache = GCS_CLIENT_CACHE.lock().unwrap();
+
+    if let Some(client) = cache.get(bucket) {
+        return Ok(client.clone());
+    }
+
+    // Build the GCS client, optionally using service account key file
+    let mut builder = object_store::gcp::GoogleCloudStorageBuilder::new()
+        .with_bucket_name(bucket);
+
+    // Use key file if available, otherwise fall back to metadata service
+    if let Ok(key_path) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        builder = builder.with_service_account_path(key_path);
+    }
+
+    let client: Arc<dyn ObjectStore> = Arc::new(
+        builder
+            .build()
+            .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?
+    );
+
+    cache.insert(bucket.to_string(), client.clone());
+    Ok(client)
+}
 
 /// A reader that fetches data from cloud storage in chunks
 ///
@@ -483,12 +528,7 @@ fn create_cloud_reader(url_str: &str) -> Result<BoxedReader> {
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
             let path = url.path().trim_start_matches('/');
 
-            let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
-
-            (Arc::new(gcs), ObjPath::from(path))
+            (get_gcs_client(bucket)?, ObjPath::from(path))
         }
         #[cfg(feature = "aws")]
         "s3" => {
@@ -597,11 +637,7 @@ fn range_read_cloud(url_str: &str, offset: u64, length: usize) -> Result<Vec<u8>
             let bucket = url.host_str()
                 .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
             let path = url.path().trim_start_matches('/');
-            let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
-            (Arc::new(gcs), ObjPath::from(path))
+            (get_gcs_client(bucket)?, ObjPath::from(path))
         }
         #[cfg(feature = "aws")]
         "s3" => {
@@ -679,11 +715,7 @@ pub fn get_file_size(path: &str) -> Result<u64> {
                 let bucket = url.host_str()
                     .ok_or_else(|| HailError::InvalidFormat("Missing bucket in GCS URL".to_string()))?;
                 let path = url.path().trim_start_matches('/');
-                let gcs = object_store::gcp::GoogleCloudStorageBuilder::new()
-                    .with_bucket_name(bucket)
-                    .build()
-                    .map_err(|e| HailError::InvalidFormat(format!("Failed to create GCS client: {}", e)))?;
-                (Arc::new(gcs), ObjPath::from(path))
+                (get_gcs_client(bucket)?, ObjPath::from(path))
             }
             #[cfg(feature = "aws")]
             "s3" => {

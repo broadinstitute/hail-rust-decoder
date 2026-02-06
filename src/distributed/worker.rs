@@ -1352,15 +1352,7 @@ fn verify_and_checkpoint(spec: &ManhattanAggregateSpec) -> Result<()> {
                 "Missing bucket in GCS URL",
             ))
         })?;
-        std::sync::Arc::new(
-            object_store::gcp::GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| crate::HailError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create GCS client: {}", e),
-                )))?
-        )
+        crate::io::get_gcs_client(bucket)?
     };
 
     #[cfg(not(feature = "gcp"))]
