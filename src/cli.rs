@@ -51,6 +51,9 @@ pub enum Commands {
     /// Generate Manhattan plots (PNG + JSON sidecar)
     Manhattan(ManhattanArgs),
 
+    /// Generate locus plots from existing Manhattan output directory
+    Loci(LociArgs),
+
     /// Render a LocusZoom-style scatter plot for a specific region
     Locus(LocusArgs),
 
@@ -461,6 +464,38 @@ pub struct ManhattanArgs {
     /// Output progress as JSON lines (for distributed job coordination)
     #[arg(long, hide = true)]
     pub progress_json: bool,
+}
+
+/// Arguments for generating locus plots from existing Manhattan output
+#[derive(Args, Debug)]
+pub struct LociArgs {
+    /// Path to Manhattan output directory (contains *_significant.parquet files)
+    #[arg(long)]
+    pub dir: String,
+
+    /// Path to Exome results Hail Table (for reading variants in locus regions)
+    #[arg(long)]
+    pub exome: Option<String>,
+
+    /// Path to Genome results Hail Table (for reading variants in locus regions)
+    #[arg(long)]
+    pub genome: Option<String>,
+
+    /// Window size (bp) around significant hits for locus plots (default: 1MB)
+    #[arg(long, default_value = "1000000")]
+    pub locus_window: i32,
+
+    /// P-value threshold for significant variants (default: 5e-8)
+    #[arg(long, default_value = "5e-8")]
+    pub threshold: f64,
+
+    /// P-value field name in source tables
+    #[arg(long, default_value = "Pvalue")]
+    pub y_field: String,
+
+    /// Number of parallel threads (default: 8)
+    #[arg(long, default_value = "8")]
+    pub threads: usize,
 }
 
 #[derive(Args, Debug)]

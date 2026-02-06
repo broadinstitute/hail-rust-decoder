@@ -33,6 +33,62 @@ pub enum JobSpec {
     ManhattanScan(ManhattanScanSpec),
     /// Phase 2: Single worker aggregates results, joins annotations, generates locus plots
     ManhattanAggregate(ManhattanAggregateSpec),
+    /// Generate locus plots from existing Manhattan output
+    Loci(LociSpec),
+}
+
+/// Configuration for distributed locus plot generation (coordinator-level).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LociSpec {
+    /// Path to Manhattan output directory (contains *_significant.parquet)
+    pub output_dir: String,
+    /// Path to exome results Hail table (for reading variants)
+    #[serde(default)]
+    pub exome_results: Option<String>,
+    /// Path to genome results Hail table (for reading variants)
+    #[serde(default)]
+    pub genome_results: Option<String>,
+    /// Window size around significant hits
+    #[serde(default = "default_locus_window")]
+    pub locus_window: i32,
+    /// Significance threshold
+    #[serde(default = "default_threshold")]
+    pub threshold: f64,
+}
+
+/// A locus region to generate a plot for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocusRegion {
+    pub contig: String,
+    pub start: i32,
+    pub end: i32,
+    /// Lead variant position (for manifest)
+    pub lead_position: i32,
+    /// Lead variant p-value
+    pub lead_pvalue: f64,
+    /// Source of lead variant (exome/genome)
+    pub lead_source: String,
+}
+
+/// Worker-level locus generation job (assigned subset of regions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LociWorkerSpec {
+    /// Path to Manhattan output directory
+    pub output_dir: String,
+    /// Path to exome results Hail table
+    #[serde(default)]
+    pub exome_results: Option<String>,
+    /// Path to genome results Hail table
+    #[serde(default)]
+    pub genome_results: Option<String>,
+    /// Assigned locus regions to process
+    pub regions: Vec<LocusRegion>,
+    /// Significance threshold
+    pub threshold: f64,
+}
+
+fn default_threshold() -> f64 {
+    5e-8
 }
 
 /// Configuration for a distributed Manhattan plot job.
@@ -246,6 +302,7 @@ impl JobSpec {
             JobSpec::Manhattan(_) => "manhattan plot",
             JobSpec::ManhattanScan(_) => "manhattan scan",
             JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
+            JobSpec::Loci(_) => "loci plots",
         }
     }
 
@@ -259,6 +316,7 @@ impl JobSpec {
             JobSpec::Manhattan(spec) => Some(&spec.output_path),
             JobSpec::ManhattanScan(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
+            JobSpec::Loci(spec) => Some(&spec.output_dir),
         }
     }
 }

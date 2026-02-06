@@ -533,7 +533,35 @@ fn dispatch_job(
             let rows = process_manhattan_aggregate(spec)?;
             Ok((rows, None, None))
         }
+        JobSpec::Loci(spec) => {
+            let rows = process_loci(spec)?;
+            Ok((rows, None, None))
+        }
     }
+}
+
+/// Process a loci generation job.
+fn process_loci(spec: &crate::distributed::message::LociSpec) -> Result<usize> {
+    use crate::manhattan::aggregate::generate_loci_standalone;
+
+    println!("Processing loci generation job:");
+    println!("  Output dir: {}", spec.output_dir);
+    println!("  Exome: {:?}", spec.exome_results);
+    println!("  Genome: {:?}", spec.genome_results);
+    println!("  Window: {}bp", spec.locus_window);
+    println!("  Threshold: {}", spec.threshold);
+
+    let loci = generate_loci_standalone(
+        &spec.output_dir,
+        spec.exome_results.as_deref(),
+        spec.genome_results.as_deref(),
+        spec.locus_window,
+        spec.threshold,
+        8, // threads per worker
+    )?;
+
+    println!("Generated {} locus plots", loci.len());
+    Ok(loci.len())
 }
 
 /// Parse filter strings back into KeyRanges.

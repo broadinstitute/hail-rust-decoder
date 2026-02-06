@@ -16,6 +16,7 @@ pub enum DataSource {
 }
 
 /// A variant prepared for rendering in the locus plot.
+#[derive(Clone)]
 pub struct RenderVariant {
     pub position: i32,
     pub pvalue: f64,

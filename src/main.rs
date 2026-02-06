@@ -10,7 +10,7 @@ mod cli;
 mod config;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LocusArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
+use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LociArgs, LocusArgs, ManhattanArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -49,6 +49,7 @@ fn main() -> Result<()> {
             ExportCommands::Bigquery(args) => run_export_bigquery(args)?,
         },
         Commands::Manhattan(args) => run_manhattan(args)?,
+        Commands::Loci(args) => run_loci(args)?,
         Commands::Locus(args) => run_locus(args)?,
         #[cfg(feature = "validation")]
         Commands::Schema { command } => match command {
@@ -2405,6 +2406,37 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
         "Saved:".green().bold(),
         png_path.bright_white(),
         json_path.bright_white()
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Loci generation from existing Manhattan output
+// ---------------------------------------------------------------------------
+
+fn run_loci(args: LociArgs) -> Result<()> {
+    use hail_decoder::manhattan::aggregate::generate_loci_standalone;
+
+    println!(
+        "{} locus plots from {}",
+        "Generating".green().bold(),
+        args.dir.bright_white()
+    );
+
+    let loci = generate_loci_standalone(
+        &args.dir,
+        args.exome.as_deref(),
+        args.genome.as_deref(),
+        args.locus_window,
+        args.threshold,
+        args.threads,
+    )?;
+
+    println!(
+        "{} Generated {} locus plots",
+        "Done:".green().bold(),
+        loci.len()
     );
 
     Ok(())
