@@ -487,6 +487,10 @@ pub struct ManhattanBatchArgs {
     #[arg(long, value_delimiter = ',')]
     pub analysis_ids: Option<Vec<String>>,
 
+    /// Filter to specific ancestry groups (comma-separated, e.g., "meta,eur,afr")
+    #[arg(long, value_delimiter = ',')]
+    pub ancestries: Option<Vec<String>>,
+
     /// Limit number of phenotypes to process
     #[arg(long)]
     pub limit: Option<usize>,

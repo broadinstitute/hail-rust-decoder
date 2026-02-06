@@ -2,6 +2,7 @@
 
 pub mod aggregate;
 pub mod annotate;
+pub mod batch;
 pub mod data;
 pub mod genes;
 pub mod layout;

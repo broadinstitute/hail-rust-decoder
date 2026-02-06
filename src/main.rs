@@ -2423,15 +2423,21 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
 ///
 /// Phase 1: Stub implementation - actual logic comes in Phase 3.
 fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
+    use hail_decoder::manhattan::batch::{load_and_group_assets, BatchSummary};
+
     println!(
-        "{} Manhattan batch processing",
-        "Starting".green().bold()
+        "{} Manhattan batch validation",
+        "Running".green().bold()
     );
-    println!("  Assets JSON: {}", args.assets_json);
-    println!("  Output dir: {}", args.output_dir);
+    println!("  Assets JSON: {}", args.assets_json.bright_white());
+    println!("  Output dir: {}", args.output_dir.bright_white());
 
     if let Some(ref ids) = args.analysis_ids {
         println!("  Analysis IDs filter: {:?}", ids);
+    }
+
+    if let Some(ref ancs) = args.ancestries {
+        println!("  Ancestries filter: {:?}", ancs);
     }
 
     if let Some(limit) = args.limit {
@@ -2439,15 +2445,86 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
     }
 
     println!();
+
+    // Load and group assets
+    let inputs = load_and_group_assets(
+        &args.assets_json,
+        args.analysis_ids.as_deref(),
+        args.ancestries.as_deref(),
+        args.limit,
+    )?;
+
+    if inputs.is_empty() {
+        println!(
+            "{} No phenotypes found in assets JSON",
+            "Warning:".yellow().bold()
+        );
+        println!("  Check your --analysis-ids filter or assets file content.");
+        return Ok(());
+    }
+
+    // Build summary
+    let summary = BatchSummary::from_inputs(&inputs);
+
+    println!("{}", "Batch Summary".cyan().bold());
+    println!("  {} phenotypes found", summary.total_phenotypes.to_string().bright_white());
+    println!();
+
+    // By input type
+    println!("{}", "  By Input Type:".dimmed());
+    if summary.combined > 0 {
+        println!("    Combined (exome+genome): {}", summary.combined.to_string().green());
+    }
+    if summary.exome_only > 0 {
+        println!("    Exome only:              {}", summary.exome_only.to_string().cyan());
+    }
+    if summary.genome_only > 0 {
+        println!("    Genome only:             {}", summary.genome_only.to_string().cyan());
+    }
+    if summary.gene_burden_only > 0 {
+        println!("    Gene burden only:        {}", summary.gene_burden_only.to_string().yellow());
+    }
+    println!();
+
+    // By ancestry
+    println!("{}", "  By Ancestry:".dimmed());
+    let mut ancestries: Vec<_> = summary.by_ancestry.iter().collect();
+    ancestries.sort_by_key(|(k, _)| *k);
+    for (ancestry, count) in ancestries {
+        println!("    {}: {}", ancestry.bright_white(), count);
+    }
+    println!();
+
+    // Configuration summary
+    println!("{}", "Configuration".cyan().bold());
+    println!("  Threshold: {}", format!("{:.0e}", args.threshold).bright_white());
+    println!("  Gene threshold: {}", format!("{:.1e}", args.gene_threshold).bright_white());
+    if args.locus_plots {
+        println!("  Locus plots: {}", "enabled".green());
+        println!("    Locus threshold: {}", format!("{}", args.locus_threshold).dimmed());
+        println!("    Locus window: {} bp", args.locus_window.to_string().dimmed());
+    }
+    println!("  Image size: {}x{}", args.width, args.height);
+
+    if args.genes.is_some() {
+        println!("  Genes table: {}", "specified".green());
+    }
+    if args.exome_annotations.is_some() {
+        println!("  Exome annotations: {}", "specified".green());
+    }
+    if args.genome_annotations.is_some() {
+        println!("  Genome annotations: {}", "specified".green());
+    }
+
+    println!();
+    println!("{}", "Ready for Submission".green().bold());
     println!(
-        "{}: manhattan-batch CLI is not yet implemented (Phase 3)",
-        "Note".yellow().bold()
+        "  To submit this batch to a pool, run:\n    \
+         hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
+         --assets-json {} \\\n      \
+         --output-dir {}",
+        args.assets_json, args.output_dir
     );
-    println!("This command will:");
-    println!("  1. Parse the assets JSON file");
-    println!("  2. Group entries by analysis_id + ancestry_group");
-    println!("  3. Construct ManhattanSpec for each phenotype");
-    println!("  4. Submit a ManhattanBatch job to the coordinator");
 
     Ok(())
 }

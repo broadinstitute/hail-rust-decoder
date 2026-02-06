@@ -1656,6 +1656,99 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         }
 
+        // For ManhattanBatch jobs, compute layout and partition counts for all unique tables
+        if let crate::distributed::message::JobSpec::ManhattanBatch(ref mut specs) = job_spec {
+            use crate::manhattan::layout::{ChromosomeLayout, YScale};
+            use crate::manhattan::reference::get_contig_lengths;
+            use std::collections::HashMap;
+
+            if specs.is_empty() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "ManhattanBatch has no specs",
+                )));
+            }
+
+            // Get first available width/height for layout
+            let first_spec = &specs[0];
+            let width = first_spec.width;
+            let height = first_spec.height;
+
+            // Compute layout from the first available table
+            println!("  {} Computing chromosome layout...", "Setup:".cyan());
+            let contigs = get_contig_lengths(&engine);
+            let layout = ChromosomeLayout::new(&contigs, width, 4);
+            let y_scale = YScale::new(height, 300.0);
+
+            // Collect all unique table paths
+            let mut exome_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut genome_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+            for spec in specs.iter() {
+                if let Some(ref path) = spec.exome {
+                    exome_paths.insert(path.clone());
+                }
+                if let Some(ref path) = spec.genome {
+                    genome_paths.insert(path.clone());
+                }
+            }
+
+            // Cache partition counts by path (avoid re-opening same tables)
+            let mut partition_cache: HashMap<String, usize> = HashMap::new();
+
+            println!(
+                "  {} Counting partitions for {} unique exome tables...",
+                "Setup:".cyan(),
+                exome_paths.len()
+            );
+            for path in exome_paths {
+                if let Ok(table_engine) = QueryEngine::open_path(&path) {
+                    let parts = table_engine.num_partitions();
+                    partition_cache.insert(path, parts);
+                }
+            }
+
+            println!(
+                "  {} Counting partitions for {} unique genome tables...",
+                "Setup:".cyan(),
+                genome_paths.len()
+            );
+            for path in genome_paths {
+                if let Ok(table_engine) = QueryEngine::open_path(&path) {
+                    let parts = table_engine.num_partitions();
+                    partition_cache.insert(path, parts);
+                }
+            }
+
+            // Apply layout and partition counts to all specs
+            for spec in specs.iter_mut() {
+                spec.layout = Some(layout.clone());
+                spec.y_scale = Some(y_scale.clone());
+
+                if let Some(ref exome_path) = spec.exome {
+                    if let Some(&parts) = partition_cache.get(exome_path) {
+                        spec.exome_partitions = Some(parts);
+                    }
+                }
+                if let Some(ref genome_path) = spec.genome {
+                    if let Some(&parts) = partition_cache.get(genome_path) {
+                        spec.genome_partitions = Some(parts);
+                    }
+                }
+            }
+
+            // Log summary
+            let with_exome = specs.iter().filter(|s| s.exome_partitions.is_some()).count();
+            let with_genome = specs.iter().filter(|s| s.genome_partitions.is_some()).count();
+            println!(
+                "  {} {} phenotypes ({} with exome, {} with genome partitions)",
+                "Prepared".green(),
+                specs.len(),
+                with_exome,
+                with_genome
+            );
+        }
+
         drop(engine);
 
         // Get coordinator's internal IP
@@ -2229,6 +2322,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             return Self::parse_manhattan_command(&command[1..]);
         }
 
+        // Handle 'manhattan-batch' command
+        if cmd == "manhattan-batch" {
+            return Self::parse_manhattan_batch_command(&command[1..]);
+        }
+
         // Handle 'loci' command
         if cmd == "loci" {
             return Self::parse_loci_command(&command[1..]);
@@ -2239,11 +2337,12 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Distributed mode supports: export, summary, manhattan, loci. Got: '{}'\n\
+                    "Distributed mode supports: export, summary, manhattan, manhattan-batch, loci. Got: '{}'\n\
                      Examples:\n  \
                      pool submit mypool -- export parquet gs://bucket/input.ht gs://bucket/output/\n  \
                      pool submit mypool -- summary gs://bucket/input.ht\n  \
                      pool submit mypool -- manhattan --exome gs://bucket/exome.ht --output gs://bucket/out/\n  \
+                     pool submit mypool -- manhattan-batch --assets-json ./assets.json --output-dir gs://bucket/manhattans/\n  \
                      pool submit mypool -- loci --dir gs://bucket/manhattan_output/ --exome gs://bucket/exome.ht",
                     cmd
                 ),
@@ -2513,6 +2612,236 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         };
 
         Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))
+    }
+
+    /// Parse a `manhattan-batch` command into a ManhattanBatch job.
+    ///
+    /// Supports: manhattan-batch --assets-json <path> --output-dir <path> [--analysis-ids <id,...>] ...
+    fn parse_manhattan_batch_command(
+        args: &[String],
+    ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
+        use crate::distributed::message::{JobSpec, ManhattanSpec};
+        use crate::manhattan::batch::{load_and_group_assets, create_specs, BatchConfig};
+
+        // Parse named arguments
+        let mut assets_json: Option<String> = None;
+        let mut output_dir: Option<String> = None;
+        let mut analysis_ids: Option<Vec<String>> = None;
+        let mut ancestries: Option<Vec<String>> = None;
+        let mut limit: Option<usize> = None;
+        let mut genes: Option<String> = None;
+        let mut exome_annotations: Option<String> = None;
+        let mut genome_annotations: Option<String> = None;
+        let mut threshold: f64 = 5e-8;
+        let mut gene_threshold: f64 = 2.5e-6;
+        let mut locus_threshold: f64 = 0.01;
+        let mut locus_window: i32 = 1_000_000;
+        let mut locus_plots = false;
+        let mut width: u32 = 3000;
+        let mut height: u32 = 800;
+        let mut y_field = "Pvalue".to_string();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--assets-json" => {
+                    if i + 1 < args.len() {
+                        assets_json = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--output-dir" => {
+                    if i + 1 < args.len() {
+                        output_dir = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--analysis-ids" => {
+                    if i + 1 < args.len() {
+                        let ids: Vec<String> = args[i + 1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if !ids.is_empty() {
+                            analysis_ids = Some(ids);
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--ancestries" => {
+                    if i + 1 < args.len() {
+                        let ancs: Vec<String> = args[i + 1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        if !ancs.is_empty() {
+                            ancestries = Some(ancs);
+                        }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--limit" => {
+                    if i + 1 < args.len() {
+                        limit = args[i + 1].parse().ok();
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--genes" => {
+                    if i + 1 < args.len() {
+                        genes = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--exome-annotations" => {
+                    if i + 1 < args.len() {
+                        exome_annotations = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--genome-annotations" => {
+                    if i + 1 < args.len() {
+                        genome_annotations = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--threshold" | "--variant-threshold" => {
+                    if i + 1 < args.len() {
+                        threshold = args[i + 1].parse().unwrap_or(5e-8);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--gene-threshold" => {
+                    if i + 1 < args.len() {
+                        gene_threshold = args[i + 1].parse().unwrap_or(2.5e-6);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-threshold" => {
+                    if i + 1 < args.len() {
+                        locus_threshold = args[i + 1].parse().unwrap_or(0.01);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-window" => {
+                    if i + 1 < args.len() {
+                        locus_window = args[i + 1].parse().unwrap_or(1_000_000);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--locus-plots" => {
+                    locus_plots = true;
+                    i += 1;
+                }
+                "--width" => {
+                    if i + 1 < args.len() {
+                        width = args[i + 1].parse().unwrap_or(3000);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--height" => {
+                    if i + 1 < args.len() {
+                        height = args[i + 1].parse().unwrap_or(800);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--y-field" => {
+                    if i + 1 < args.len() {
+                        y_field = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        // Validate required arguments
+        let assets_json = assets_json.ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manhattan-batch command requires --assets-json <path>",
+            ))
+        })?;
+
+        let output_dir = output_dir.ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "manhattan-batch command requires --output-dir <path>",
+            ))
+        })?;
+
+        // Load and group assets
+        let inputs = load_and_group_assets(&assets_json, analysis_ids.as_deref(), ancestries.as_deref(), limit)?;
+
+        if inputs.is_empty() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "No phenotypes found in assets JSON (check filters if specified)",
+            )));
+        }
+
+        // Create batch config
+        let config = BatchConfig {
+            output_dir,
+            threshold,
+            gene_threshold,
+            locus_threshold,
+            locus_window,
+            locus_plots,
+            width,
+            height,
+            y_field,
+            genes_path: genes,
+            exome_annotations,
+            genome_annotations,
+        };
+
+        // Convert to specs
+        let specs: Vec<ManhattanSpec> = create_specs(inputs, &config);
+
+        // For batch jobs, we need a dummy input path for the coordinator
+        // The actual tables are specified per-spec. We use the first available
+        // table path as the "primary" for any initialization the coordinator needs.
+        let primary_input = specs
+            .iter()
+            .find_map(|s| s.primary_input_path())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "batch".to_string());
+
+        Ok((primary_input, JobSpec::ManhattanBatch(specs), Vec::new(), Vec::new()))
     }
 
     /// Parse a `loci` command into a LociSpec job.
