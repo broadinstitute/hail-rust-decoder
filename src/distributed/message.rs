@@ -30,13 +30,13 @@ pub enum JobSpec {
     /// Generate Manhattan plot (high-level submission - coordinator splits into phases)
     Manhattan(ManhattanSpec),
     /// Submit a batch of Manhattan plots (coordinator queues them)
-    ManhattanBatch(Vec<ManhattanSpec>),
+    ManhattanBatch { specs: Vec<ManhattanSpec> },
     /// Phase 1: Worker scans partitions, outputs partial PNGs + sig.parquet
     ManhattanScan(ManhattanScanSpec),
     /// Phase 2: Single worker aggregates results, joins annotations, generates locus plots
     ManhattanAggregate(ManhattanAggregateSpec),
     /// Phase 2 (Batch): Worker executes multiple aggregation tasks in parallel
-    ManhattanAggregateBatch(Vec<ManhattanAggregateSpec>),
+    ManhattanAggregateBatch { specs: Vec<ManhattanAggregateSpec> },
     /// Generate locus plots from existing Manhattan output
     Loci(LociSpec),
 }
@@ -310,10 +310,10 @@ impl JobSpec {
             JobSpec::Summary => "summary",
             JobSpec::Validate { .. } => "validate",
             JobSpec::Manhattan(_) => "manhattan plot",
-            JobSpec::ManhattanBatch(_) => "manhattan batch",
+            JobSpec::ManhattanBatch { .. } => "manhattan batch",
             JobSpec::ManhattanScan(_) => "manhattan scan",
             JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
-            JobSpec::ManhattanAggregateBatch(_) => "manhattan aggregate batch",
+            JobSpec::ManhattanAggregateBatch { .. } => "manhattan aggregate batch",
             JobSpec::Loci(_) => "loci plots",
         }
     }
@@ -326,10 +326,10 @@ impl JobSpec {
             JobSpec::Summary => None,
             JobSpec::Validate { .. } => None,
             JobSpec::Manhattan(spec) => Some(&spec.output_path),
-            JobSpec::ManhattanBatch(specs) => specs.first().map(|s| s.output_path.as_str()),
+            JobSpec::ManhattanBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::ManhattanScan(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
-            JobSpec::ManhattanAggregateBatch(specs) => specs.first().map(|s| s.output_path.as_str()),
+            JobSpec::ManhattanAggregateBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::Loci(spec) => Some(&spec.output_dir),
         }
     }

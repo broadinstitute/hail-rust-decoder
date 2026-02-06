@@ -752,7 +752,7 @@ fn get_batch_work(
             task_id,
             partitions: vec![0], // Aggregate batch uses spec list, not partitions
             input_path: String::new(),
-            job_spec: JobSpec::ManhattanAggregateBatch(aggregate_specs),
+            job_spec: JobSpec::ManhattanAggregateBatch { specs: aggregate_specs },
             total_partitions: phenotype_ids.len(),
             filters: Vec::new(),
             intervals: Vec::new(),
@@ -1598,7 +1598,7 @@ async fn submit_job(
 
     // Validate request
     // ManhattanBatch jobs don't use total_partitions (they manage partitions per-phenotype)
-    let is_batch_job = matches!(&req.job_spec, JobSpec::ManhattanBatch(_));
+    let is_batch_job = matches!(&req.job_spec, JobSpec::ManhattanBatch { .. });
     if req.total_partitions == 0 && !is_batch_job {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
@@ -1654,7 +1654,7 @@ async fn submit_job(
     data.idle = false;
 
     // Handle ManhattanBatch jobs (batch scheduling mode)
-    if let JobSpec::ManhattanBatch(ref specs) = req.job_spec {
+    if let JobSpec::ManhattanBatch { specs: ref specs } = req.job_spec {
         let total_phenotypes = specs.len();
 
         // Clear standard partition tracking - batch mode uses its own

@@ -132,7 +132,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 intervals,
             } => {
                 // Build description including batch info for aggregate batch jobs
-                let desc = if let JobSpec::ManhattanAggregateBatch(specs) = &job_spec {
+                let desc = if let JobSpec::ManhattanAggregateBatch { specs } = &job_spec {
                     format!("batch of {} aggregation tasks", specs.len())
                 } else {
                     job_spec.description().to_string()
@@ -533,7 +533,7 @@ fn dispatch_job(
             )?;
             Ok((rows, None, engine))
         }
-        JobSpec::ManhattanBatch(_) => {
+        JobSpec::ManhattanBatch { .. } => {
             // ManhattanBatch is a coordinator-level job spec for submission
             // It should never be dispatched directly to workers
             Err(crate::HailError::InvalidFormat(
@@ -553,7 +553,7 @@ fn dispatch_job(
             let rows = process_manhattan_aggregate(spec)?;
             Ok((rows, None, None))
         }
-        JobSpec::ManhattanAggregateBatch(specs) => {
+        JobSpec::ManhattanAggregateBatch { specs } => {
             use rayon::prelude::*;
 
             println!("Processing batch of {} aggregation tasks...", specs.len());

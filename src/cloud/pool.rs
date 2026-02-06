@@ -1657,7 +1657,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         }
 
         // For ManhattanBatch jobs, compute layout and partition counts for all unique tables
-        if let crate::distributed::message::JobSpec::ManhattanBatch(ref mut specs) = job_spec {
+        if let crate::distributed::message::JobSpec::ManhattanBatch { specs: ref mut specs } = job_spec {
             use crate::manhattan::layout::{ChromosomeLayout, YScale};
             use crate::manhattan::reference::get_contig_lengths;
             use std::collections::HashMap;
@@ -2841,7 +2841,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "batch".to_string());
 
-        Ok((primary_input, JobSpec::ManhattanBatch(specs), Vec::new(), Vec::new()))
+        Ok((primary_input, JobSpec::ManhattanBatch { specs }, Vec::new(), Vec::new()))
     }
 
     /// Parse a `loci` command into a LociSpec job.
