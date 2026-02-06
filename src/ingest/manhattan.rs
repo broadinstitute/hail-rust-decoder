@@ -190,6 +190,36 @@ pub fn run_ingest_task(
         }
     }
 
+    // 6. Ingest gene associations (gene burden results)
+    let gene_assoc_path = format!("{}/gene_associations.parquet", base);
+    if file_exists(&gene_assoc_path)? {
+        match ingest_gene_associations(&gene_assoc_path, &client) {
+            Ok(rows) => {
+                total_rows += rows;
+                println!("  Ingested {} gene associations", rows);
+            }
+            Err(e) => {
+                eprintln!("  Warning: Failed to ingest gene associations: {}", e);
+            }
+        }
+    }
+
+    // 7. Ingest QQ plot points (exome and genome)
+    for seq_type in &["exome", "genome"] {
+        let qq_path = format!("{}/qq_{}.parquet", base, seq_type);
+        if file_exists(&qq_path)? {
+            match ingest_qq_points(&qq_path, &client) {
+                Ok(rows) => {
+                    total_rows += rows;
+                    println!("  Ingested {} {} QQ points", rows, seq_type);
+                }
+                Err(e) => {
+                    eprintln!("  Warning: Failed to ingest {} QQ points: {}", seq_type, e);
+                }
+            }
+        }
+    }
+
     println!(
         "Completed ingestion for {} ({}): {} total rows",
         phenotype_id, ancestry, total_rows
@@ -571,6 +601,43 @@ fn ingest_loci_variants(
     parquet_path: &str,
     client: &ClickHouseClient,
 ) -> Result<usize> {
+    ingest_parquet_direct(parquet_path, "loci_variants", client)
+}
+
+/// Ingest gene associations from parquet file into ClickHouse.
+///
+/// The gene_associations.parquet file is already fully prepared with all columns
+/// (gene_id, gene_symbol, annotation, max_maf, phenotype, ancestry, pvalue,
+/// pvalue_burden, pvalue_skat, beta_burden, mac, contig, gene_start_position, xpos),
+/// so we can upload it directly.
+fn ingest_gene_associations(
+    parquet_path: &str,
+    client: &ClickHouseClient,
+) -> Result<usize> {
+    ingest_parquet_direct(parquet_path, "gene_associations", client)
+}
+
+/// Ingest QQ plot points from parquet file into ClickHouse.
+///
+/// The qq_*.parquet files are already fully prepared with all columns
+/// (phenotype, ancestry, sequencing_type, contig, position, ref_allele,
+/// alt_allele, pvalue_log10, pvalue_expected_log10), so we can upload directly.
+fn ingest_qq_points(
+    parquet_path: &str,
+    client: &ClickHouseClient,
+) -> Result<usize> {
+    ingest_parquet_direct(parquet_path, "qq_points", client)
+}
+
+/// Generic helper to ingest a parquet file directly into a ClickHouse table.
+///
+/// Use this when the parquet file already has the correct schema matching
+/// the ClickHouse table - no transformation needed.
+fn ingest_parquet_direct(
+    parquet_path: &str,
+    table_name: &str,
+    client: &ClickHouseClient,
+) -> Result<usize> {
     // Read raw bytes to upload directly (file already has correct schema)
     let data = read_file_bytes(parquet_path)?;
     if data.is_empty() {
@@ -588,7 +655,7 @@ fn ingest_loci_variants(
 
     // Upload to ClickHouse
     client
-        .insert_parquet_bytes("loci_variants", data)
+        .insert_parquet_bytes(table_name, data)
         .map_err(|e| crate::HailError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     Ok(row_count)
