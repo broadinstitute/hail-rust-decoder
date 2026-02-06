@@ -241,6 +241,7 @@ pub fn create_specs(inputs: Vec<PhenotypeInput>, config: &BatchConfig) -> Vec<Ma
                 // Runtime fields (filled by coordinator)
                 layout: None,
                 y_scale: None,
+                contig_lengths: None, // Filled by coordinator
                 skip_composite: false, // Batch mode assumes we want the final output
                 exome_partitions: None,
                 genome_partitions: None,

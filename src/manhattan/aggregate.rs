@@ -17,6 +17,7 @@ use crate::manhattan::data::{
 };
 use crate::manhattan::genes::{render_gene_manhattan, scan_gene_burden_to_parquet, scan_qq_to_parquet};
 use crate::manhattan::layout::ChromosomeLayout;
+use crate::manhattan::pipeline::composite_partial_pngs;
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::data::VariantSource;
@@ -137,6 +138,59 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
     } else {
         0
     };
+
+    // Step 1b: Composite Per-Chromosome PNGs
+    println!("  Compositing per-chromosome PNGs...");
+    let chroms_dir = format!("{}/chroms", output_base);
+    let mut chrom_manhattans: HashMap<String, ManifestManhattans> = HashMap::new();
+
+    // Discover chromosomes that have outputs
+    let discovered_chroms = discover_chromosomes(&chroms_dir)?;
+    if !discovered_chroms.is_empty() {
+        println!("    Found {} chromosomes with data", discovered_chroms.len());
+    }
+
+    for chrom in discovered_chroms {
+        let mut chrom_entry = ManifestManhattans {
+            exome: None,
+            genome: None,
+            gene: None,
+        };
+        let chrom_path_base = format!("{}/{}", chroms_dir, chrom);
+        let mut has_data = false;
+
+        // Exome
+        if spec.exome_results.is_some() {
+            let exome_parts = format!("{}/exome", chrom_path_base);
+            if has_partial_pngs(&exome_parts)? {
+                let out = format!("{}/exome_manhattan.png", chrom_path_base);
+                composite_partial_pngs(&exome_parts, &out, spec.width, spec.height, 0.0)?;
+                chrom_entry.exome = Some(ManifestManhattan {
+                    png: format!("chroms/{}/exome_manhattan.png", chrom),
+                    count: 0,
+                });
+                has_data = true;
+            }
+        }
+
+        // Genome
+        if spec.genome_results.is_some() {
+            let genome_parts = format!("{}/genome", chrom_path_base);
+            if has_partial_pngs(&genome_parts)? {
+                let out = format!("{}/genome_manhattan.png", chrom_path_base);
+                composite_partial_pngs(&genome_parts, &out, spec.width, spec.height, 0.0)?;
+                chrom_entry.genome = Some(ManifestManhattan {
+                    png: format!("chroms/{}/genome_manhattan.png", chrom),
+                    count: 0,
+                });
+                has_data = true;
+            }
+        }
+
+        if has_data {
+            chrom_manhattans.insert(chrom, chrom_entry);
+        }
+    }
 
     // Step 2: Process gene burden (if provided)
     let (gene_count, _gene_sig_regions) = if let Some(ref gene_burden_path) = spec.gene_burden {
@@ -356,6 +410,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
                 None
             },
         },
+        chrom_manhattans,
         significant_hits: ManifestSignificantHits {
             // Consolidated output
             exome: if spec.exome_results.is_some() {
@@ -403,6 +458,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
     if spec.cleanup {
         println!("  Cleaning up intermediate files...");
         cleanup_intermediates(output_base)?;
+        cleanup_chrom_intermediates(output_base)?;
     }
 
     println!(
@@ -1016,6 +1072,107 @@ fn cleanup_intermediates(output_base: &str) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Discover chromosomes by listing directories in the chroms/ folder
+fn discover_chromosomes(chroms_dir: &str) -> Result<Vec<String>> {
+    if is_cloud_path(chroms_dir) {
+        let dir = chroms_dir.trim_end_matches('/');
+        // gsutil ls gs://bucket/path/chroms/ returns directories
+        let output = std::process::Command::new("gsutil")
+            .args(["ls", dir])
+            .output()
+            .map_err(|e| {
+                crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to run gsutil: {}", e),
+                ))
+            })?;
+
+        if !output.status.success() {
+            // It's okay if dir doesn't exist (no chroms found)
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let chroms: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| {
+                // line is like gs://bucket/path/chroms/chr1/
+                let trimmed = line.trim().trim_end_matches('/');
+                trimmed.rsplit('/').next().map(|s| s.to_string())
+            })
+            .collect();
+        Ok(chroms)
+    } else {
+        if !std::path::Path::new(chroms_dir).exists() {
+            return Ok(vec![]);
+        }
+
+        let mut chroms = Vec::new();
+        for entry in std::fs::read_dir(chroms_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    chroms.push(name.to_string());
+                }
+            }
+        }
+        Ok(chroms)
+    }
+}
+
+/// Check if a directory contains any partial PNGs
+fn has_partial_pngs(dir_path: &str) -> Result<bool> {
+    if is_cloud_path(dir_path) {
+        let dir = dir_path.trim_end_matches('/');
+        // Check for at least one file
+        let output = std::process::Command::new("gsutil")
+            .args(["ls", &format!("{}/part-*.png", dir)])
+            .output();
+
+        Ok(output.map(|o| o.status.success()).unwrap_or(false))
+    } else {
+        if !std::path::Path::new(dir_path).exists() {
+            return Ok(false);
+        }
+
+        for entry in std::fs::read_dir(dir_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("part-") && name.ends_with(".png") {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Cleanup intermediate files in chrom directories
+fn cleanup_chrom_intermediates(output_base: &str) -> Result<()> {
+    if is_cloud_path(output_base) {
+        println!("    Cloud cleanup of chroms not yet implemented");
+    } else {
+        let chroms_dir = format!("{}/chroms", output_base);
+        if std::path::Path::new(&chroms_dir).exists() {
+            // Walk through chroms dir and delete part-*.png files
+            for chrom_entry in std::fs::read_dir(&chroms_dir)? {
+                let chrom_entry = chrom_entry?;
+                if chrom_entry.file_type()?.is_dir() {
+                    // Each chrom has exome/ and genome/ subdirs
+                    for source in &["exome", "genome"] {
+                        let source_dir = chrom_entry.path().join(source);
+                        if source_dir.exists() {
+                            std::fs::remove_dir_all(&source_dir)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 

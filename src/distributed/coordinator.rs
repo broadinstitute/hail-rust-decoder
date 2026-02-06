@@ -187,6 +187,8 @@ struct ManhattanPipelineState {
     layout: Option<crate::manhattan::layout::ChromosomeLayout>,
     /// Pre-computed Y scale
     y_scale: Option<crate::manhattan::layout::YScale>,
+    /// Contig lengths for per-chromosome plots
+    contig_lengths: HashMap<String, u32>,
 
     // Exome scan tracking
     /// Total exome partitions
@@ -803,6 +805,7 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
             original_spec: spec.clone(),
             layout: spec.layout.clone(),
             y_scale: spec.y_scale.clone(),
+            contig_lengths: spec.contig_lengths.clone().unwrap_or_default(),
             exome_total_partitions: exome_partitions,
             exome_pending: (0..exome_partitions).collect(),
             exome_processing: HashMap::new(),
@@ -1046,6 +1049,7 @@ fn get_batch_work(
             y_scale: state.y_scale.clone().unwrap_or_default(),
             width: state.original_spec.width,
             height: state.original_spec.height,
+            contig_lengths: state.contig_lengths.clone(),
         };
 
         return axum::Json(WorkResponse::Task {
@@ -1304,6 +1308,7 @@ fn get_manhattan_work(
                 y_scale: manhattan.y_scale.clone().unwrap_or_default(),
                 width: manhattan.original_spec.width,
                 height: manhattan.original_spec.height,
+                contig_lengths: manhattan.contig_lengths.clone(),
             };
 
             axum::Json(WorkResponse::Task {
@@ -2183,6 +2188,7 @@ async fn submit_job(
             original_spec: spec.clone(),
             layout: spec.layout.clone(),
             y_scale: spec.y_scale.clone(),
+            contig_lengths: spec.contig_lengths.clone().unwrap_or_default(),
             exome_total_partitions: exome_partitions,
             exome_pending: (0..exome_partitions).collect(),
             exome_processing: HashMap::new(),

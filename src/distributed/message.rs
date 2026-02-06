@@ -3,6 +3,7 @@
 //! These messages are exchanged over HTTP as JSON.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Specification for a distributed job operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +232,10 @@ pub struct ManhattanSpec {
     #[serde(default)]
     pub y_scale: Option<crate::manhattan::layout::YScale>,
 
+    /// Contig lengths (name -> bp) for per-chromosome layout generation
+    #[serde(default)]
+    pub contig_lengths: Option<HashMap<String, u32>>,
+
     /// Skip automatic composite step (run manually later with --from-shards)
     #[serde(default)]
     pub skip_composite: bool,
@@ -308,6 +313,10 @@ pub struct ManhattanScanSpec {
     pub width: u32,
     /// Image height in pixels
     pub height: u32,
+
+    /// Contig lengths for per-chromosome layout generation
+    #[serde(default)]
+    pub contig_lengths: HashMap<String, u32>,
 }
 
 /// Phase 2: Aggregate job specification.

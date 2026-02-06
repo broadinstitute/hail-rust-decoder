@@ -23,6 +23,7 @@ use crate::query::join::{JoinedRow, SortedMergeIterator};
 use crate::query::{IntervalList, QueryEngine};
 use crate::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -445,6 +446,14 @@ fn scan_variant_table(
     let results_engine = QueryEngine::open_path(results_path)?;
     let mut renderer = ManhattanRenderer::new(config.width, config.height);
 
+    // Per-chromosome renderers/layouts for local run
+    let mut chrom_renderers: HashMap<String, ManhattanRenderer> = HashMap::new();
+    let mut chrom_layouts: HashMap<String, ChromosomeLayout> = HashMap::new();
+
+    // Build contig lengths map for per-chromosome layouts
+    let contigs = get_contig_lengths(&results_engine);
+    let contig_lengths: HashMap<String, u32> = contigs.iter().cloned().collect();
+
     // Render threshold line
     renderer.render_threshold_line(y_scale.threshold_y(config.threshold), config.width);
 
@@ -498,6 +507,11 @@ fn scan_variant_table(
                 buffer,
                 sig_writer,
                 &mut renderer,
+                &contig_lengths,
+                &mut chrom_renderers,
+                &mut chrom_layouts,
+                config.width,
+                config.height,
             );
 
             if i % 10_000 == 0 {
@@ -523,6 +537,11 @@ fn scan_variant_table(
                 buffer,
                 sig_writer,
                 &mut renderer,
+                &contig_lengths,
+                &mut chrom_renderers,
+                &mut chrom_layouts,
+                config.width,
+                config.height,
             );
 
             if i % 10_000 == 0 {
@@ -533,10 +552,29 @@ fn scan_variant_table(
 
     pb.finish_with_message("complete");
 
-    // Save Manhattan PNG
+    // Save WG Manhattan PNG
     let png_data = renderer.encode_png()?;
     fs::write(output_png, png_data)?;
     println!("Saved: {}", output_png);
+
+    // Save Per-Chromosome PNGs
+    let output_dir = Path::new(output_png).parent().unwrap();
+    let file_name = Path::new(output_png)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+
+    for (chrom, mut chrom_renderer) in chrom_renderers {
+        // Draw threshold line on per-chrom plot
+        chrom_renderer.render_threshold_line(y_scale.threshold_y(config.threshold), config.width);
+
+        let data = chrom_renderer.encode_png()?;
+        let chrom_dir = output_dir.join("chroms").join(&chrom);
+        fs::create_dir_all(&chrom_dir)?;
+        let out_path = chrom_dir.join(file_name);
+        fs::write(&out_path, data)?;
+    }
 
     Ok(())
 }
@@ -555,6 +593,12 @@ fn process_joined_row(
     buffer: &mut Vec<BufferedVariant>,
     sig_writer: &mut SigHitWriter<std::fs::File>,
     renderer: &mut ManhattanRenderer,
+    // Per-chromosome rendering support
+    contig_lengths: &HashMap<String, u32>,
+    chrom_renderers: &mut HashMap<String, ManhattanRenderer>,
+    chrom_layouts: &mut HashMap<String, ChromosomeLayout>,
+    width: u32,
+    height: u32,
 ) {
     // Extract from left (results)
     let (contig, position, pvalue, beta, alleles) = match extract_variant_fields(&row.left, y_field)
@@ -570,9 +614,15 @@ fn process_joined_row(
         (None, None)
     };
 
-    // Render point
+    // Render point to WG
     render_variant(
         &contig, position, pvalue, layout, y_scale, renderer,
+    );
+
+    // Render point to per-chromosome plot
+    render_variant_per_chrom(
+        &contig, position, pvalue, layout, y_scale,
+        contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
     // Check significance
@@ -629,15 +679,27 @@ fn process_single_row(
     buffer: &mut Vec<BufferedVariant>,
     sig_writer: &mut SigHitWriter<std::fs::File>,
     renderer: &mut ManhattanRenderer,
+    // Per-chromosome rendering support
+    contig_lengths: &HashMap<String, u32>,
+    chrom_renderers: &mut HashMap<String, ManhattanRenderer>,
+    chrom_layouts: &mut HashMap<String, ChromosomeLayout>,
+    width: u32,
+    height: u32,
 ) {
     let (contig, position, pvalue, beta, alleles) = match extract_variant_fields(row, y_field) {
         Some(v) => v,
         None => return,
     };
 
-    // Render point
+    // Render point to WG
     render_variant(
         &contig, position, pvalue, layout, y_scale, renderer,
+    );
+
+    // Render point to per-chromosome plot
+    render_variant_per_chrom(
+        &contig, position, pvalue, layout, y_scale,
+        contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
     // Check significance
@@ -701,6 +763,57 @@ fn render_variant(
         let y = y_scale.get_y(neg_log_p);
         let color = layout.get_color(contig_name);
         renderer.render_point(x, y, color, 0.6);
+    }
+}
+
+/// Render a variant to its per-chromosome plot.
+#[allow(clippy::too_many_arguments)]
+fn render_variant_per_chrom(
+    contig: &str,
+    position: i32,
+    pvalue: f64,
+    wg_layout: &ChromosomeLayout,
+    y_scale: &YScale,
+    contig_lengths: &HashMap<String, u32>,
+    chrom_renderers: &mut HashMap<String, ManhattanRenderer>,
+    chrom_layouts: &mut HashMap<String, ChromosomeLayout>,
+    width: u32,
+    height: u32,
+) {
+    // Normalize contig (strip chr prefix for layout lookup)
+    let contig_for_layout = if contig.starts_with("chr") {
+        &contig[3..]
+    } else {
+        contig
+    };
+
+    // Get normalized contig name for map keys (e.g., "chr1")
+    let normalized_contig = normalize_contig_name(contig);
+
+    // Look up length using short name
+    if let Some(&len) = contig_lengths
+        .get(contig_for_layout)
+        .or_else(|| contig_lengths.get(&normalized_contig))
+    {
+        // Initialize renderer and layout for this chromosome if needed
+        let chrom_layout = chrom_layouts
+            .entry(normalized_contig.clone())
+            .or_insert_with(|| {
+                // Create a layout where this single chromosome fills the width
+                ChromosomeLayout::new(&[(contig_for_layout.to_string(), len)], width, 0)
+            });
+
+        let chrom_renderer = chrom_renderers
+            .entry(normalized_contig)
+            .or_insert_with(|| ManhattanRenderer::new(width, height));
+
+        if let Some(x) = chrom_layout.get_x(contig_for_layout, position) {
+            let neg_log_p = -pvalue.log10();
+            let y = y_scale.get_y(neg_log_p);
+            // Use same color scheme as WG plot
+            let color = wg_layout.get_color(contig_for_layout);
+            chrom_renderer.render_point(x, y, color, 0.6);
+        }
     }
 }
 

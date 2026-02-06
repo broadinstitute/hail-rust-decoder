@@ -1342,10 +1342,12 @@ fn process_manhattan_scan_v2(
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
     use crate::io::{is_cloud_path, StreamingCloudWriter};
     use crate::manhattan::data::{extract_plot_data, SigHitRow};
+    use crate::manhattan::layout::ChromosomeLayout;
     use crate::manhattan::reference::{calculate_xpos, normalize_contig_name};
     use crate::manhattan::render::ManhattanRenderer;
     use crate::manhattan::sig_writer::SigHitWriter;
     use rayon::prelude::*;
+    use std::collections::HashMap;
     use std::io::Write;
 
     let source_name = match spec.source {
@@ -1372,6 +1374,7 @@ fn process_manhattan_scan_v2(
     let y_field = &spec.y_field;
     let phenotype = &spec.phenotype;
     let ancestry = &spec.ancestry;
+    let contig_lengths = &spec.contig_lengths;
 
     // Update telemetry with first partition
     if let Some(ref ts) = telemetry {
@@ -1389,6 +1392,12 @@ fn process_manhattan_scan_v2(
 
             // Each thread has its own renderer with transparent background
             let mut renderer = ManhattanRenderer::new_transparent(width, height);
+
+            // Per-chromosome renderers (lazy init)
+            let mut chrom_renderers: HashMap<String, ManhattanRenderer> = HashMap::new();
+            // Per-chromosome layouts (lazy init)
+            let mut chrom_layouts: HashMap<String, ChromosomeLayout> = HashMap::new();
+
             let mut rows = 0usize;
 
             // Collect significant hits for this partition
@@ -1406,11 +1415,35 @@ fn process_manhattan_scan_v2(
                         &point.contig
                     };
 
-                    // Map to pixel coordinates and render
+                    // 1. Whole Genome Plot: Map to pixel coordinates and render
                     if let Some(x) = layout.get_x(contig_for_layout, point.position) {
                         let y = y_scale.get_y(point.neg_log10_p);
                         let color = layout.get_color(contig_for_layout);
                         renderer.render_point(x, y, color, 0.6);
+                    }
+
+                    // 2. Per-Chromosome Plot
+                    // Use normalized contig name for file/map keys (e.g., "chr1")
+                    let normalized_contig = normalize_contig_name(&point.contig);
+
+                    // Look up length using short name (e.g., "1") because that's what we have in map
+                    if let Some(&len) = contig_lengths.get(contig_for_layout).or_else(|| contig_lengths.get(&normalized_contig)) {
+                        // Initialize renderer and layout for this chromosome if needed
+                        let chrom_layout = chrom_layouts.entry(normalized_contig.clone()).or_insert_with(|| {
+                            // Create a layout where this single chromosome fills the width
+                            ChromosomeLayout::new(&[(contig_for_layout.to_string(), len)], width, 0)
+                        });
+
+                        let chrom_renderer = chrom_renderers.entry(normalized_contig.clone()).or_insert_with(|| {
+                            ManhattanRenderer::new_transparent(width, height)
+                        });
+
+                        if let Some(x) = chrom_layout.get_x(contig_for_layout, point.position) {
+                            let y = y_scale.get_y(point.neg_log10_p);
+                            // Use same color scheme as WG plot
+                            let color = layout.get_color(contig_for_layout);
+                            chrom_renderer.render_point(x, y, color, 0.6);
+                        }
                     }
 
                     // Check significance threshold
@@ -1442,10 +1475,10 @@ fn process_manhattan_scan_v2(
                 }
             }
 
-            // Encode PNG
+            // Encode WG PNG
             let png_data = renderer.encode_png()?;
 
-            // Write PNG for this partition
+            // Write WG PNG for this partition
             let png_file = format!("{}/part-{:05}.png", output_base, partition_id);
             if is_cloud_path(&png_file) {
                 let mut writer = StreamingCloudWriter::new(&png_file)?;
@@ -1454,6 +1487,25 @@ fn process_manhattan_scan_v2(
             } else {
                 std::fs::create_dir_all(&output_base)?;
                 std::fs::write(&png_file, &png_data)?;
+            }
+
+            // Write Per-Chromosome PNGs
+            // Structure: {output_root}/chroms/{chrom}/{source}/part-{id}.png
+            let root = spec.output_path.trim_end_matches('/');
+            for (chrom, chrom_renderer) in chrom_renderers {
+                let chrom_png_data = chrom_renderer.encode_png()?;
+                let chrom_path = format!("{}/chroms/{}/{}/part-{:05}.png", root, chrom, source_name, partition_id);
+
+                if is_cloud_path(&chrom_path) {
+                    let mut writer = StreamingCloudWriter::new(&chrom_path)?;
+                    writer.write_all(&chrom_png_data)?;
+                    writer.finish()?;
+                } else {
+                    if let Some(parent) = std::path::Path::new(&chrom_path).parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&chrom_path, &chrom_png_data)?;
+                }
             }
 
             // Write significant hits Parquet (even if empty - consistent output)

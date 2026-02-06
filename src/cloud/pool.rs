@@ -1657,6 +1657,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             let y_scale = YScale::new(spec.height, 300.0);
             spec.layout = Some(layout);
             spec.y_scale = Some(y_scale);
+            // Add contig lengths for per-chromosome plot generation
+            spec.contig_lengths = Some(contigs.into_iter().collect());
 
             // Count partitions for each table
             if let Some(ref exome_path) = spec.exome {
@@ -1696,6 +1698,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             // Compute layout from the first available table
             println!("  {} Computing chromosome layout...", "Setup:".cyan());
             let contigs = get_contig_lengths(engine.as_ref().unwrap());
+            let contig_map: HashMap<String, u32> = contigs.iter().cloned().collect();
             let layout = ChromosomeLayout::new(&contigs, width, 4);
             let y_scale = YScale::new(height, 300.0);
 
@@ -1743,6 +1746,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             for spec in specs.iter_mut() {
                 spec.layout = Some(layout.clone());
                 spec.y_scale = Some(y_scale.clone());
+                spec.contig_lengths = Some(contig_map.clone());
 
                 if let Some(ref exome_path) = spec.exome {
                     if let Some(&parts) = partition_cache.get(exome_path) {
@@ -2725,6 +2729,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             output_path,
             layout: None,  // Computed by coordinator before dispatch
             y_scale: None, // Computed by coordinator before dispatch
+            contig_lengths: None, // Computed by submit_distributed
             skip_composite,
             exome_partitions: None, // Computed by submit_distributed
             genome_partitions: None, // Computed by submit_distributed

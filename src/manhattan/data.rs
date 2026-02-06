@@ -2,6 +2,7 @@
 
 use crate::codec::EncodedValue;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Source of a variant (for distinguishing exome vs genome in combined analyses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -161,6 +162,9 @@ pub struct Manifest {
     pub inputs: ManifestInputs,
     /// Manhattan plot outputs
     pub manhattans: ManifestManhattans,
+    /// Per-chromosome Manhattan plot outputs
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub chrom_manhattans: HashMap<String, ManifestManhattans>,
     /// Significant hit outputs
     pub significant_hits: ManifestSignificantHits,
     /// Locus zoom regions
