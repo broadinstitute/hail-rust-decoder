@@ -20,11 +20,15 @@ clickhouse = []  # reqwest is now always included for distributed workers
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
 benchmark = []  # sysinfo is now always included
 
+# DuckDB for annotation joins in aggregate phase
+duckdb = ["dep:duckdb"]
+duckdb-bundled = ["duckdb", "duckdb/bundled"]  # For workers (no system deps)
+
 # HTTP server binary (axum is always included for distributed coordinator)
 server = ["dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
 
 # All features
-full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", "benchmark"]
+full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", "benchmark", "duckdb-bundled"]
 
 [dependencies]
 # Compression
@@ -101,6 +105,9 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 google-cloud-bigquery = { version = "0.13", optional = true }
 google-cloud-storage = { version = "0.22", optional = true }
 google-cloud-auth = { version = "0.19", optional = true }
+
+# DuckDB for annotation joins (duckdb/duckdb-bundled features)
+duckdb = { version = "1.0", optional = true }
 
 # HTTP Server for distributed coordinator (and optional hail-server)
 axum = "0.7"

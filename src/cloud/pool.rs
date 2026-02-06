@@ -187,18 +187,19 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         job_spec: &crate::distributed::message::JobSpec,
         total_partitions: usize,
         force: bool,
+        batch_size: Option<usize>,
         filters: &[String],
         intervals: &[String],
     ) -> Result<bool> {
         use crate::distributed::message::{JobConfigRequest, JobConfigResponse};
 
-        // For Manhattan jobs, use larger batches so workers can parallelize with rayon
-        // Default batch_size=1 means workers get 1 partition at a time (no parallelism)
-        // With 4-core VMs, batch_size=40 gives rayon plenty to work with
-        let batch_size = match job_spec {
+        // Use provided batch_size or fall back to sensible defaults per job type
+        // Larger batches let workers parallelize with rayon
+        let batch_size = batch_size.or_else(|| match job_spec {
             crate::distributed::message::JobSpec::Manhattan(_) => Some(40),
-            _ => None, // Use coordinator's default for other job types
-        };
+            crate::distributed::message::JobSpec::ExportParquet { .. } => Some(100),
+            _ => Some(50),
+        });
 
         let request = JobConfigRequest {
             input_path: input_path.to_string(),
@@ -1117,6 +1118,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         force_redeploy: bool,
         force: bool,
         autoscale: bool,
+        batch_size: Option<usize>,
         config: Option<&crate::cloud::ScalingConfig>,
         command: &[String],
     ) -> Result<()> {
@@ -1157,6 +1159,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             auto_stop,
             force_redeploy,
             force,
+            batch_size,
             command,
         );
 
@@ -1186,6 +1189,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         auto_stop: bool,
         force_redeploy: bool,
         force: bool,
+        batch_size: Option<usize>,
         command: &[String],
     ) -> Result<()> {
         // 1. Locate the Linux binary (will check if needed after seeing coordinator status)
@@ -1280,6 +1284,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     ))
                 })?;
 
+                // Stop any existing coordinator first (to avoid "Address already in use")
+                println!("{}", "Stopping existing coordinator...".dimmed());
+                let stop_cmd = "pkill -f 'hail-decoder service start-coordinator' || true";
+                let _ = self
+                    .provider
+                    .get_ssh_command(&coord.name, zone, stop_cmd)
+                    .status();
+                std::thread::sleep(std::time::Duration::from_secs(1));
+
                 // Deploy binary to coordinator
                 println!("{}", "Deploying binary to coordinator...".dimmed());
                 self.deploy_binary(binary, &[coord.clone()], zone)?;
@@ -1350,6 +1363,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 command,
                 auto_stop,
                 force,
+                batch_size,
             );
         }
 
@@ -1581,6 +1595,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         command: &[String],
         auto_stop: bool,
         force: bool,
+        batch_size: Option<usize>,
     ) -> Result<()> {
         use crate::query::QueryEngine;
 
@@ -1610,7 +1625,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             println!("  {} {}", "Output:".cyan(), out.bright_white());
         }
 
-        // For Manhattan jobs, compute the layout from reference genome data
+        // For Manhattan jobs, compute the layout and partition counts for all tables
         if let crate::distributed::message::JobSpec::Manhattan(ref mut spec) = job_spec {
             use crate::manhattan::layout::{ChromosomeLayout, YScale};
             use crate::manhattan::reference::get_contig_lengths;
@@ -1623,6 +1638,22 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             let y_scale = YScale::new(spec.height, 300.0);
             spec.layout = Some(layout);
             spec.y_scale = Some(y_scale);
+
+            // Count partitions for each table
+            if let Some(ref exome_path) = spec.exome {
+                if let Ok(exome_engine) = QueryEngine::open_path(exome_path) {
+                    let exome_parts = exome_engine.num_partitions();
+                    println!("  {} {} exome partitions", "Found".green(), exome_parts);
+                    spec.exome_partitions = Some(exome_parts);
+                }
+            }
+            if let Some(ref genome_path) = spec.genome {
+                if let Ok(genome_engine) = QueryEngine::open_path(genome_path) {
+                    let genome_parts = genome_engine.num_partitions();
+                    println!("  {} {} genome partitions", "Found".green(), genome_parts);
+                    spec.genome_partitions = Some(genome_parts);
+                }
+            }
         }
 
         drop(engine);
@@ -1666,6 +1697,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 &job_spec,
                 total_partitions,
                 force,
+                batch_size,
                 &filters,
                 &intervals,
             )? {
@@ -2466,6 +2498,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             layout: None,  // Computed by coordinator before dispatch
             y_scale: None, // Computed by coordinator before dispatch
             skip_composite,
+            exome_partitions: None, // Computed by submit_distributed
+            genome_partitions: None, // Computed by submit_distributed
         };
 
         Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))

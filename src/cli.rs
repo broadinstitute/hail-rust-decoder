@@ -584,6 +584,10 @@ pub enum PoolCommands {
         #[arg(long)]
         force: bool,
 
+        /// Number of partitions per worker batch (higher = more parallelism per worker)
+        #[arg(long)]
+        batch_size: Option<usize>,
+
         /// The command to run on workers (everything after --)
         #[arg(last = true, required = true)]
         command: Vec<String>,

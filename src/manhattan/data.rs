@@ -141,3 +141,181 @@ fn get_nested_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a En
     }
     Some(current)
 }
+
+// =============================================================================
+// Manifest types for phenotype pipeline output
+// =============================================================================
+
+/// Top-level manifest.json for a phenotype pipeline run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    /// Phenotype name (derived from output path or explicitly set)
+    pub phenotype: String,
+    /// Ancestry group (e.g., "META", "EUR", "AFR")
+    #[serde(default)]
+    pub ancestry: Option<String>,
+    /// ISO timestamp when the pipeline completed
+    pub created_at: String,
+
+    /// Input table paths
+    pub inputs: ManifestInputs,
+    /// Manhattan plot outputs
+    pub manhattans: ManifestManhattans,
+    /// Significant hit outputs
+    pub significant_hits: ManifestSignificantHits,
+    /// Locus zoom regions
+    pub loci: Vec<ManifestLocus>,
+    /// Pipeline statistics
+    pub stats: ManifestStats,
+}
+
+/// Input paths used in the pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestInputs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exome_results: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genome_results: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene_burden: Option<String>,
+}
+
+/// Manhattan plot outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestManhattans {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exome: Option<ManifestManhattan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genome: Option<ManifestManhattan>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene: Option<ManifestManhattan>,
+}
+
+/// Info about a single Manhattan plot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestManhattan {
+    /// Path to PNG file
+    pub png: String,
+    /// Number of variants/genes scanned
+    pub count: u64,
+}
+
+/// Significant hit outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestSignificantHits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exome: Option<ManifestSigHits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genome: Option<ManifestSigHits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene: Option<ManifestSigHits>,
+}
+
+/// Info about significant hits for one source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestSigHits {
+    /// Path to Parquet file with annotated hits
+    pub path: String,
+    /// Number of significant hits
+    pub count: u64,
+    /// Top hit info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_hit: Option<ManifestTopHit>,
+}
+
+/// Top hit summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestTopHit {
+    /// Variant ID (e.g., "2:21234567:A:G") or gene ID
+    pub id: String,
+    /// P-value
+    pub pvalue: f64,
+    /// Gene symbol if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gene: Option<String>,
+    /// Consequence if available
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consequence: Option<String>,
+}
+
+/// A locus region with associated outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestLocus {
+    /// Unique ID for the locus (e.g., "chr6_32000000_34000000")
+    pub id: String,
+    /// Genomic region
+    pub region: ManifestRegion,
+    /// Source that drove this locus (exome, genome, or gene)
+    pub source: String,
+    /// Lead variant ID
+    pub lead_variant: String,
+    /// Lead variant p-value
+    pub lead_pvalue: f64,
+    /// Lead variant gene (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lead_gene: Option<String>,
+    /// Path to locus plot PNG
+    pub plot: String,
+    /// Exome variants in this region
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exome_variants: Option<ManifestLocusVariants>,
+    /// Genome variants in this region
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub genome_variants: Option<ManifestLocusVariants>,
+    /// Genes overlapping this region
+    pub genes: Vec<String>,
+}
+
+/// A genomic region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestRegion {
+    pub contig: String,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// Locus variant file info.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestLocusVariants {
+    /// Path to Parquet file
+    pub path: String,
+    /// Number of variants
+    pub count: u64,
+}
+
+/// Pipeline execution statistics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestStats {
+    /// Duration of scan phase in seconds
+    pub scan_duration_sec: f64,
+    /// Duration of aggregate phase in seconds
+    pub aggregate_duration_sec: f64,
+    /// Total number of loci generated
+    pub total_loci: usize,
+}
+
+// =============================================================================
+// Significant hit row for Parquet output (scan phase)
+// =============================================================================
+
+/// A significant variant hit to be written to Parquet during scan phase.
+/// This is the flat schema used for partition-level sig.parquet files.
+#[derive(Debug, Clone)]
+pub struct SigHitRow {
+    /// Chromosome (e.g., "1", "X")
+    pub contig: String,
+    /// Position (1-based)
+    pub position: i32,
+    /// Reference allele
+    pub ref_allele: String,
+    /// Alternate allele
+    pub alt_allele: String,
+    /// P-value
+    pub pvalue: f64,
+    /// Effect size (beta)
+    pub beta: Option<f64>,
+    /// Standard error
+    pub se: Option<f64>,
+    /// Allele frequency
+    pub af: Option<f64>,
+}

@@ -7,8 +7,8 @@
 //! metrics to the coordinator for the dashboard UI.
 
 use crate::distributed::message::{
-    CompleteRequest, HeartbeatRequest, JobSpec, ManhattanSpec, TelemetrySnapshot, WorkRequest,
-    WorkResponse,
+    CompleteRequest, HeartbeatRequest, JobSpec, ManhattanAggregateSpec, ManhattanScanSpec,
+    ManhattanSource, ManhattanSpec, TelemetrySnapshot, WorkRequest, WorkResponse,
 };
 use crate::io::{is_cloud_path, StreamingCloudWriter};
 use crate::parquet::{build_record_batch, ParquetWriter};
@@ -507,6 +507,19 @@ fn dispatch_job(
             )?;
             Ok((rows, None, engine))
         }
+        JobSpec::ManhattanScan(spec) => {
+            let (rows, engine) = process_manhattan_scan_v2(
+                cached_engine,
+                partitions,
+                spec,
+                telemetry,
+            )?;
+            Ok((rows, None, engine))
+        }
+        JobSpec::ManhattanAggregate(spec) => {
+            let rows = process_manhattan_aggregate(spec)?;
+            Ok((rows, None, None))
+        }
     }
 }
 
@@ -970,4 +983,244 @@ fn process_manhattan_scan(
 
     // Don't cache engine since we opened multiple in parallel
     Ok((total_rows, None))
+}
+
+/// Process partitions for Manhattan scan phase (V2 pipeline).
+///
+/// This is the Phase 1 worker task. For each partition, it:
+/// 1. Renders plot points to a partial PNG (transparent background)
+/// 2. Writes significant hits (below threshold) to a Parquet file
+///
+/// Output structure:
+/// - {output_path}/{source}/part-{id}.png
+/// - {output_path}/{source}/part-{id}-sig.parquet
+fn process_manhattan_scan_v2(
+    _cached_engine: Option<(String, QueryEngine)>,
+    partitions: &[usize],
+    spec: &ManhattanScanSpec,
+    telemetry: Option<Arc<TelemetryState>>,
+) -> Result<(usize, Option<(String, QueryEngine)>)> {
+    use crate::io::{is_cloud_path, StreamingCloudWriter};
+    use crate::manhattan::data::{extract_plot_data, SigHitRow};
+    use crate::manhattan::render::ManhattanRenderer;
+    use crate::manhattan::sig_writer::SigHitWriter;
+    use rayon::prelude::*;
+    use std::io::Write;
+
+    let source_name = match spec.source {
+        ManhattanSource::Exome => "exome",
+        ManhattanSource::Genome => "genome",
+    };
+
+    println!(
+        "Processing {} partitions for Manhattan scan ({})...",
+        partitions.len(),
+        source_name
+    );
+
+    let layout = &spec.layout;
+    let y_scale = &spec.y_scale;
+    let table_path = &spec.table_path;
+    let output_base = format!("{}/{}", spec.output_path.trim_end_matches('/'), source_name);
+    let width = spec.width;
+    let height = spec.height;
+    let threshold = spec.threshold;
+    let y_field = &spec.y_field;
+
+    // Update telemetry with first partition
+    if let Some(ref ts) = telemetry {
+        if let Some(&part_id) = partitions.first() {
+            ts.active_partition.store(part_id, Ordering::Relaxed);
+        }
+    }
+
+    // Parallel scan+render+encode: each partition produces PNG + sig.parquet
+    let results: Vec<Result<usize>> = partitions
+        .par_iter()
+        .map(|&partition_id| {
+            let engine = QueryEngine::open_path(table_path)?;
+            let iter = engine.scan_partition_iter(partition_id, &[])?;
+
+            // Each thread has its own renderer with transparent background
+            let mut renderer = ManhattanRenderer::new_transparent(width, height);
+            let mut rows = 0usize;
+
+            // Collect significant hits for this partition
+            let mut sig_hits: Vec<SigHitRow> = Vec::new();
+
+            for row_result in iter {
+                let row = row_result?;
+                rows += 1;
+
+                if let Some(point) = extract_plot_data(&row, y_field) {
+                    // Normalize contig name (strip "chr" prefix)
+                    let contig_name = if point.contig.starts_with("chr") {
+                        &point.contig[3..]
+                    } else {
+                        &point.contig
+                    };
+
+                    // Map to pixel coordinates and render
+                    if let Some(x) = layout.get_x(contig_name, point.position) {
+                        let y = y_scale.get_y(point.neg_log10_p);
+                        let color = layout.get_color(contig_name);
+                        renderer.render_point(x, y, color, 0.6);
+                    }
+
+                    // Check significance threshold
+                    if point.pvalue < threshold {
+                        // Extract additional fields for significant hit
+                        let (ref_allele, alt_allele, beta, se, af) =
+                            extract_sig_hit_fields(&row);
+
+                        sig_hits.push(SigHitRow {
+                            contig: contig_name.to_string(),
+                            position: point.position,
+                            ref_allele,
+                            alt_allele,
+                            pvalue: point.pvalue,
+                            beta,
+                            se,
+                            af,
+                        });
+                    }
+                }
+            }
+
+            // Encode PNG
+            let png_data = renderer.encode_png()?;
+
+            // Write PNG for this partition
+            let png_file = format!("{}/part-{:05}.png", output_base, partition_id);
+            if is_cloud_path(&png_file) {
+                let mut writer = StreamingCloudWriter::new(&png_file)?;
+                writer.write_all(&png_data)?;
+                writer.finish()?;
+            } else {
+                std::fs::create_dir_all(&output_base)?;
+                std::fs::write(&png_file, &png_data)?;
+            }
+
+            // Write significant hits Parquet (even if empty - consistent output)
+            let sig_file = format!("{}/part-{:05}-sig.parquet", output_base, partition_id);
+            if is_cloud_path(&sig_file) {
+                let cloud_writer = crate::io::CloudWriter::new(&sig_file)?;
+                let mut writer = SigHitWriter::from_writer(cloud_writer)?;
+                for hit in sig_hits {
+                    writer.write(hit)?;
+                }
+                // Get back the cloud writer and finish to trigger the upload
+                let cloud_writer = writer.into_inner()?;
+                cloud_writer.finish()?;
+            } else {
+                let mut writer = SigHitWriter::new(&sig_file)?;
+                for hit in sig_hits {
+                    writer.write(hit)?;
+                }
+                writer.finish()?;
+            }
+
+            Ok(rows)
+        })
+        .collect();
+
+    // Aggregate row counts
+    let mut total_rows = 0usize;
+    for result in results {
+        total_rows += result?;
+    }
+
+    // Update telemetry
+    if let Some(ref ts) = telemetry {
+        ts.total_rows.fetch_add(total_rows, Ordering::Relaxed);
+    }
+
+    println!(
+        "  Manhattan scan ({}) partitions {:?} complete: {} rows",
+        source_name, partitions, total_rows
+    );
+
+    Ok((total_rows, None))
+}
+
+/// Extract fields for a significant hit from an encoded row.
+fn extract_sig_hit_fields(row: &crate::codec::EncodedValue) -> (String, String, Option<f64>, Option<f64>, Option<f64>) {
+    use crate::codec::EncodedValue;
+
+    // Helper to get nested field
+    fn get_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a EncodedValue> {
+        let mut current = value;
+        for &field_name in path {
+            if let EncodedValue::Struct(fields) = current {
+                current = fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v)?;
+            } else {
+                return None;
+            }
+        }
+        Some(current)
+    }
+
+    // Extract alleles
+    let (ref_allele, alt_allele) = if let Some(EncodedValue::Array(alleles)) = get_field(row, &["alleles"]) {
+        let ref_a = alleles.first()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let alt_a = alleles.get(1)
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        (ref_a, alt_a)
+    } else {
+        (String::new(), String::new())
+    };
+
+    // Extract BETA
+    let beta = get_field(row, &["BETA"])
+        .and_then(|v| match v {
+            EncodedValue::Float64(f) => Some(*f),
+            EncodedValue::Float32(f) => Some(*f as f64),
+            _ => None,
+        });
+
+    // Extract SE
+    let se = get_field(row, &["SE"])
+        .and_then(|v| match v {
+            EncodedValue::Float64(f) => Some(*f),
+            EncodedValue::Float32(f) => Some(*f as f64),
+            _ => None,
+        });
+
+    // Extract AF (AF_Allele2)
+    let af = get_field(row, &["AF_Allele2"])
+        .and_then(|v| match v {
+            EncodedValue::Float64(f) => Some(*f),
+            EncodedValue::Float32(f) => Some(*f as f64),
+            _ => None,
+        });
+
+    (ref_allele, alt_allele, beta, se, af)
+}
+
+/// Process Manhattan aggregate phase (V2 pipeline).
+///
+/// This is the Phase 2 worker task. It:
+/// 1. Composites partial PNGs into final Manhattan plots
+/// 2. Processes gene burden table (if provided)
+/// 3. Joins significant hits with annotations using DuckDB
+/// 4. Generates locus plots for significant regions
+/// 5. Writes manifest.json
+#[cfg(feature = "duckdb")]
+fn process_manhattan_aggregate(
+    spec: &ManhattanAggregateSpec,
+) -> Result<usize> {
+    use crate::manhattan::aggregate::run_aggregation;
+    run_aggregation(spec)
+}
+
+#[cfg(not(feature = "duckdb"))]
+fn process_manhattan_aggregate(
+    _spec: &ManhattanAggregateSpec,
+) -> Result<usize> {
+    Err(crate::HailError::InvalidFormat(
+        "Manhattan aggregate requires the 'duckdb' feature. Build with --features duckdb".into()
+    ))
 }

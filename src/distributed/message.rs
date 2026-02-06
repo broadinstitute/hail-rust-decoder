@@ -27,8 +27,12 @@ pub enum JobSpec {
         #[serde(default)]
         fail_fast: bool,
     },
-    /// Generate Manhattan plot
+    /// Generate Manhattan plot (high-level submission - coordinator splits into phases)
     Manhattan(ManhattanSpec),
+    /// Phase 1: Worker scans partitions, outputs partial PNGs + sig.parquet
+    ManhattanScan(ManhattanScanSpec),
+    /// Phase 2: Single worker aggregates results, joins annotations, generates locus plots
+    ManhattanAggregate(ManhattanAggregateSpec),
 }
 
 /// Configuration for a distributed Manhattan plot job.
@@ -93,6 +97,14 @@ pub struct ManhattanSpec {
     /// Skip automatic composite step (run manually later with --from-shards)
     #[serde(default)]
     pub skip_composite: bool,
+
+    // Partition counts (set by pool submit for multi-table jobs)
+    /// Number of partitions in exome results table
+    #[serde(default)]
+    pub exome_partitions: Option<usize>,
+    /// Number of partitions in genome results table
+    #[serde(default)]
+    pub genome_partitions: Option<usize>,
 }
 
 fn default_gene_threshold() -> f64 {
@@ -119,6 +131,110 @@ impl ManhattanSpec {
     }
 }
 
+/// Data source indicator for Manhattan scan partitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManhattanSource {
+    Exome,
+    Genome,
+}
+
+/// Phase 1: Scan job specification for a single data source.
+///
+/// Workers receive this spec to scan partitions and output:
+/// - Partial PNG (transparent background, for later compositing)
+/// - Significant hits Parquet (variants below threshold)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManhattanScanSpec {
+    /// Which data source this scan is for
+    pub source: ManhattanSource,
+    /// Path to the results table (exome or genome)
+    pub table_path: String,
+    /// Output directory (will create {source}/part-*.png and {source}/part-*-sig.parquet)
+    pub output_path: String,
+    /// P-value threshold for significant hits (default: 5e-8)
+    pub threshold: f64,
+    /// Field name for P-value (Y-axis)
+    pub y_field: String,
+
+    // Pre-computed layout from coordinator
+    /// Chromosome layout for mapping genomic positions to pixel X coordinates
+    pub layout: crate::manhattan::layout::ChromosomeLayout,
+    /// Y-axis scale for mapping -log10(p) to pixel Y coordinates
+    pub y_scale: crate::manhattan::layout::YScale,
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+}
+
+/// Phase 2: Aggregate job specification.
+///
+/// A single worker receives this to:
+/// 1. Composite partial PNGs into final Manhattan plots
+/// 2. Process gene burden table
+/// 3. Join significant hits with annotations using DuckDB
+/// 4. Generate locus plots for significant regions
+/// 5. Write manifest.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManhattanAggregateSpec {
+    /// Output directory (contains partial PNGs/parquets from scan phase)
+    pub output_path: String,
+
+    // Input tables for targeted reads (locus plots)
+    /// Path to Exome results table
+    #[serde(default)]
+    pub exome_results: Option<String>,
+    /// Path to Genome results table
+    #[serde(default)]
+    pub genome_results: Option<String>,
+    /// Path to gene burden results table
+    #[serde(default)]
+    pub gene_burden: Option<String>,
+
+    // Annotation tables (pre-exported Parquet directories)
+    /// Path to exome annotations parquet directory
+    #[serde(default)]
+    pub exome_annotations: Option<String>,
+    /// Path to genome annotations parquet directory
+    #[serde(default)]
+    pub genome_annotations: Option<String>,
+    /// Path to gnomAD genes parquet directory
+    #[serde(default)]
+    pub genes: Option<String>,
+
+    // Thresholds
+    /// P-value threshold for significant variants (for reference)
+    pub threshold: f64,
+    /// Significance threshold for gene burden results (default: 2.5e-6)
+    #[serde(default = "default_gene_threshold")]
+    pub gene_threshold: f64,
+    /// P-value threshold for locus plot regions (default: 0.01)
+    #[serde(default = "default_locus_threshold")]
+    pub locus_threshold: f64,
+    /// Window size (bp) around significant hits for locus plots (default: 1MB)
+    #[serde(default = "default_locus_window")]
+    pub locus_window: i32,
+    /// Generate locus-zoom style plots for significant regions
+    #[serde(default)]
+    pub locus_plots: bool,
+
+    // Rendering config
+    /// Image width in pixels
+    pub width: u32,
+    /// Image height in pixels
+    pub height: u32,
+
+    // Layout (same as scan phase)
+    /// Chromosome layout for rendering gene burden manhattan
+    pub layout: crate::manhattan::layout::ChromosomeLayout,
+    /// Y-axis scale for rendering gene burden manhattan
+    pub y_scale: crate::manhattan::layout::YScale,
+
+    /// Delete intermediate shards after aggregation
+    #[serde(default)]
+    pub cleanup: bool,
+}
+
 impl JobSpec {
     /// Get a human-readable description of the job type.
     pub fn description(&self) -> &'static str {
@@ -128,6 +244,8 @@ impl JobSpec {
             JobSpec::Summary => "summary",
             JobSpec::Validate { .. } => "validate",
             JobSpec::Manhattan(_) => "manhattan plot",
+            JobSpec::ManhattanScan(_) => "manhattan scan",
+            JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
         }
     }
 
@@ -139,6 +257,8 @@ impl JobSpec {
             JobSpec::Summary => None,
             JobSpec::Validate { .. } => None,
             JobSpec::Manhattan(spec) => Some(&spec.output_path),
+            JobSpec::ManhattanScan(spec) => Some(&spec.output_path),
+            JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
         }
     }
 }

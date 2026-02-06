@@ -408,6 +408,7 @@
 
   <div class="info-section" id="info-section">
     <h2>Job Info</h2>
+    <div class="info-row"><span class="info-label">Job Type</span><span class="info-value" id="job-type" style="color:var(--cyan)">--</span></div>
     <div class="info-row"><span class="info-label">Input</span><span class="info-value" id="input-path">--</span></div>
     <div class="info-row"><span class="info-label">Output</span><span class="info-value" id="output-path">--</span></div>
   </div>
@@ -644,15 +645,17 @@ async function update() {
       idleOverlay.classList.add('hidden');
     }
 
-    // Header
+    // Header - show job type in status
     const dot = document.getElementById('live-dot');
     const statusText = document.getElementById('job-status-text');
+    const isManhattan = summary.job_spec && summary.job_spec.type === 'Manhattan';
+    const jobLabel = isManhattan ? 'Manhattan ' : '';
     if (summary.is_complete) {
       dot.className = 'status-dot complete';
-      statusText.textContent = 'Complete';
+      statusText.textContent = jobLabel + 'Complete';
     } else {
       dot.className = 'status-dot live';
-      statusText.textContent = 'Running';
+      statusText.textContent = jobLabel + 'Running';
     }
     document.getElementById('elapsed-text').textContent = formatElapsed(summary.elapsed_secs);
 
@@ -688,8 +691,35 @@ async function update() {
     document.getElementById('total-workers-sub').textContent = `of ${workers.length}`;
 
     // Info
+    // Extract job type from job_spec
+    let jobType = '--';
+    let outputPath = '--';
+    if (summary.job_spec) {
+      const spec = summary.job_spec;
+      if (spec.type === 'Manhattan') {
+        jobType = '🗻 MANHATTAN';
+        outputPath = spec.output_path || '--';
+      } else if (spec.type === 'ManhattanScan') {
+        jobType = '🗻 MANHATTAN (Scan Phase)';
+        outputPath = spec.output_path || '--';
+      } else if (spec.type === 'ManhattanAggregate') {
+        jobType = '🗻 MANHATTAN (Aggregate)';
+        outputPath = spec.output_path || '--';
+      } else if (spec.type === 'ExportParquet') {
+        jobType = 'Export Parquet';
+        outputPath = spec.output_path || '--';
+      } else if (spec.type === 'ExportJson') {
+        jobType = 'Export JSON';
+        outputPath = spec.output_path || '--';
+      } else if (spec.type === 'Summary') {
+        jobType = 'Summary';
+      } else {
+        jobType = spec.type || '--';
+      }
+    }
+    document.getElementById('job-type').textContent = jobType;
     document.getElementById('input-path').textContent = summary.input_path || '--';
-    document.getElementById('output-path').textContent = summary.output_path || '--';
+    document.getElementById('output-path').textContent = outputPath;
 
     // Worker cards
     const grid = document.getElementById('workers-grid');

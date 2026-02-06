@@ -1855,6 +1855,7 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             redeploy_binary,
             force,
             autoscale,
+            batch_size,
             command,
         } => {
             // Convert ResolvedPoolConfig to ScalingConfig if available
@@ -1877,6 +1878,7 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
                 redeploy_binary,
                 force,
                 autoscale,
+                batch_size,
                 scaling_config.as_ref(),
                 &command,
             )?;

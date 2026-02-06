@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Maps chromosome names and base-pair positions to pixel X coordinates.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChromosomeLayout {
     /// Map of contig name to (start_px, width_px)
     offsets: HashMap<String, (f32, f32)>,
@@ -149,5 +149,11 @@ impl YScale {
     /// Return the pixel Y position for a given p-value threshold.
     pub fn threshold_y(&self, pvalue: f64) -> f32 {
         self.get_y(-pvalue.log10())
+    }
+}
+
+impl Default for YScale {
+    fn default() -> Self {
+        Self::new(800, 50.0)
     }
 }
