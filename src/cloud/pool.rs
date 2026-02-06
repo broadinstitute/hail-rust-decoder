@@ -1127,6 +1127,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // Determine required features based on command
         let features: Vec<&str> = if command.len() >= 2 && command[0] == "export" && command[1] == "clickhouse" {
             vec!["clickhouse"]
+        } else if command.len() >= 2 && command[0] == "ingest" && command[1] == "manhattan" {
+            vec!["clickhouse"]  // Ingest manhattan requires clickhouse feature
         } else {
             vec![]
         };
@@ -1616,10 +1618,18 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         //   export json <input> <output> [--where ...]
         let (input_path, mut job_spec, filters, intervals) = Self::parse_command_to_job_spec(command)?;
 
-        // Calculate total partitions by reading metadata locally
-        println!("Reading metadata from {}...", input_path.bright_white());
-        let engine = QueryEngine::open_path(&input_path)?;
-        let total_partitions = engine.num_partitions();
+        // For IngestManhattan jobs, we don't read Hail table metadata
+        // The coordinator discovers phenotypes at runtime
+        let (total_partitions, engine) = if matches!(job_spec, crate::distributed::message::JobSpec::IngestManhattan { .. }) {
+            println!("Ingestion job: phenotypes will be discovered by coordinator");
+            (0, None)  // Coordinator will set this after discovering phenotypes
+        } else {
+            // Calculate total partitions by reading metadata locally
+            println!("Reading metadata from {}...", input_path.bright_white());
+            let engine = QueryEngine::open_path(&input_path)?;
+            let partitions = engine.num_partitions();
+            (partitions, Some(engine))
+        };
         println!(
             "  {} {} partitions to process",
             "Found".green(),
@@ -1640,7 +1650,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             use crate::manhattan::reference::get_contig_lengths;
 
             println!("  {} Computing chromosome layout...", "Setup:".cyan());
-            let contigs = get_contig_lengths(&engine);
+            let contigs = get_contig_lengths(engine.as_ref().unwrap());
             let layout = ChromosomeLayout::new(&contigs, spec.width, 4);
             // Use a reasonable max -log10(p) for initial Y scale (will cover most GWAS hits)
             // Use high max to avoid cutting off extreme p-values (height can have -log10(p) > 100)
@@ -1685,7 +1695,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Compute layout from the first available table
             println!("  {} Computing chromosome layout...", "Setup:".cyan());
-            let contigs = get_contig_lengths(&engine);
+            let contigs = get_contig_lengths(engine.as_ref().unwrap());
             let layout = ChromosomeLayout::new(&contigs, width, 4);
             let y_scale = YScale::new(height, 300.0);
 
@@ -1812,7 +1822,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         }
 
-        drop(engine);
+        drop(engine);  // Drop the QueryEngine if it exists (Option<QueryEngine>)
 
         // Get coordinator's internal IP
         let coord_ip = coordinator.ip().ok_or_else(|| {
@@ -2412,18 +2422,24 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             return Self::parse_loci_command(&command[1..]);
         }
 
+        // Handle 'ingest' command
+        if cmd == "ingest" {
+            return Self::parse_ingest_command(&command[1..]);
+        }
+
         // Expect: export <type> <input> <output> [args...]
         if cmd != "export" {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Distributed mode supports: export, summary, manhattan, manhattan-batch, loci. Got: '{}'\n\
+                    "Distributed mode supports: export, summary, manhattan, manhattan-batch, loci, ingest. Got: '{}'\n\
                      Examples:\n  \
                      pool submit mypool -- export parquet gs://bucket/input.ht gs://bucket/output/\n  \
                      pool submit mypool -- summary gs://bucket/input.ht\n  \
                      pool submit mypool -- manhattan --exome gs://bucket/exome.ht --output gs://bucket/out/\n  \
                      pool submit mypool -- manhattan-batch --assets-json ./assets.json --output-dir gs://bucket/manhattans/\n  \
-                     pool submit mypool -- loci --dir gs://bucket/manhattan_output/ --exome gs://bucket/exome.ht",
+                     pool submit mypool -- loci --dir gs://bucket/manhattan_output/ --exome gs://bucket/exome.ht\n  \
+                     pool submit mypool -- ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
                     cmd
                 ),
             )));
@@ -3050,6 +3066,105 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
         // Use output_dir as the "input_path" for job tracking
         Ok((output_dir, JobSpec::Loci(spec), Vec::new(), Vec::new()))
+    }
+
+    /// Parse an `ingest` command into an IngestManhattan job.
+    ///
+    /// Supports: ingest manhattan --input-dir <path> --clickhouse-url <url> [--database <db>]
+    fn parse_ingest_command(
+        args: &[String],
+    ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
+        use crate::distributed::message::JobSpec;
+
+        if args.is_empty() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Ingest command requires a subcommand: ingest manhattan ...",
+            )));
+        }
+
+        let subcommand = args[0].as_str();
+
+        match subcommand {
+            "manhattan" => Self::parse_ingest_manhattan_command(&args[1..]),
+            other => Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Unknown ingest subcommand: '{}'\n\
+                     Supported: manhattan",
+                    other
+                ),
+            ))),
+        }
+    }
+
+    /// Parse `ingest manhattan` command arguments.
+    fn parse_ingest_manhattan_command(
+        args: &[String],
+    ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
+        use crate::distributed::message::JobSpec;
+
+        let mut input_dir: Option<String> = None;
+        let mut clickhouse_url: Option<String> = None;
+        let mut database = "default".to_string();
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--input-dir" => {
+                    if i + 1 < args.len() {
+                        input_dir = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--clickhouse-url" => {
+                    if i + 1 < args.len() {
+                        clickhouse_url = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--database" => {
+                    if i + 1 < args.len() {
+                        database = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        let input_dir = input_dir.ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Ingest manhattan requires --input-dir <gcs_path>\n\
+                 Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
+            ))
+        })?;
+
+        let clickhouse_url = clickhouse_url.ok_or_else(|| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Ingest manhattan requires --clickhouse-url <url>\n\
+                 Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
+            ))
+        })?;
+
+        let spec = JobSpec::IngestManhattan {
+            input_dir: input_dir.clone(),
+            clickhouse_url,
+            database,
+        };
+
+        // Use input_dir as the "input_path" for job tracking
+        Ok((input_dir, spec, Vec::new(), Vec::new()))
     }
 }
 

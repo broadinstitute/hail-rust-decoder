@@ -609,6 +609,34 @@ fn dispatch_job(
                 )))
             }
         }
+        JobSpec::IngestManhattan { .. } => {
+            // This is a coordinator-level job spec, should never be sent to workers
+            Err(crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IngestManhattan is a coordinator job spec, not a worker task"
+            )))
+        }
+        JobSpec::IngestManhattanTask { phenotype_id, ancestry, base_path, clickhouse_url, database } => {
+            #[cfg(feature = "clickhouse")]
+            {
+                let rows = process_ingest_manhattan(
+                    phenotype_id,
+                    ancestry,
+                    base_path,
+                    clickhouse_url,
+                    database,
+                )?;
+                Ok((rows, None, None))
+            }
+            #[cfg(not(feature = "clickhouse"))]
+            {
+                let _ = (phenotype_id, ancestry, base_path, clickhouse_url, database);
+                Err(crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Worker binary not built with 'clickhouse' feature. Rebuild with --features clickhouse"
+                )))
+            }
+        }
     }
 }
 
@@ -781,6 +809,30 @@ fn upload_chunk_to_clickhouse(
     }
 
     Ok(row_count)
+}
+
+/// Process a Manhattan ingestion task (ingest phenotype data into ClickHouse).
+#[cfg(feature = "clickhouse")]
+fn process_ingest_manhattan(
+    phenotype_id: &str,
+    ancestry: &str,
+    base_path: &str,
+    clickhouse_url: &str,
+    database: &str,
+) -> Result<usize> {
+    use crate::ingest::manhattan::run_ingest_task;
+
+    println!("Processing ingestion task:");
+    println!("  Phenotype: {}", phenotype_id);
+    println!("  Ancestry: {}", ancestry);
+    println!("  Base path: {}", base_path);
+    println!("  ClickHouse: {}", clickhouse_url);
+    println!("  Database: {}", database);
+
+    let rows = run_ingest_task(phenotype_id, ancestry, base_path, clickhouse_url, database)?;
+
+    println!("Ingestion complete: {} total rows", rows);
+    Ok(rows)
 }
 
 /// Process a loci generation job.

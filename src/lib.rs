@@ -57,6 +57,9 @@ pub mod vcf;
 #[cfg(feature = "validation")]
 pub mod validation;
 
+#[cfg(feature = "clickhouse")]
+pub mod ingest;
+
 pub mod benchmark;
 
 pub use error::{HailError, Result};

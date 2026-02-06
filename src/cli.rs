@@ -71,6 +71,13 @@ pub enum Commands {
         #[command(subcommand)]
         command: ServiceCommands,
     },
+
+    /// Ingest data into external systems
+    #[cfg(feature = "clickhouse")]
+    Ingest {
+        #[command(subcommand)]
+        command: IngestCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -843,4 +850,33 @@ pub enum ServiceCommands {
         #[arg(long, default_value = "2000")]
         poll_interval: u64,
     },
+}
+
+/// Subcommands for ingesting data into external systems.
+#[cfg(feature = "clickhouse")]
+#[derive(Subcommand)]
+pub enum IngestCommands {
+    /// Ingest Manhattan outputs into ClickHouse
+    Manhattan(IngestManhattanArgs),
+}
+
+/// Arguments for ingesting Manhattan pipeline outputs into ClickHouse.
+#[cfg(feature = "clickhouse")]
+#[derive(Args, Debug)]
+pub struct IngestManhattanArgs {
+    /// GCS path containing phenotype directories (e.g., gs://bucket/manhattans/)
+    #[arg(long)]
+    pub input_dir: String,
+
+    /// ClickHouse URL (e.g., http://clickhouse:8123)
+    #[arg(long)]
+    pub clickhouse_url: String,
+
+    /// Target database (default: default)
+    #[arg(long, default_value = "default")]
+    pub database: String,
+
+    /// Partitioning arguments for distributed processing
+    #[command(flatten)]
+    pub partitioning: PartitioningArgs,
 }

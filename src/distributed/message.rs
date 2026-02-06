@@ -44,6 +44,22 @@ pub enum JobSpec {
         clickhouse_url: String,
         table_name: String,
     },
+    /// Ingest Manhattan results into ClickHouse (Coordinator job)
+    /// Coordinator scans input_dir, creates one task per phenotype
+    IngestManhattan {
+        input_dir: String,
+        clickhouse_url: String,
+        database: String,
+    },
+    /// Ingest a specific phenotype into ClickHouse (Worker task)
+    IngestManhattanTask {
+        phenotype_id: String,
+        ancestry: String,
+        /// Base path for this phenotype (e.g., gs://bucket/manhattans/meta/pheno_id/)
+        base_path: String,
+        clickhouse_url: String,
+        database: String,
+    },
 }
 
 /// Progress stats for batch Manhattan jobs (multi-phenotype mode).
@@ -371,6 +387,8 @@ impl JobSpec {
             JobSpec::ManhattanAggregateBatch { .. } => "manhattan aggregate batch",
             JobSpec::Loci(_) => "loci plots",
             JobSpec::ExportClickhouse { .. } => "export clickhouse",
+            JobSpec::IngestManhattan { .. } => "ingest manhattan",
+            JobSpec::IngestManhattanTask { .. } => "ingest manhattan task",
         }
     }
 
@@ -388,6 +406,8 @@ impl JobSpec {
             JobSpec::ManhattanAggregateBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::Loci(spec) => Some(&spec.output_dir),
             JobSpec::ExportClickhouse { table_name, .. } => Some(table_name),
+            JobSpec::IngestManhattan { input_dir, .. } => Some(input_dir),
+            JobSpec::IngestManhattanTask { base_path, .. } => Some(base_path),
         }
     }
 }

@@ -154,6 +154,25 @@ const MAX_AGGREGATE_RETRIES: usize = 3;
 /// Maximum number of phenotypes to process concurrently.
 const BATCH_ACTIVE_LIMIT: usize = 20;
 
+/// State for managing Manhattan ingestion into ClickHouse.
+#[derive(Debug)]
+struct IngestionState {
+    /// Pending phenotypes to ingest: (phenotype_id, ancestry, base_path)
+    pending_tasks: VecDeque<(String, String, String)>,
+    /// Currently processing tasks: task_id -> (phenotype_id, ancestry, base_path, worker_id, start_time)
+    active_tasks: HashMap<String, (String, String, String, String, Instant)>,
+    /// ClickHouse connection URL
+    clickhouse_url: String,
+    /// Target database
+    database: String,
+    /// Number of completed tasks
+    completed_count: usize,
+    /// Number of failed tasks
+    failed_count: usize,
+    /// Total tasks discovered
+    total_tasks: usize,
+}
+
 /// Minimum batch size for aggregation (unless no other work available).
 const AGGREGATE_BATCH_SIZE: usize = 10;
 
@@ -245,6 +264,8 @@ struct CoordinatorData {
     active_tasks: HashMap<String, ActiveTask>,
     /// Last error message from a failed task
     last_error: Option<String>,
+    /// Ingestion state (for IngestManhattan jobs)
+    ingestion_state: Option<IngestionState>,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -358,6 +379,7 @@ pub async fn run_coordinator(
         batch_state: None,
         active_tasks: HashMap::new(),
         last_error: None,
+        ingestion_state: None,
     }));
 
     // Start background timeout monitor
@@ -607,8 +629,76 @@ fn check_stuck_job(state: &SharedState, timeout_secs: u64) {
         data.manhattan_state = None;
         data.batch_state = None;
         data.active_tasks.clear();
+        data.ingestion_state = None;
         data.idle = true;
     }
+}
+
+/// Discover phenotypes for ingestion by scanning GCS for manifest.json files.
+///
+/// Expected directory structure: {input_dir}/{ancestry}/{phenotype_id}/manifest.json
+/// Returns: Vec of (phenotype_id, ancestry, base_path)
+fn discover_phenotypes_for_ingestion(input_dir: &str) -> crate::Result<Vec<(String, String, String)>> {
+    use std::process::Command;
+
+    let input_dir = input_dir.trim_end_matches('/');
+
+    // Use gsutil to list all manifest.json files recursively
+    // This is more reliable than object_store listing for discovering subdirectories
+    let output = Command::new("gsutil")
+        .args(["-m", "ls", "-r", &format!("{}/**/manifest.json", input_dir)])
+        .output()
+        .map_err(|e| {
+            crate::HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to run gsutil: {}", e),
+            ))
+        })?;
+
+    if !output.status.success() {
+        // If no files found, return empty vec (not an error)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("matched no objects") || stderr.contains("CommandException") {
+            return Ok(Vec::new());
+        }
+        return Err(crate::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("gsutil failed: {}", stderr),
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut phenotypes = Vec::new();
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.ends_with("/manifest.json") {
+            continue;
+        }
+
+        // Parse path: gs://bucket/base/{ancestry}/{phenotype_id}/manifest.json
+        // Remove /manifest.json to get base_path
+        let base_path = line.trim_end_matches("/manifest.json");
+
+        // Extract ancestry and phenotype_id from path
+        // Take last two segments
+        let segments: Vec<&str> = base_path.split('/').collect();
+        if segments.len() < 2 {
+            continue;
+        }
+
+        let phenotype_id = segments[segments.len() - 1].to_string();
+        let ancestry = segments[segments.len() - 2].to_string();
+
+        // Skip if ancestry looks like a bucket or path component
+        if ancestry.is_empty() || phenotype_id.is_empty() {
+            continue;
+        }
+
+        phenotypes.push((phenotype_id, ancestry, base_path.to_string()));
+    }
+
+    Ok(phenotypes)
 }
 
 /// Check for timed-out work and reschedule.
@@ -730,6 +820,79 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
 }
 
 /// Get work for a batch Manhattan job (multi-phenotype scheduling).
+/// Get work for an ingestion job.
+fn get_ingestion_work(
+    data: &mut CoordinatorData,
+    ingestion: &mut IngestionState,
+    worker_id: &str,
+) -> axum::Json<WorkResponse> {
+    // Check if there's a pending task
+    if let Some((phenotype_id, ancestry, base_path)) = ingestion.pending_tasks.pop_front() {
+        let task_id = Uuid::new_v4().to_string();
+
+        // Track this task
+        ingestion.active_tasks.insert(
+            task_id.clone(),
+            (
+                phenotype_id.clone(),
+                ancestry.clone(),
+                base_path.clone(),
+                worker_id.to_string(),
+                Instant::now(),
+            ),
+        );
+
+        // Update worker status
+        if let Some(w) = data.worker_registry.get_mut(worker_id) {
+            w.status = WorkerStatus::Active;
+        }
+
+        println!(
+            "Assigned ingestion task {} ({}/{}) to worker {} ({} pending, {} active)",
+            phenotype_id,
+            ancestry,
+            ingestion.total_tasks - ingestion.pending_tasks.len() - ingestion.completed_count - ingestion.failed_count,
+            worker_id,
+            ingestion.pending_tasks.len(),
+            ingestion.active_tasks.len()
+        );
+
+        // Create IngestManhattanTask job spec
+        let job_spec = JobSpec::IngestManhattanTask {
+            phenotype_id,
+            ancestry,
+            base_path,
+            clickhouse_url: ingestion.clickhouse_url.clone(),
+            database: ingestion.database.clone(),
+        };
+
+        return axum::Json(WorkResponse::Task {
+            task_id,
+            partitions: vec![0], // Dummy partition for compatibility
+            input_path: String::new(), // Not used for ingestion tasks
+            job_spec,
+            total_partitions: ingestion.total_tasks,
+            filters: Vec::new(),
+            intervals: Vec::new(),
+        });
+    }
+
+    // Check if there's active work in progress
+    if !ingestion.active_tasks.is_empty() {
+        if let Some(w) = data.worker_registry.get_mut(worker_id) {
+            w.status = WorkerStatus::Idle;
+        }
+        return axum::Json(WorkResponse::Wait);
+    }
+
+    // All work complete
+    println!(
+        "Ingestion complete: {} succeeded, {} failed",
+        ingestion.completed_count, ingestion.failed_count
+    );
+    axum::Json(WorkResponse::Exit)
+}
+
 fn get_batch_work(
     data: &mut CoordinatorData,
     batch: &mut BatchState,
@@ -949,6 +1112,14 @@ async fn get_work(
         let mut manhattan = data.manhattan_state.take().unwrap();
         let result = get_manhattan_work(&mut data, &mut manhattan, &req.worker_id);
         data.manhattan_state = Some(manhattan);
+        return result;
+    }
+
+    // Check for ingestion job
+    if data.ingestion_state.is_some() {
+        let mut ingestion = data.ingestion_state.take().unwrap();
+        let result = get_ingestion_work(&mut data, &mut ingestion, &req.worker_id);
+        data.ingestion_state = Some(ingestion);
         return result;
     }
 
@@ -1282,6 +1453,34 @@ fn complete_manhattan_work(
 }
 
 /// Handle completion for batch Manhattan jobs.
+/// Complete an ingestion task.
+fn complete_ingestion_work(ingestion: &mut IngestionState, req: &CompleteRequest) {
+    // Remove from active tasks
+    if let Some((phenotype_id, ancestry, _base_path, _worker_id, start_time)) =
+        ingestion.active_tasks.remove(&req.task_id)
+    {
+        let duration = start_time.elapsed();
+        ingestion.completed_count += 1;
+
+        println!(
+            "Ingestion complete: {}/{} ({} rows in {:.1}s) [{}/{}]",
+            phenotype_id,
+            ancestry,
+            req.rows_processed,
+            duration.as_secs_f64(),
+            ingestion.completed_count,
+            ingestion.total_tasks
+        );
+    } else {
+        // Task not found - might have already been handled
+        println!(
+            "Warning: Ingestion task {} not found in active_tasks",
+            req.task_id
+        );
+        ingestion.completed_count += 1;
+    }
+}
+
 ///
 /// Uses task_id to lookup the active task and update the appropriate state.
 fn complete_batch_work(
@@ -1572,11 +1771,29 @@ async fn complete_work(
             }
         }
 
+        // For ingestion jobs, mark task as failed
+        if let Some(ref mut ingestion) = data.ingestion_state {
+            if let Some((phenotype_id, ancestry, _base_path, _worker_id, _start_time)) =
+                ingestion.active_tasks.remove(&req.task_id)
+            {
+                println!(
+                    "Ingestion failed: {}/{} - {}",
+                    phenotype_id, ancestry, req.error.as_ref().unwrap()
+                );
+                ingestion.failed_count += 1;
+            }
+        }
+
         return axum::Json(CompleteResponse { acknowledged: true });
     }
 
-    // Check if this is a batch Manhattan job
-    if data.batch_state.is_some() {
+    // Check if this is an ingestion job
+    if data.ingestion_state.is_some() {
+        let mut ingestion = data.ingestion_state.take().unwrap();
+        complete_ingestion_work(&mut ingestion, &req);
+        data.ingestion_state = Some(ingestion);
+    } else if data.batch_state.is_some() {
+        // Check if this is a batch Manhattan job
         let mut batch = data.batch_state.take().unwrap();
         complete_batch_work(&mut data, &mut batch, &req);
         data.batch_state = Some(batch);
@@ -1778,17 +1995,18 @@ async fn submit_job(
     }
 
     // Validate request
-    // ManhattanBatch jobs don't use total_partitions (they manage partitions per-phenotype)
+    // ManhattanBatch and IngestManhattan jobs don't use total_partitions (they manage tasks internally)
     let is_batch_job = matches!(&req.job_spec, JobSpec::ManhattanBatch { .. });
-    if req.total_partitions == 0 && !is_batch_job {
+    let is_ingest_job = matches!(&req.job_spec, JobSpec::IngestManhattan { .. });
+    if req.total_partitions == 0 && !is_batch_job && !is_ingest_job {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
             error: Some("total_partitions must be greater than 0".to_string()),
         });
     }
 
-    // ManhattanBatch and Manhattan jobs don't require input_path (they use per-spec paths)
-    let needs_input_path = !is_batch_job && !matches!(&req.job_spec, JobSpec::Manhattan(_));
+    // ManhattanBatch, Manhattan, and IngestManhattan jobs don't require input_path (they use per-spec paths)
+    let needs_input_path = !is_batch_job && !is_ingest_job && !matches!(&req.job_spec, JobSpec::Manhattan(_));
     if req.input_path.is_empty() && needs_input_path {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
@@ -1896,6 +2114,47 @@ async fn submit_job(
         });
     }
 
+    // Handle IngestManhattan jobs (discover phenotypes and queue ingestion tasks)
+    if let JobSpec::IngestManhattan { ref input_dir, ref clickhouse_url, ref database } = req.job_spec {
+        // Clear standard partition tracking - ingestion uses its own state
+        data.pending_partitions.clear();
+
+        println!(
+            "Initializing Manhattan ingestion from {} to ClickHouse {}",
+            input_dir, clickhouse_url
+        );
+
+        // Discover phenotypes by scanning for manifest.json files
+        // Structure: {input_dir}/{ancestry}/{phenotype_id}/manifest.json
+        match discover_phenotypes_for_ingestion(input_dir) {
+            Ok(phenotypes) => {
+                let total = phenotypes.len();
+                println!("  Discovered {} phenotypes for ingestion", total);
+
+                data.ingestion_state = Some(IngestionState {
+                    pending_tasks: phenotypes.into_iter().collect(),
+                    active_tasks: HashMap::new(),
+                    clickhouse_url: clickhouse_url.clone(),
+                    database: database.clone(),
+                    completed_count: 0,
+                    failed_count: 0,
+                    total_tasks: total,
+                });
+
+                return axum::Json(JobConfigResponse {
+                    acknowledged: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                return axum::Json(JobConfigResponse {
+                    acknowledged: false,
+                    error: Some(format!("Failed to discover phenotypes: {}", e)),
+                });
+            }
+        }
+    }
+
     // Initialize Manhattan pipeline state if this is a single Manhattan job
     data.manhattan_state = if let JobSpec::Manhattan(ref spec) = req.job_spec {
         // For Manhattan jobs, we manage exome/genome partitions separately
@@ -1974,6 +2233,7 @@ async fn cancel_job(
     data.manhattan_state = None;
     data.batch_state = None;
     data.active_tasks.clear();
+    data.ingestion_state = None;
     data.idle = true;
 
     let reason = req.reason.unwrap_or_else(|| "User request".to_string());
