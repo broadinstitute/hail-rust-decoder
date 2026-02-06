@@ -418,6 +418,7 @@
       <span class="meta-text" id="job-status-text">Connecting...</span>
     </div>
     <div class="header-right">
+      <span class="meta-text" id="build-version" style="color:var(--text-dim);font-size:10px"></span>
       <span class="status-dot" id="live-dot"></span>
       <span class="meta-text" id="elapsed-text">--:--:--</span>
     </div>
@@ -768,6 +769,11 @@ async function update() {
       statusText.textContent = jobLabel + 'Running';
     }
     document.getElementById('elapsed-text').textContent = formatElapsed(summary.elapsed_secs);
+
+    // Build version
+    if (summary.build_version) {
+      document.getElementById('build-version').textContent = 'v' + summary.build_version;
+    }
 
     // Progress bar
     const pct = summary.progress_percent;

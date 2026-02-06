@@ -2095,6 +2095,7 @@ async fn get_dashboard_summary(
         idle: data.idle,
         last_error: data.last_error.clone(),
         batch_progress,
+        build_version: Some(env!("GIT_HASH").to_string()),
     })
 }
 

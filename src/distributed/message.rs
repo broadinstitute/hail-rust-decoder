@@ -557,6 +557,9 @@ pub struct DashboardSummary {
     /// Batch progress stats (for batch Manhattan jobs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_progress: Option<DashboardBatchProgress>,
+    /// Build version (git commit hash)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_version: Option<String>,
 }
 
 /// Request to submit a new job to an idle coordinator.
