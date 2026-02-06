@@ -2428,8 +2428,10 @@ fn run_loci(args: LociArgs) -> Result<()> {
         &args.dir,
         args.exome.as_deref(),
         args.genome.as_deref(),
+        args.gene_burden.as_deref(),
         args.locus_window,
         args.threshold,
+        args.gene_threshold,
         args.threads,
     )?;
 

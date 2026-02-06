@@ -48,12 +48,18 @@ pub struct LociSpec {
     /// Path to genome results Hail table (for reading variants)
     #[serde(default)]
     pub genome_results: Option<String>,
+    /// Path to gene burden results Hail table (for seeding locus regions)
+    #[serde(default)]
+    pub gene_burden: Option<String>,
     /// Window size around significant hits
     #[serde(default = "default_locus_window")]
     pub locus_window: i32,
-    /// Significance threshold
+    /// Significance threshold for variants
     #[serde(default = "default_threshold")]
     pub threshold: f64,
+    /// Significance threshold for gene burden
+    #[serde(default = "default_gene_threshold")]
+    pub gene_threshold: f64,
 }
 
 /// A locus region to generate a plot for.

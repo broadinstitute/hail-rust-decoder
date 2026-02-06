@@ -548,15 +548,19 @@ fn process_loci(spec: &crate::distributed::message::LociSpec) -> Result<usize> {
     println!("  Output dir: {}", spec.output_dir);
     println!("  Exome: {:?}", spec.exome_results);
     println!("  Genome: {:?}", spec.genome_results);
+    println!("  Gene burden: {:?}", spec.gene_burden);
     println!("  Window: {}bp", spec.locus_window);
     println!("  Threshold: {}", spec.threshold);
+    println!("  Gene threshold: {}", spec.gene_threshold);
 
     let loci = generate_loci_standalone(
         &spec.output_dir,
         spec.exome_results.as_deref(),
         spec.genome_results.as_deref(),
+        spec.gene_burden.as_deref(),
         spec.locus_window,
         spec.threshold,
+        spec.gene_threshold,
         8, // threads per worker
     )?;
 

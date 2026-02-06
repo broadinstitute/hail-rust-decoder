@@ -481,6 +481,10 @@ pub struct LociArgs {
     #[arg(long)]
     pub genome: Option<String>,
 
+    /// Path to gene burden results Hail Table (for seeding locus regions from significant genes)
+    #[arg(long)]
+    pub gene_burden: Option<String>,
+
     /// Window size (bp) around significant hits for locus plots (default: 1MB)
     #[arg(long, default_value = "1000000")]
     pub locus_window: i32,
@@ -488,6 +492,10 @@ pub struct LociArgs {
     /// P-value threshold for significant variants (default: 5e-8)
     #[arg(long, default_value = "5e-8")]
     pub threshold: f64,
+
+    /// Significance threshold for gene burden results (default: 2.5e-6)
+    #[arg(long, default_value = "2.5e-6")]
+    pub gene_threshold: f64,
 
     /// P-value field name in source tables
     #[arg(long, default_value = "Pvalue")]

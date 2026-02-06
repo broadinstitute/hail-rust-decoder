@@ -2524,7 +2524,9 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut output_dir: Option<String> = None;
         let mut exome: Option<String> = None;
         let mut genome: Option<String> = None;
+        let mut gene_burden: Option<String> = None;
         let mut threshold: f64 = 5e-8;
+        let mut gene_threshold: f64 = 2.5e-6;
         let mut locus_window: i32 = 1_000_000;
 
         let mut i = 0;
@@ -2554,9 +2556,25 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                         i += 1;
                     }
                 }
+                "--gene-burden" => {
+                    if i + 1 < args.len() {
+                        gene_burden = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 "--threshold" => {
                     if i + 1 < args.len() {
                         threshold = args[i + 1].parse().unwrap_or(5e-8);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--gene-threshold" => {
+                    if i + 1 < args.len() {
+                        gene_threshold = args[i + 1].parse().unwrap_or(2.5e-6);
                         i += 2;
                     } else {
                         i += 1;
@@ -2594,8 +2612,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             output_dir: output_dir.clone(),
             exome_results: exome,
             genome_results: genome,
+            gene_burden,
             locus_window,
             threshold,
+            gene_threshold,
         };
 
         // Use output_dir as the "input_path" for job tracking

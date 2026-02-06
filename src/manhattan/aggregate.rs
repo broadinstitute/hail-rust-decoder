@@ -34,8 +34,10 @@ pub fn generate_loci_standalone(
     output_dir: &str,
     exome_table: Option<&str>,
     genome_table: Option<&str>,
+    gene_burden_table: Option<&str>,
     locus_window: i32,
     threshold: f64,
+    gene_threshold: f64,
     num_threads: usize,
 ) -> Result<Vec<ManifestLocus>> {
     let output_base = output_dir.trim_end_matches('/');
@@ -44,8 +46,10 @@ pub fn generate_loci_standalone(
         output_base,
         exome_table,
         genome_table,
+        gene_burden_table,
         locus_window,
         threshold,
+        gene_threshold,
         num_threads,
     )?;
 
@@ -762,8 +766,10 @@ fn generate_locus_plots(
         output_base,
         spec.exome_results.as_deref(),
         spec.genome_results.as_deref(),
+        spec.gene_burden.as_deref(),
         spec.locus_window,
         spec.threshold,
+        spec.gene_threshold,
         8, // Default thread count for aggregation
     )
 }
@@ -773,11 +779,14 @@ fn generate_loci_from_parquet(
     output_base: &str,
     exome_table: Option<&str>,
     genome_table: Option<&str>,
+    gene_burden_table: Option<&str>,
     locus_window: i32,
     threshold: f64,
+    gene_threshold: f64,
     num_threads: usize,
 ) -> Result<Vec<ManifestLocus>> {
     use crate::io::is_cloud_path;
+    use crate::manhattan::genes::process_complex_gene_burden;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -801,6 +810,33 @@ fn generate_loci_from_parquet(
         }
     }
 
+    // Step 1b: Extract significant genes from gene burden table
+    let mut gene_regions: Vec<(String, i32, i32)> = Vec::new();
+    if let Some(gene_burden_path) = gene_burden_table {
+        println!("    Processing gene burden table for significant genes...");
+        match process_complex_gene_burden(gene_burden_path, gene_threshold) {
+            Ok((sig_genes, _intervals)) => {
+                println!("      Found {} significant genes", sig_genes.len());
+                for gene in &sig_genes {
+                    let (chrom, start, end) = &gene.interval;
+                    // Add gene as a "position" for region computation
+                    // Use the gene midpoint as the position, but we'll handle the full span in region computation
+                    sig_positions.push(SigPosition {
+                        contig: chrom.clone(),
+                        position: (start + end) / 2, // midpoint
+                        pvalue: gene.best_pvalue,
+                        source: "gene".to_string(),
+                    });
+                    // Also track the full gene bounds for proper region expansion
+                    gene_regions.push((chrom.clone(), *start, *end));
+                }
+            }
+            Err(e) => {
+                eprintln!("      Warning: failed to process gene burden: {}", e);
+            }
+        }
+    }
+
     if sig_positions.is_empty() {
         println!("    No significant hits found, skipping locus plots");
         return Ok(vec![]);
@@ -808,7 +844,7 @@ fn generate_loci_from_parquet(
 
     // Step 2: Compute locus regions (union + merge overlapping)
     println!("    Computing locus regions (window: {}bp)...", locus_window);
-    let regions = compute_locus_regions(&sig_positions, locus_window);
+    let regions = compute_locus_regions_with_genes(&sig_positions, &gene_regions, locus_window);
     println!("      Found {} merged locus regions", regions.len());
 
     if regions.is_empty() {
@@ -1094,6 +1130,84 @@ fn compute_locus_regions(
     });
 
     regions
+}
+
+/// Compute locus regions including gene bounds.
+///
+/// For variant positions, expands by ±window.
+/// For gene regions, expands the full gene bounds by ±window.
+fn compute_locus_regions_with_genes(
+    positions: &[SigPosition],
+    gene_regions: &[(String, i32, i32)],
+    window: i32,
+) -> Vec<(String, i32, i32)> {
+    // Collect all expanded regions
+    let mut all_regions: Vec<(String, i32, i32)> = Vec::new();
+
+    // Add variant position regions (expanded by window)
+    for pos in positions {
+        let expanded_start = (pos.position - window).max(1);
+        let expanded_end = pos.position + window;
+        all_regions.push((pos.contig.clone(), expanded_start, expanded_end));
+    }
+
+    // Add gene regions (gene bounds expanded by window)
+    for (chrom, start, end) in gene_regions {
+        let expanded_start = (start - window).max(1);
+        let expanded_end = end + window;
+        all_regions.push((chrom.clone(), expanded_start, expanded_end));
+    }
+
+    // Group by chromosome
+    let mut by_chrom: HashMap<String, Vec<(i32, i32)>> = HashMap::new();
+    for (chrom, start, end) in all_regions {
+        by_chrom.entry(chrom).or_default().push((start, end));
+    }
+
+    // Merge overlapping regions per chromosome
+    let mut merged_regions = Vec::new();
+
+    for (contig, mut intervals) in by_chrom {
+        // Sort by start position
+        intervals.sort_by_key(|(start, _)| *start);
+
+        let mut current_start: Option<i32> = None;
+        let mut current_end: Option<i32> = None;
+
+        for (start, end) in intervals {
+            match (current_start, current_end) {
+                (Some(_cs), Some(ce)) if start <= ce => {
+                    // Overlapping - extend current region
+                    current_end = Some(end.max(ce));
+                }
+                (Some(cs), Some(ce)) => {
+                    // Non-overlapping - emit current and start new
+                    merged_regions.push((contig.clone(), cs, ce));
+                    current_start = Some(start);
+                    current_end = Some(end);
+                }
+                _ => {
+                    // First region
+                    current_start = Some(start);
+                    current_end = Some(end);
+                }
+            }
+        }
+
+        // Emit final region
+        if let (Some(start), Some(end)) = (current_start, current_end) {
+            merged_regions.push((contig, start, end));
+        }
+    }
+
+    // Sort by chromosome and position
+    merged_regions.sort_by(|a, b| {
+        let chr_a = parse_chrom_order(&a.0);
+        let chr_b = parse_chrom_order(&b.0);
+        chr_a.cmp(&chr_b).then(a.1.cmp(&b.1))
+    });
+
+    merged_regions
 }
 
 /// Parse chromosome for sorting (1-22, then X, Y, MT).
