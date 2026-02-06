@@ -220,9 +220,10 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             },
         },
         significant_hits: ManifestSignificantHits {
+            // Consolidated output
             exome: if spec.exome_results.is_some() {
                 Some(ManifestSigHits {
-                    path: format!("{}/exome_significant.parquet", output_base),
+                    path: format!("{}/significant.parquet", output_base),
                     count: exome_sig_count,
                     top_hit: exome_top_hit,
                 })
@@ -231,14 +232,14 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             },
             genome: if spec.genome_results.is_some() {
                 Some(ManifestSigHits {
-                    path: format!("{}/genome_significant.parquet", output_base),
+                    path: format!("{}/significant.parquet", output_base),
                     count: genome_sig_count,
                     top_hit: genome_top_hit,
                 })
             } else {
                 None
             },
-            gene: None, // TODO: Gene significant hits
+            gene: None,
         },
         loci: loci.clone(),
         stats: ManifestStats {
@@ -908,11 +909,11 @@ fn chrono_now_iso() -> String {
 
 /// A significant hit position extracted from merged parquet.
 #[derive(Debug, Clone)]
-struct SigPosition {
-    contig: String,
-    position: i32,
-    pvalue: f64,
-    source: String, // "exome" or "genome"
+pub struct SigPosition {
+    pub contig: String,
+    pub position: i32,
+    pub pvalue: f64,
+    pub source: String, // "exome" or "genome"
 }
 
 /// Generate locus plots for significant regions (called from aggregation phase).
@@ -956,25 +957,18 @@ fn generate_loci_from_parquet(
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    // Step 1: Extract significant positions from merged parquet files
+    // Step 1: Extract significant positions from merged parquet file
     println!("    Extracting significant positions...");
-    let mut sig_positions = Vec::new();
+    let sig_path = format!("{}/significant.parquet", output_base);
 
-    let exome_sig_path = format!("{}/exome_significant.parquet", output_base);
-    if exome_table.is_some() {
-        if let Ok(positions) = extract_sig_positions(&exome_sig_path, "exome") {
-            println!("      Found {} exome significant hits", positions.len());
-            sig_positions.extend(positions);
-        }
-    }
-
-    let genome_sig_path = format!("{}/genome_significant.parquet", output_base);
-    if genome_table.is_some() {
-        if let Ok(positions) = extract_sig_positions(&genome_sig_path, "genome") {
-            println!("      Found {} genome significant hits", positions.len());
-            sig_positions.extend(positions);
-        }
-    }
+    let mut sig_positions = if std::path::Path::new(&sig_path).exists() || is_cloud_path(&sig_path) {
+        let positions = extract_sig_positions(&sig_path)?;
+        println!("      Found {} significant hits from significant.parquet", positions.len());
+        positions
+    } else {
+        println!("      No significant.parquet found, skipping variant hits");
+        Vec::new()
+    };
 
     // Step 1b: Extract significant genes from gene burden table
     let mut gene_regions: Vec<(String, i32, i32)> = Vec::new();
@@ -1266,8 +1260,8 @@ fn generate_single_locus_core(
     Ok(Some((manifest_locus, definition_row, variant_rows)))
 }
 
-/// Extract significant positions from a merged parquet file.
-fn extract_sig_positions(parquet_path: &str, source: &str) -> Result<Vec<SigPosition>> {
+/// Extract significant positions from the consolidated significant.parquet file.
+pub fn extract_sig_positions(parquet_path: &str) -> Result<Vec<SigPosition>> {
     use crate::io::is_cloud_path;
 
     let batches = if is_cloud_path(parquet_path) {
@@ -1290,23 +1284,22 @@ fn extract_sig_positions(parquet_path: &str, source: &str) -> Result<Vec<SigPosi
         let contig_idx = schema.fields().iter().position(|f| f.name() == "contig");
         let position_idx = schema.fields().iter().position(|f| f.name() == "position");
         let pvalue_idx = schema.fields().iter().position(|f| f.name() == "pvalue");
+        let seq_type_idx = schema.fields().iter().position(|f| f.name() == "sequencing_type");
 
-        if contig_idx.is_none() || position_idx.is_none() || pvalue_idx.is_none() {
+        if contig_idx.is_none() || position_idx.is_none() || pvalue_idx.is_none() || seq_type_idx.is_none() {
             continue;
         }
 
-        let contig_col = batch.column(contig_idx.unwrap())
-            .as_any().downcast_ref::<StringArray>();
-        let position_col = batch.column(position_idx.unwrap())
-            .as_any().downcast_ref::<Int32Array>();
-        let pvalue_col = batch.column(pvalue_idx.unwrap())
-            .as_any().downcast_ref::<Float64Array>();
+        let contig_col = batch.column(contig_idx.unwrap()).as_any().downcast_ref::<StringArray>();
+        let position_col = batch.column(position_idx.unwrap()).as_any().downcast_ref::<Int32Array>();
+        let pvalue_col = batch.column(pvalue_idx.unwrap()).as_any().downcast_ref::<Float64Array>();
+        let seq_type_col = batch.column(seq_type_idx.unwrap()).as_any().downcast_ref::<StringArray>();
 
-        if let (Some(contig_arr), Some(pos_arr), Some(pval_arr)) =
-            (contig_col, position_col, pvalue_col)
+        if let (Some(contig_arr), Some(pos_arr), Some(pval_arr), Some(seq_arr)) =
+            (contig_col, position_col, pvalue_col, seq_type_col)
         {
             for i in 0..batch.num_rows() {
-                if contig_arr.is_null(i) || pos_arr.is_null(i) || pval_arr.is_null(i) {
+                if contig_arr.is_null(i) || pos_arr.is_null(i) || pval_arr.is_null(i) || seq_arr.is_null(i) {
                     continue;
                 }
 
@@ -1314,7 +1307,7 @@ fn extract_sig_positions(parquet_path: &str, source: &str) -> Result<Vec<SigPosi
                     contig: contig_arr.value(i).to_string(),
                     position: pos_arr.value(i),
                     pvalue: pval_arr.value(i),
-                    source: source.to_string(),
+                    source: seq_arr.value(i).to_string(),
                 });
             }
         }

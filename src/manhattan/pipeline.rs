@@ -8,9 +8,12 @@
 //! 5. Generate locus plots and JSON exports
 
 use crate::codec::EncodedValue;
-use crate::manhattan::data::{BufferedVariant, VariantSource};
+use crate::manhattan::data::{BufferedVariant, VariantSource, SigHitRow, LocusDefinitionRow, LocusVariantRow, ManifestLocus, ManifestRegion, ManifestLocusVariants};
 use crate::manhattan::genes::{process_complex_gene_burden, GeneMap, SignificantGene};
 use crate::manhattan::layout::{ChromosomeLayout, YScale};
+use crate::manhattan::sig_writer::SigHitWriter;
+use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
+use crate::manhattan::reference::{calculate_xpos, normalize_contig_name};
 use crate::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::reference::get_contig_lengths;
 use crate::manhattan::render::ManhattanRenderer;
@@ -107,7 +110,14 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     // Prepare Buffers
     let mut exome_buffer: Vec<BufferedVariant> = Vec::new();
     let mut genome_buffer: Vec<BufferedVariant> = Vec::new();
-    let mut sig_variants: Vec<(String, i32, f64, VariantSource)> = Vec::new();
+
+    // Writers for consolidated output
+    let sig_path = output_base.join("significant.parquet");
+    let mut sig_writer = SigHitWriter::new(sig_path.to_str().unwrap())?;
+
+    let mut locus_definitions = Vec::new();
+    let mut locus_variants = Vec::new();
+    let mut manifest_loci = Vec::new();
 
     // We need at least one table to establish layout
     let layout_path = config
@@ -147,7 +157,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             config,
             &interest_regions,
             &mut exome_buffer,
-            &mut sig_variants,
+            &mut sig_writer,
             output_base.join("exome_manhattan.png").to_str().unwrap(),
         )?;
     }
@@ -165,7 +175,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             config,
             &interest_regions,
             &mut genome_buffer,
-            &mut sig_variants,
+            &mut sig_writer,
             output_base.join("genome_manhattan.png").to_str().unwrap(),
         )?;
     }
@@ -184,15 +194,30 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
         }
     }
 
+    // Finish significant hits writer
+    let sig_count = sig_writer.finish()?;
+    println!("Wrote {} significant hits to significant.parquet", sig_count);
+
     // 5. Compute Locus Regions
     if config.locus_plots {
         println!("Defining locus regions...");
 
-        // Add significant variant regions (± window)
-        for (chrom, pos, _, _) in &sig_variants {
-            let start = (pos - config.locus_window).max(1);
-            let end = pos + config.locus_window;
-            interest_regions.add(chrom.clone(), start, end);
+        // We need to re-read significant positions to define regions since we streamed them to parquet
+        // Ideally we would have tracked them in memory too, but let's read back from the file we just wrote
+        // or just rely on gene regions if variants are too many.
+        // For local pipeline, we can just use the buffered variants that are significant?
+        // No, buffered variants are only for specific regions.
+
+        // Let's re-read significant hits for region definition
+        // Note: For large datasets this might be slow, but it's consistent with distributed flow
+        use crate::manhattan::aggregate::extract_sig_positions;
+        let sig_path_str = sig_path.to_str().unwrap();
+        if let Ok(positions) = extract_sig_positions(sig_path_str) {
+            for pos in positions {
+                let start = (pos.position - config.locus_window).max(1);
+                let end = pos.position + config.locus_window;
+                interest_regions.add(pos.contig, start, end);
+            }
         }
 
         interest_regions.optimize();
@@ -226,24 +251,81 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                         continue;
                     }
 
-                    // Create region output directory
+                    // Create region output directory (for plot only)
                     let region_name = format!("{}_{}_{}", contig, start, end);
                     let region_dir = loci_dir.join(&region_name);
                     fs::create_dir_all(&region_dir)?;
 
-                    // Write variants JSON
-                    let exome_json = serde_json::to_string_pretty(&exome_subset)?;
-                    fs::write(region_dir.join("exome.json"), exome_json)?;
+                    // Collect variants for parquet
+                    // Phenotype/Ancestry defaults for local run
+                    let phenotype_name = "local_run";
+                    let ancestry_name = "meta";
 
-                    let genome_json = serde_json::to_string_pretty(&genome_subset)?;
-                    fs::write(region_dir.join("genome.json"), genome_json)?;
+                    let region_variants: Vec<LocusVariantRow> = exome_subset.iter()
+                        .map(|v| LocusVariantRow {
+                            locus_id: region_name.clone(),
+                            phenotype: phenotype_name.to_string(),
+                            ancestry: ancestry_name.to_string(),
+                            sequencing_type: "exome".to_string(),
+                            xpos: calculate_xpos(contig, v.position),
+                            position: v.position,
+                            pvalue: v.pvalue,
+                            neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
+                            is_significant: v.pvalue < config.threshold,
+                        })
+                        .chain(genome_subset.iter().map(|v| LocusVariantRow {
+                            locus_id: region_name.clone(),
+                            phenotype: phenotype_name.to_string(),
+                            ancestry: ancestry_name.to_string(),
+                            sequencing_type: "genome".to_string(),
+                            xpos: calculate_xpos(contig, v.position),
+                            position: v.position,
+                            pvalue: v.pvalue,
+                            neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
+                            is_significant: v.pvalue < config.threshold,
+                        }))
+                        .collect();
 
-                    // If genes loaded, extract genes in region
-                    if let Some(map) = &gene_map {
-                        let genes = map.query(contig, start, end);
-                        let genes_json = serde_json::to_string_pretty(&genes)?;
-                        fs::write(region_dir.join("genes.json"), genes_json)?;
-                    }
+                    locus_variants.extend(region_variants);
+
+                    // Add Locus Definition
+                    // Find lead variant
+                    let lead = exome_subset.iter().chain(genome_subset.iter())
+                        .min_by(|a, b| a.pvalue.partial_cmp(&b.pvalue).unwrap_or(std::cmp::Ordering::Equal));
+
+                    let source_str = if !exome_subset.is_empty() && !genome_subset.is_empty() { "both" }
+                        else if !exome_subset.is_empty() { "exome" }
+                        else { "genome" };
+
+                    locus_definitions.push(LocusDefinitionRow {
+                        locus_id: region_name.clone(),
+                        phenotype: phenotype_name.to_string(),
+                        ancestry: ancestry_name.to_string(),
+                        contig: normalize_contig_name(contig),
+                        start,
+                        stop: end,
+                        xstart: calculate_xpos(contig, start),
+                        xstop: calculate_xpos(contig, end),
+                        source: source_str.to_string(),
+                        lead_variant: lead.map(|v| format!("{}:{}", v.contig, v.position)).unwrap_or_default(),
+                        lead_pvalue: lead.map(|v| v.pvalue).unwrap_or(1.0),
+                        exome_count: exome_subset.len() as u32,
+                        genome_count: genome_subset.len() as u32,
+                    });
+
+                    // Add to Manifest
+                    manifest_loci.push(ManifestLocus {
+                        id: region_name.clone(),
+                        region: ManifestRegion { contig: normalize_contig_name(contig), start: start as i64, end: end as i64 },
+                        source: source_str.to_string(),
+                        lead_variant: lead.map(|v| format!("{}:{}", v.contig, v.position)).unwrap_or_default(),
+                        lead_pvalue: lead.map(|v| v.pvalue).unwrap_or(1.0),
+                        lead_gene: lead.and_then(|v| v.gene_symbol.clone()),
+                        plot: format!("loci/{}/plot.png", region_name),
+                        exome_variants: if !exome_subset.is_empty() { Some(ManifestLocusVariants { path: format!("loci_variants.parquet (locus_id={})", region_name), count: exome_subset.len() as u64 }) } else { None },
+                        genome_variants: if !genome_subset.is_empty() { Some(ManifestLocusVariants { path: format!("loci_variants.parquet (locus_id={})", region_name), count: genome_subset.len() as u64 }) } else { None },
+                        genes: vec![],
+                    });
 
                     // Render locus plot
                     let png_data = render_locus_plot(
@@ -262,10 +344,23 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
         }
     }
 
+    // Write loci parquet files
+    if !locus_definitions.is_empty() {
+        println!("Writing loci.parquet...");
+        let mut writer = LocusDefinitionWriter::new(output_base.join("loci.parquet").to_str().unwrap())?;
+        writer.write_batch(&locus_definitions)?;
+        writer.finish()?;
+
+        println!("Writing loci_variants.parquet...");
+        let mut writer = LocusVariantWriter::new(output_base.join("loci_variants.parquet").to_str().unwrap())?;
+        writer.write_batch(&locus_variants)?;
+        writer.finish()?;
+    }
+
     // Write summary
     let summary = serde_json::json!({
         "significant_genes": sig_genes.len(),
-        "significant_variants": sig_variants.len(),
+        "significant_variants": sig_count,
         "exome_variants_buffered": exome_buffer.len(),
         "genome_variants_buffered": genome_buffer.len(),
         "locus_regions": interest_regions.len(),
@@ -290,7 +385,7 @@ fn scan_variant_table(
     config: &PipelineConfig,
     interest_regions: &IntervalList,
     buffer: &mut Vec<BufferedVariant>,
-    sig_variants: &mut Vec<(String, i32, f64, VariantSource)>,
+    sig_writer: &mut SigHitWriter<std::fs::File>,
     output_png: &str,
 ) -> Result<()> {
     let results_engine = QueryEngine::open_path(results_path)?;
@@ -347,7 +442,7 @@ fn scan_variant_table(
                 variant_threshold,
                 interest_regions,
                 buffer,
-                sig_variants,
+                sig_writer,
                 &mut renderer,
             );
 
@@ -372,7 +467,7 @@ fn scan_variant_table(
                 variant_threshold,
                 interest_regions,
                 buffer,
-                sig_variants,
+                sig_writer,
                 &mut renderer,
             );
 
@@ -404,7 +499,7 @@ fn process_joined_row(
     variant_threshold: f64,
     interest_regions: &IntervalList,
     buffer: &mut Vec<BufferedVariant>,
-    sig_variants: &mut Vec<(String, i32, f64, VariantSource)>,
+    sig_writer: &mut SigHitWriter<std::fs::File>,
     renderer: &mut ManhattanRenderer,
 ) {
     // Extract from left (results)
@@ -428,7 +523,24 @@ fn process_joined_row(
 
     // Check significance
     if pvalue < variant_threshold {
-        sig_variants.push((contig.clone(), position, pvalue, source));
+        // Write to parquet
+        let _ = sig_writer.write(SigHitRow {
+            phenotype: "local_run".to_string(),
+            ancestry: "meta".to_string(),
+            sequencing_type: match source {
+                VariantSource::Exome => "exome".to_string(),
+                VariantSource::Genome => "genome".to_string(),
+            },
+            xpos: calculate_xpos(&contig, position),
+            contig: normalize_contig_name(&contig),
+            position,
+            ref_allele: alleles.first().cloned().unwrap_or_default(),
+            alt_allele: alleles.get(1).cloned().unwrap_or_default(),
+            pvalue,
+            beta,
+            se: None, // Need to extract
+            af: None, // Need to extract
+        });
     }
 
     // Buffer if interesting
@@ -461,7 +573,7 @@ fn process_single_row(
     variant_threshold: f64,
     interest_regions: &IntervalList,
     buffer: &mut Vec<BufferedVariant>,
-    sig_variants: &mut Vec<(String, i32, f64, VariantSource)>,
+    sig_writer: &mut SigHitWriter<std::fs::File>,
     renderer: &mut ManhattanRenderer,
 ) {
     let (contig, position, pvalue, beta, alleles) = match extract_variant_fields(row, y_field) {
@@ -476,7 +588,24 @@ fn process_single_row(
 
     // Check significance
     if pvalue < variant_threshold {
-        sig_variants.push((contig.clone(), position, pvalue, source));
+        // Write to parquet
+        let _ = sig_writer.write(SigHitRow {
+            phenotype: "local_run".to_string(),
+            ancestry: "meta".to_string(),
+            sequencing_type: match source {
+                VariantSource::Exome => "exome".to_string(),
+                VariantSource::Genome => "genome".to_string(),
+            },
+            xpos: calculate_xpos(&contig, position),
+            contig: normalize_contig_name(&contig),
+            position,
+            ref_allele: alleles.first().cloned().unwrap_or_default(),
+            alt_allele: alleles.get(1).cloned().unwrap_or_default(),
+            pvalue,
+            beta,
+            se: None,
+            af: None,
+        });
     }
 
     // Buffer if interesting
