@@ -2524,6 +2524,10 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
         println!("  Ancestries filter: {:?}", ancs);
     }
 
+    if let Some(sample) = args.sample {
+        println!("  Sample: {:.0}%", sample * 100.0);
+    }
+
     if let Some(limit) = args.limit {
         println!("  Limit: {}", limit);
     }
@@ -2535,6 +2539,7 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
         &args.assets_json,
         args.analysis_ids.as_deref(),
         args.ancestries.as_deref(),
+        args.sample,
         args.limit,
     )?;
 

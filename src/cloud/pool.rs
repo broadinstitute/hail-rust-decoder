@@ -2752,6 +2752,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut output_dir: Option<String> = None;
         let mut analysis_ids: Option<Vec<String>> = None;
         let mut ancestries: Option<Vec<String>> = None;
+        let mut sample: Option<f64> = None;
         let mut limit: Option<usize> = None;
         let mut genes: Option<String> = None;
         let mut exome_annotations: Option<String> = None;
@@ -2809,6 +2810,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                         if !ancs.is_empty() {
                             ancestries = Some(ancs);
                         }
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--sample" => {
+                    if i + 1 < args.len() {
+                        sample = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2928,7 +2937,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         })?;
 
         // Load and group assets
-        let inputs = load_and_group_assets(&assets_json, analysis_ids.as_deref(), ancestries.as_deref(), limit)?;
+        let inputs = load_and_group_assets(&assets_json, analysis_ids.as_deref(), ancestries.as_deref(), sample, limit)?;
 
         if inputs.is_empty() {
             return Err(HailError::Io(std::io::Error::new(

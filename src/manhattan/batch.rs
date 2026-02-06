@@ -110,6 +110,7 @@ pub fn load_and_group_assets(
     path: &str,
     analysis_ids: Option<&[String]>,
     ancestries: Option<&[String]>,
+    sample: Option<f64>,
     limit: Option<usize>,
 ) -> Result<Vec<PhenotypeInput>> {
     let file = File::open(path).map_err(HailError::Io)?;
@@ -192,6 +193,24 @@ pub fn load_and_group_assets(
     // Sort for deterministic order
     result.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
 
+    // Sample a fraction if requested (applied before limit)
+    if let Some(frac) = sample {
+        use rand::seq::SliceRandom;
+        use rand::SeedableRng;
+
+        let frac = frac.clamp(0.0, 1.0);
+        let sample_count = ((result.len() as f64) * frac).ceil() as usize;
+
+        // Use seeded RNG for reproducibility
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        result.shuffle(&mut rng);
+        result.truncate(sample_count);
+
+        // Re-sort after sampling for consistent output order
+        result.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
+    }
+
+    // Apply limit after sampling
     if let Some(n) = limit {
         result.truncate(n);
     }
@@ -268,7 +287,7 @@ mod tests {
         let path = dir.path().join("assets.json");
         std::fs::write(&path, json).unwrap();
 
-        let result = load_and_group_assets(path.to_str().unwrap(), None, None, None).unwrap();
+        let result = load_and_group_assets(path.to_str().unwrap(), None, None, None, None).unwrap();
 
         assert_eq!(result.len(), 2);
 
@@ -301,7 +320,7 @@ mod tests {
         let path = dir.path().join("assets.json");
         std::fs::write(&path, json).unwrap();
 
-        let result = load_and_group_assets(path.to_str().unwrap(), None, None, None).unwrap();
+        let result = load_and_group_assets(path.to_str().unwrap(), None, None, None, None).unwrap();
 
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].ancestry, "afr");
