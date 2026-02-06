@@ -1185,95 +1185,73 @@ fn build_annotation_lookup(
     annotation_path: &str,
 ) -> Result<std::collections::HashMap<(String, i32, String, String), (Option<String>, Option<String>)>> {
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     // Get the interval covered by this results partition
     let interval = results_engine.get_partition_interval(partition_id)?;
 
-    // Convert interval to KeyRange for querying
-    let ranges = interval_to_key_ranges(&interval);
+    // Convert partition interval to IntervalList for querying
+    let intervals = partition_interval_to_list(&interval)?;
 
     // Open annotation table and query for this interval
-    let mut annot_engine = QueryEngine::open_path(annotation_path)?;
+    let annot_engine = QueryEngine::open_path(annotation_path)?;
 
     let mut lookup = HashMap::new();
 
-    // Query annotation table for this interval
-    if let Ok(result) = annot_engine.query(&ranges) {
-        for row in result.rows {
-            // Extract key: (contig, position, ref, alt)
-            if let Some((contig, position, ref_allele, alt_allele)) = extract_variant_key(&row) {
-                // Normalize contig name
-                let contig = if contig.starts_with("chr") {
-                    contig[3..].to_string()
-                } else {
-                    contig
-                };
+    // Query annotation table using interval-based query (properly handles locus structure)
+    match annot_engine.query_iter_with_intervals(&[], Some(Arc::new(intervals))) {
+        Ok(iter) => {
+            for row_result in iter {
+                if let Ok(row) = row_result {
+                    // Extract key: (contig, position, ref, alt)
+                    if let Some((contig, position, ref_allele, alt_allele)) = extract_variant_key(&row) {
+                        // Normalize contig name
+                        let contig = if contig.starts_with("chr") {
+                            contig[3..].to_string()
+                        } else {
+                            contig
+                        };
 
-                // Extract gene_symbol and consequence
-                let gene = extract_string_field(&row, "gene_symbol");
-                let consequence = extract_string_field(&row, "consequence")
-                    .or_else(|| extract_string_field(&row, "most_severe_consequence"));
+                        // Extract gene_symbol and consequence
+                        let gene = extract_string_field(&row, "gene_symbol");
+                        let consequence = extract_string_field(&row, "consequence")
+                            .or_else(|| extract_string_field(&row, "most_severe_consequence"));
 
-                lookup.insert((contig, position, ref_allele, alt_allele), (gene, consequence));
+                        lookup.insert((contig, position, ref_allele, alt_allele), (gene, consequence));
+                    }
+                }
             }
+            if partition_id % 100 == 0 {
+                eprintln!("    [annot] partition {} - loaded {} annotations", partition_id, lookup.len());
+            }
+        }
+        Err(e) => {
+            eprintln!("    [annot] partition {} - query error: {}", partition_id, e);
         }
     }
 
     Ok(lookup)
 }
 
-/// Convert an Interval to KeyRanges for querying.
-fn interval_to_key_ranges(interval: &crate::metadata::Interval) -> Vec<crate::query::KeyRange> {
-    use crate::query::{KeyRange, KeyValue, QueryBound};
-
-    // Extract contig and positions from the interval
-    // The interval values are serde_json::Value objects with nested structure
+/// Convert a partition Interval to an IntervalList for querying.
+fn partition_interval_to_list(interval: &crate::metadata::Interval) -> Result<IntervalList> {
+    // Extract start and end locus from the interval
     let (start_contig, start_pos) = extract_locus_from_value(&interval.start);
     let (end_contig, end_pos) = extract_locus_from_value(&interval.end);
 
-    // Build KeyRanges for contig and position separately
-    // First, filter by contig
-    let contig_start = if interval.include_start {
-        QueryBound::Included(KeyValue::String(start_contig.clone()))
-    } else {
-        QueryBound::Excluded(KeyValue::String(start_contig.clone()))
-    };
-    let contig_end = if interval.include_end {
-        QueryBound::Included(KeyValue::String(end_contig.clone()))
-    } else {
-        QueryBound::Excluded(KeyValue::String(end_contig.clone()))
-    };
+    let mut intervals = IntervalList::new();
 
-    let contig_range = KeyRange {
-        field_path: vec!["locus".to_string(), "contig".to_string()],
-        start: contig_start,
-        end: contig_end,
-    };
-
-    // For same-contig ranges, also filter by position
     if start_contig == end_contig {
-        let pos_start = if interval.include_start {
-            QueryBound::Included(KeyValue::Int32(start_pos))
-        } else {
-            QueryBound::Excluded(KeyValue::Int32(start_pos))
-        };
-        let pos_end = if interval.include_end {
-            QueryBound::Included(KeyValue::Int32(end_pos))
-        } else {
-            QueryBound::Excluded(KeyValue::Int32(end_pos))
-        };
-
-        let pos_range = KeyRange {
-            field_path: vec!["locus".to_string(), "position".to_string()],
-            start: pos_start,
-            end: pos_end,
-        };
-
-        vec![contig_range, pos_range]
+        // Same chromosome - single interval
+        intervals.add(start_contig, start_pos, end_pos);
     } else {
-        // Cross-contig range - just use contig range
-        vec![contig_range]
+        // Cross-chromosome interval (rare) - add both endpoints
+        // This is a simplification; ideally we'd add all chromosomes in between
+        intervals.add(start_contig, start_pos, i32::MAX);
+        intervals.add(end_contig, 0, end_pos);
     }
+
+    Ok(intervals)
 }
 
 /// Extract locus (contig, position) from a serde_json::Value.
