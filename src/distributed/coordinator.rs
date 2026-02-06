@@ -181,6 +181,8 @@ struct CoordinatorData {
     aggregated_results: Vec<serde_json::Value>,
     /// Manhattan pipeline state (only set for Manhattan jobs)
     manhattan_state: Option<ManhattanPipelineState>,
+    /// Last error message from a failed task
+    last_error: Option<String>,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
@@ -291,6 +293,7 @@ pub async fn run_coordinator(
         metrics_db,
         aggregated_results: Vec::new(),
         manhattan_state: None,
+        last_error: None,
     }));
 
     // Start background timeout monitor
@@ -901,6 +904,41 @@ async fn complete_work(
 ) -> axum::Json<CompleteResponse> {
     let mut data = state.lock().unwrap();
 
+    // Check if this is a failure report
+    if let Some(ref error) = req.error {
+        // Log the error prominently
+        println!(
+            "ERROR from worker {}: partitions {:?} failed: {}",
+            req.worker_id, req.partitions, error
+        );
+
+        // Store the error for dashboard display
+        data.last_error = Some(format!(
+            "Worker {} failed on partitions {:?}: {}",
+            req.worker_id, req.partitions, error
+        ));
+
+        // Remove from processing and add to failed
+        for &part_id in &req.partitions {
+            data.processing_partitions.remove(&part_id);
+            data.failed_partitions.insert(part_id);
+        }
+
+        // For Manhattan jobs, also update the manhattan state
+        if let Some(ref mut manhattan) = data.manhattan_state {
+            for &part_id in &req.partitions {
+                manhattan.exome_processing.remove(&part_id);
+                manhattan.genome_processing.remove(&part_id);
+                // If this was the aggregate task, mark it failed
+                if manhattan.aggregate_dispatched && !manhattan.aggregate_complete {
+                    println!("Aggregate task failed - job cannot complete without fixing the error");
+                }
+            }
+        }
+
+        return axum::Json(CompleteResponse { acknowledged: true });
+    }
+
     // Check if this is a Manhattan pipeline job
     if data.manhattan_state.is_some() {
         let mut manhattan = data.manhattan_state.take().unwrap();
@@ -1339,6 +1377,7 @@ async fn get_dashboard_summary(
         input_path: data.config.input_path.clone(),
         job_spec: data.config.job_spec.clone(),
         idle: data.idle,
+        last_error: data.last_error.clone(),
     })
 }
 

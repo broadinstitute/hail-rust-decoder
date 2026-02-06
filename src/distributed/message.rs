@@ -305,13 +305,16 @@ pub enum WorkResponse {
 pub struct CompleteRequest {
     /// Worker that completed the work
     pub worker_id: String,
-    /// Partitions that were completed
+    /// Partitions that were completed (or failed)
     pub partitions: Vec<usize>,
     /// Number of rows processed
     pub rows_processed: usize,
     /// Optional result data for aggregation (e.g., stats, validation report)
     #[serde(default)]
     pub result_json: Option<serde_json::Value>,
+    /// Error message if the task failed (None = success)
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Response to completion request.
@@ -440,6 +443,9 @@ pub struct DashboardSummary {
     /// Whether the coordinator is idle (waiting for job submission)
     #[serde(default)]
     pub idle: bool,
+    /// Last error message (if any task failed)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// Request to submit a new job to an idle coordinator.

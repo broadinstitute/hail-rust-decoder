@@ -413,6 +413,11 @@
     <div class="info-row"><span class="info-label">Output</span><span class="info-value" id="output-path">--</span></div>
   </div>
 
+  <div class="info-section hidden" id="error-section" style="border-color:#f85149">
+    <h2 style="color:#f85149">⚠ Error</h2>
+    <div class="info-row"><span class="info-value" id="error-message" style="color:#f85149;white-space:pre-wrap;word-break:break-all">--</span></div>
+  </div>
+
 <script>
 // Chart setup
 const chartColors = [
@@ -720,6 +725,15 @@ async function update() {
     document.getElementById('job-type').textContent = jobType;
     document.getElementById('input-path').textContent = summary.input_path || '--';
     document.getElementById('output-path').textContent = outputPath;
+
+    // Error display
+    const errorSection = document.getElementById('error-section');
+    if (summary.last_error) {
+      errorSection.classList.remove('hidden');
+      document.getElementById('error-message').textContent = summary.last_error;
+    } else {
+      errorSection.classList.add('hidden');
+    }
 
     // Worker cards
     const grid = document.getElementById('workers-grid');

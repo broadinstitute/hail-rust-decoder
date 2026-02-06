@@ -172,9 +172,21 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                         (rows, result)
                     }
                     Ok(Err(e)) => {
-                        eprintln!("Error processing partitions {:?}: {}", partitions, e);
+                        let error_msg = format!("{}", e);
+                        eprintln!("Error processing partitions {:?}: {}", partitions, error_msg);
                         cached_engine = None;
-                        // Don't report completion - let coordinator reassign after timeout
+
+                        // Report failure to coordinator so it can track and display the error
+                        let fail_req = CompleteRequest {
+                            worker_id: config.worker_id.clone(),
+                            partitions: partitions.clone(),
+                            rows_processed: 0,
+                            result_json: None,
+                            error: Some(error_msg),
+                        };
+                        if let Err(post_err) = client.post(&complete_url).json(&fail_req).send().await {
+                            eprintln!("Failed to report error to coordinator: {}", post_err);
+                        }
                         continue;
                     }
                     Err(e) => {
@@ -268,6 +280,7 @@ async fn report_completion(
         partitions: partitions.to_vec(),
         rows_processed,
         result_json,
+        error: None,
     };
 
     client
