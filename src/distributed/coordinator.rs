@@ -130,11 +130,18 @@ struct BatchState {
     ready_to_aggregate: Vec<(String, ManhattanAggregateSpec)>,
     /// Count of successfully completed phenotypes
     completed_count: usize,
-    /// Count of failed phenotypes
+    /// Count of permanently failed phenotypes (exceeded max retries)
     failed_count: usize,
     /// Total number of phenotypes in the batch
     total_phenotypes: usize,
+    /// Retry counts for aggregate tasks: phenotype_id -> retry count
+    aggregate_retry_counts: HashMap<String, usize>,
+    /// Aggregate specs for phenotypes that may need retry (phenotype_id -> spec)
+    aggregate_specs: HashMap<String, ManhattanAggregateSpec>,
 }
+
+/// Maximum retries for aggregate tasks before permanent failure.
+const MAX_AGGREGATE_RETRIES: usize = 3;
 
 /// Maximum number of phenotypes to process concurrently.
 const BATCH_ACTIVE_LIMIT: usize = 20;
@@ -1308,6 +1315,8 @@ fn complete_batch_work(
                     cleanup: false,
                 };
 
+                // Store spec for potential retries
+                batch.aggregate_specs.insert(phenotype_id.clone(), aggregate_spec.clone());
                 batch.ready_to_aggregate.push((phenotype_id.clone(), aggregate_spec));
 
                 // Remove from active phenotypes
@@ -1333,6 +1342,9 @@ fn complete_batch_work(
             // Aggregate batch completed - mark all phenotypes as done
             for phenotype_id in phenotype_ids {
                 batch.completed_count += 1;
+                // Clean up retry tracking
+                batch.aggregate_specs.remove(&phenotype_id);
+                batch.aggregate_retry_counts.remove(&phenotype_id);
                 println!(
                     "Phenotype {} aggregate complete ({}/{})",
                     phenotype_id, batch.completed_count, batch.total_phenotypes
@@ -1363,20 +1375,79 @@ async fn complete_work(
             req.worker_id, req.partitions, error
         ));
 
-        // Remove task from tracking
-        data.active_tasks.remove(&req.task_id);
+        // Look up task BEFORE removing (need to know what type of task failed)
+        let failed_task = data.active_tasks.remove(&req.task_id);
 
-        // Remove from processing and add to failed
+        // Remove from processing and add to failed (for non-batch jobs)
         for &part_id in &req.partitions {
             data.processing_partitions.remove(&part_id);
             data.failed_partitions.insert(part_id);
         }
 
-        // For batch jobs, update the batch state
+        // For batch jobs, handle retry logic based on task type
         if let Some(ref mut batch) = data.batch_state {
-            // If this was a scan task, the partitions are tracked per-phenotype
-            // For simplicity, we increment failed_count (the phenotype may retry or fail)
-            batch.failed_count += 1;
+            match failed_task {
+                Some(ActiveTask::AggregateBatch { phenotype_ids }) => {
+                    // Re-queue aggregate tasks for retry
+                    for phenotype_id in phenotype_ids {
+                        let retries = batch.aggregate_retry_counts.entry(phenotype_id.clone()).or_insert(0);
+                        *retries += 1;
+
+                        if *retries > MAX_AGGREGATE_RETRIES {
+                            println!(
+                                "Phenotype {} exceeded max aggregate retries ({}), marking as failed",
+                                phenotype_id, MAX_AGGREGATE_RETRIES
+                            );
+                            batch.failed_count += 1;
+                            batch.aggregate_specs.remove(&phenotype_id);
+                        } else if let Some(spec) = batch.aggregate_specs.get(&phenotype_id).cloned() {
+                            println!(
+                                "Re-queuing phenotype {} for aggregate retry ({}/{})",
+                                phenotype_id, retries, MAX_AGGREGATE_RETRIES
+                            );
+                            batch.ready_to_aggregate.push((phenotype_id, spec));
+                        } else {
+                            // No spec to retry with - this shouldn't happen but handle gracefully
+                            println!(
+                                "Warning: No aggregate spec for {} to retry, marking as failed",
+                                phenotype_id
+                            );
+                            batch.failed_count += 1;
+                        }
+                    }
+                }
+                Some(ActiveTask::Scan { phenotype_id, partition_id, source }) => {
+                    // Re-queue scan partitions back to the phenotype
+                    if let Some(state) = batch.active_phenotypes.get_mut(&phenotype_id) {
+                        // Put partitions back in pending
+                        for &part_id in &req.partitions {
+                            match source {
+                                ManhattanSource::Exome => {
+                                    state.exome_processing.remove(&part_id);
+                                    state.exome_pending.push_back(part_id);
+                                }
+                                ManhattanSource::Genome => {
+                                    state.genome_processing.remove(&part_id);
+                                    state.genome_pending.push_back(part_id);
+                                }
+                            }
+                        }
+                        println!(
+                            "Re-queued {} scan partitions for phenotype {} (source: {:?})",
+                            req.partitions.len(), phenotype_id, source
+                        );
+                    } else {
+                        println!(
+                            "Warning: Phenotype {} not found for scan retry, partitions lost",
+                            phenotype_id
+                        );
+                    }
+                }
+                None => {
+                    // Task not found - might have already been handled or was a legacy task
+                    println!("Warning: Failed task {} not found in active_tasks", req.task_id);
+                }
+            }
         }
 
         // For Manhattan jobs, also update the manhattan state
@@ -1673,6 +1744,8 @@ async fn submit_job(
             completed_count: 0,
             failed_count: 0,
             total_phenotypes,
+            aggregate_retry_counts: HashMap::new(),
+            aggregate_specs: HashMap::new(),
         });
 
         let output_desc = specs.first()
