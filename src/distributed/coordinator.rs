@@ -100,6 +100,48 @@ enum ManhattanPhase {
     Complete,
 }
 
+/// Tracks what a specific task_id corresponds to in batch mode.
+#[derive(Debug, Clone)]
+enum ActiveTask {
+    /// A scan task for a specific phenotype and partition
+    Scan {
+        /// Unique ID for the phenotype (e.g., analysis_id)
+        phenotype_id: String,
+        /// Which partition is being scanned
+        partition_id: usize,
+        /// Source (exome or genome)
+        source: ManhattanSource,
+    },
+    /// An aggregate batch task processing multiple phenotypes
+    AggregateBatch {
+        /// IDs of phenotypes being aggregated
+        phenotype_ids: Vec<String>,
+    },
+}
+
+/// State for managing a batch of Manhattan phenotypes.
+#[derive(Debug)]
+struct BatchState {
+    /// Phenotypes waiting to be activated (lazy loading)
+    pending_queue: VecDeque<ManhattanSpec>,
+    /// Currently active phenotypes: phenotype_id -> pipeline state
+    active_phenotypes: HashMap<String, ManhattanPipelineState>,
+    /// Phenotypes that have finished scanning and are ready to aggregate
+    ready_to_aggregate: Vec<(String, ManhattanAggregateSpec)>,
+    /// Count of successfully completed phenotypes
+    completed_count: usize,
+    /// Count of failed phenotypes
+    failed_count: usize,
+    /// Total number of phenotypes in the batch
+    total_phenotypes: usize,
+}
+
+/// Maximum number of phenotypes to process concurrently.
+const BATCH_ACTIVE_LIMIT: usize = 20;
+
+/// Minimum batch size for aggregation (unless no other work available).
+const AGGREGATE_BATCH_SIZE: usize = 10;
+
 /// State for tracking Manhattan pipeline phases.
 #[derive(Debug)]
 struct ManhattanPipelineState {
@@ -180,8 +222,12 @@ struct CoordinatorData {
     metrics_db: MetricsDb,
     /// Aggregated results from workers (for Summary/Validate jobs)
     aggregated_results: Vec<serde_json::Value>,
-    /// Manhattan pipeline state (only set for Manhattan jobs)
+    /// Manhattan pipeline state (only set for single Manhattan jobs)
     manhattan_state: Option<ManhattanPipelineState>,
+    /// Batch state (only set for ManhattanBatch jobs)
+    batch_state: Option<BatchState>,
+    /// Active tasks: task_id -> ActiveTask (for batch mode tracking)
+    active_tasks: HashMap<String, ActiveTask>,
     /// Last error message from a failed task
     last_error: Option<String>,
 }
@@ -294,6 +340,8 @@ pub async fn run_coordinator(
         metrics_db,
         aggregated_results: Vec::new(),
         manhattan_state: None,
+        batch_state: None,
+        active_tasks: HashMap::new(),
         last_error: None,
     }));
 
@@ -313,11 +361,31 @@ pub async fn run_coordinator(
             check_stuck_job(&monitor_state, stuck_timeout);
 
             // Print periodic status
-            // For Manhattan jobs, use manhattan_state; otherwise use standard counters
-            let (pending, processing, completed, failed, total, rows, is_idle, is_manhattan_complete) = {
+            // For batch/Manhattan jobs, use their state; otherwise use standard counters
+            let (pending, processing, completed, failed, total, rows, is_idle, is_batch_complete) = {
                 let data = monitor_state.lock().unwrap();
-                if let Some(ref m) = data.manhattan_state {
-                    // Manhattan pipeline uses separate tracking
+                if let Some(ref batch) = data.batch_state {
+                    // Batch jobs use phenotype-level tracking
+                    let total = batch.total_phenotypes;
+                    let completed = batch.completed_count;
+                    let pending = batch.pending_queue.len();
+                    let processing = batch.active_phenotypes.len() + batch.ready_to_aggregate.len();
+                    let is_complete = batch.pending_queue.is_empty()
+                        && batch.active_phenotypes.is_empty()
+                        && batch.ready_to_aggregate.is_empty()
+                        && (batch.completed_count + batch.failed_count) == batch.total_phenotypes;
+                    (
+                        pending,
+                        processing,
+                        completed,
+                        batch.failed_count,
+                        total,
+                        data.total_rows,
+                        data.idle,
+                        is_complete,
+                    )
+                } else if let Some(ref m) = data.manhattan_state {
+                    // Single Manhattan pipeline uses separate tracking
                     let total_parts = m.exome_total_partitions + m.genome_total_partitions + 1; // +1 for aggregate
                     let completed_parts = m.exome_completed.len() + m.genome_completed.len() + if m.aggregate_complete { 1 } else { 0 };
                     let processing_parts = m.exome_processing.len() + m.genome_processing.len() + if m.aggregate_dispatched && !m.aggregate_complete { 1 } else { 0 };
@@ -365,8 +433,8 @@ pub async fn run_coordinator(
             }
 
             // Check if job is complete
-            // For Manhattan: use the phase flag; for standard jobs: check partition counts
-            let job_complete = is_manhattan_complete ||
+            // For batch/Manhattan: use the phase flag; for standard jobs: check partition counts
+            let job_complete = is_batch_complete ||
                 (total > 0 && (completed + failed) == total && processing == 0 && pending == 0);
 
             if job_complete {
@@ -491,9 +559,14 @@ fn check_stuck_job(state: &SharedState, timeout_secs: u64) {
 
     // Only consider it stuck if ZERO partitions have completed
     // (if some completed but now it's stalled, that's different - likely worker issues handled by timeouts)
-    // Check both standard counters AND Manhattan state
-    let has_progress = if let Some(ref m) = data.manhattan_state {
-        // For Manhattan jobs, check if any exome/genome partitions completed
+    // Check batch state, Manhattan state, and standard counters
+    let has_progress = if let Some(ref batch) = data.batch_state {
+        // For batch jobs, check if any phenotypes completed
+        batch.completed_count > 0 || !batch.active_phenotypes.values().all(|s| {
+            s.exome_completed.is_empty() && s.genome_completed.is_empty()
+        })
+    } else if let Some(ref m) = data.manhattan_state {
+        // For single Manhattan jobs, check if any exome/genome partitions completed
         !m.exome_completed.is_empty() || !m.genome_completed.is_empty() || m.aggregate_complete
     } else {
         // For standard jobs, check standard counter
@@ -515,6 +588,8 @@ fn check_stuck_job(state: &SharedState, timeout_secs: u64) {
         data.pending_partitions.clear();
         data.processing_partitions.clear();
         data.manhattan_state = None;
+        data.batch_state = None;
+        data.active_tasks.clear();
         data.idle = true;
     }
 }
@@ -569,6 +644,233 @@ fn touch_worker(data: &mut CoordinatorData, worker_id: &str) {
     worker.last_seen = Instant::now();
 }
 
+/// Activate phenotypes from the pending queue up to the active limit.
+///
+/// This implements lazy loading - phenotypes are only initialized when
+/// there's capacity to process them, rather than all at once at job submission.
+fn activate_next_phenotypes(batch: &mut BatchState) {
+    while batch.active_phenotypes.len() < BATCH_ACTIVE_LIMIT && !batch.pending_queue.is_empty() {
+        let spec = batch.pending_queue.pop_front().unwrap();
+
+        // Generate a unique ID for this phenotype
+        // Use the output_path as the ID since it should be unique per phenotype
+        let phenotype_id = spec.output_path.clone();
+
+        // Get partition counts from the spec (set by CLI/pool submit)
+        // If not set, fall back to 0 (skip that source)
+        let exome_partitions = spec.exome_partitions.unwrap_or(0);
+        let genome_partitions = spec.genome_partitions.unwrap_or(0);
+
+        if exome_partitions == 0 && genome_partitions == 0 {
+            // No partitions to scan - this phenotype needs partition counts
+            // For now, skip it with a warning (CLI should set partition counts)
+            println!(
+                "Warning: Phenotype {} has no partition counts set, skipping",
+                phenotype_id
+            );
+            batch.failed_count += 1;
+            continue;
+        }
+
+        println!(
+            "Activating phenotype {} ({} exome, {} genome partitions)",
+            phenotype_id, exome_partitions, genome_partitions
+        );
+
+        // Initialize the pipeline state
+        let pipeline_state = ManhattanPipelineState {
+            phase: ManhattanPhase::Scan,
+            original_spec: spec.clone(),
+            layout: spec.layout.clone(),
+            y_scale: spec.y_scale.clone(),
+            exome_total_partitions: exome_partitions,
+            exome_pending: (0..exome_partitions).collect(),
+            exome_processing: HashMap::new(),
+            exome_completed: HashSet::new(),
+            genome_total_partitions: genome_partitions,
+            genome_pending: (0..genome_partitions).collect(),
+            genome_processing: HashMap::new(),
+            genome_completed: HashSet::new(),
+            aggregate_dispatched: false,
+            aggregate_complete: false,
+        };
+
+        batch.active_phenotypes.insert(phenotype_id, pipeline_state);
+    }
+}
+
+/// Get work for a batch Manhattan job (multi-phenotype scheduling).
+fn get_batch_work(
+    data: &mut CoordinatorData,
+    batch: &mut BatchState,
+    worker_id: &str,
+) -> axum::Json<WorkResponse> {
+    let now = Instant::now();
+    let partition_batch_size = data.config.batch_size;
+
+    // Step 1: Activate phenotypes to fill the active pool
+    activate_next_phenotypes(batch);
+
+    // Step 2: Priority 1 - Check for aggregation batches
+    // If we have enough ready or no other work available
+    let has_scan_work = batch.active_phenotypes.values().any(|state| {
+        !state.exome_pending.is_empty() || !state.genome_pending.is_empty()
+    });
+
+    let should_aggregate = batch.ready_to_aggregate.len() >= AGGREGATE_BATCH_SIZE
+        || (!batch.ready_to_aggregate.is_empty() && !has_scan_work && batch.pending_queue.is_empty());
+
+    if should_aggregate {
+        // Drain aggregation specs (up to batch size)
+        let count = std::cmp::min(batch.ready_to_aggregate.len(), AGGREGATE_BATCH_SIZE);
+        let specs_to_aggregate: Vec<_> = batch.ready_to_aggregate.drain(..count).collect();
+
+        let phenotype_ids: Vec<String> = specs_to_aggregate.iter().map(|(id, _)| id.clone()).collect();
+        let aggregate_specs: Vec<ManhattanAggregateSpec> = specs_to_aggregate.into_iter().map(|(_, spec)| spec).collect();
+
+        let task_id = Uuid::new_v4().to_string();
+
+        // Track this task
+        data.active_tasks.insert(
+            task_id.clone(),
+            ActiveTask::AggregateBatch {
+                phenotype_ids: phenotype_ids.clone(),
+            },
+        );
+
+        // Update worker status
+        if let Some(w) = data.worker_registry.get_mut(worker_id) {
+            w.status = WorkerStatus::Active;
+        }
+
+        println!(
+            "Assigned aggregate batch ({} phenotypes) to worker {} [task={}]",
+            phenotype_ids.len(), worker_id, &task_id[..8]
+        );
+
+        return axum::Json(WorkResponse::Task {
+            task_id,
+            partitions: vec![0], // Aggregate batch uses spec list, not partitions
+            input_path: String::new(),
+            job_spec: JobSpec::ManhattanAggregateBatch(aggregate_specs),
+            total_partitions: phenotype_ids.len(),
+            filters: Vec::new(),
+            intervals: Vec::new(),
+        });
+    }
+
+    // Step 3: Priority 2 - Find scan work from active phenotypes
+    for (phenotype_id, state) in batch.active_phenotypes.iter_mut() {
+        // Try exome first, then genome
+        let (source, partitions, table_path) = if let Some(part_id) = state.exome_pending.pop_front() {
+            let mut parts = vec![part_id];
+            while parts.len() < partition_batch_size {
+                if let Some(p) = state.exome_pending.pop_front() {
+                    parts.push(p);
+                } else {
+                    break;
+                }
+            }
+            for &p in &parts {
+                state.exome_processing.insert(p, (worker_id.to_string(), now));
+            }
+            (
+                ManhattanSource::Exome,
+                parts,
+                state.original_spec.exome.clone().unwrap_or_default(),
+            )
+        } else if let Some(part_id) = state.genome_pending.pop_front() {
+            let mut parts = vec![part_id];
+            while parts.len() < partition_batch_size {
+                if let Some(p) = state.genome_pending.pop_front() {
+                    parts.push(p);
+                } else {
+                    break;
+                }
+            }
+            for &p in &parts {
+                state.genome_processing.insert(p, (worker_id.to_string(), now));
+            }
+            (
+                ManhattanSource::Genome,
+                parts,
+                state.original_spec.genome.clone().unwrap_or_default(),
+            )
+        } else {
+            // No pending work for this phenotype, continue to next
+            continue;
+        };
+
+        let task_id = Uuid::new_v4().to_string();
+
+        // Track this task (using first partition as identifier)
+        data.active_tasks.insert(
+            task_id.clone(),
+            ActiveTask::Scan {
+                phenotype_id: phenotype_id.clone(),
+                partition_id: partitions[0],
+                source,
+            },
+        );
+
+        // Update worker status
+        if let Some(w) = data.worker_registry.get_mut(worker_id) {
+            w.status = WorkerStatus::Active;
+        }
+
+        let source_name = match source {
+            ManhattanSource::Exome => "exome",
+            ManhattanSource::Genome => "genome",
+        };
+        println!(
+            "Assigned {} partitions {:?} to worker {} for phenotype {} [task={}]",
+            source_name, partitions, worker_id, phenotype_id, &task_id[..8]
+        );
+
+        // Build ManhattanScanSpec
+        let scan_spec = ManhattanScanSpec {
+            source,
+            table_path,
+            output_path: state.original_spec.output_path.clone(),
+            threshold: state.original_spec.threshold,
+            y_field: state.original_spec.y_field.clone(),
+            layout: state.layout.clone().unwrap_or_default(),
+            y_scale: state.y_scale.clone().unwrap_or_default(),
+            width: state.original_spec.width,
+            height: state.original_spec.height,
+        };
+
+        return axum::Json(WorkResponse::Task {
+            task_id,
+            partitions,
+            input_path: String::new(),
+            job_spec: JobSpec::ManhattanScan(scan_spec),
+            total_partitions: state.exome_total_partitions + state.genome_total_partitions,
+            filters: Vec::new(),
+            intervals: Vec::new(),
+        });
+    }
+
+    // Step 4: Check if batch is complete
+    let all_done = batch.pending_queue.is_empty()
+        && batch.active_phenotypes.is_empty()
+        && batch.ready_to_aggregate.is_empty();
+
+    if all_done {
+        println!(
+            "Manhattan batch complete: {} completed, {} failed",
+            batch.completed_count, batch.failed_count
+        );
+        return axum::Json(WorkResponse::Exit);
+    }
+
+    // Step 5: Work in progress, tell worker to wait
+    if let Some(w) = data.worker_registry.get_mut(worker_id) {
+        w.status = WorkerStatus::Idle;
+    }
+    axum::Json(WorkResponse::Wait)
+}
+
 /// Handler for POST /work - worker requests work.
 async fn get_work(
     axum::extract::State(state): axum::extract::State<SharedState>,
@@ -583,6 +885,14 @@ async fn get_work(
             w.status = WorkerStatus::Idle;
         }
         return axum::Json(WorkResponse::Wait);
+    }
+
+    // Check for Manhattan batch job (multi-phenotype scheduling)
+    if data.batch_state.is_some() {
+        let mut batch = data.batch_state.take().unwrap();
+        let result = get_batch_work(&mut data, &mut batch, &req.worker_id);
+        data.batch_state = Some(batch);
+        return result;
     }
 
     // Check for Manhattan pipeline job (two-phase execution)
@@ -907,6 +1217,131 @@ fn complete_manhattan_work(
     }
 }
 
+/// Handle completion for batch Manhattan jobs.
+///
+/// Uses task_id to lookup the active task and update the appropriate state.
+fn complete_batch_work(
+    data: &mut CoordinatorData,
+    batch: &mut BatchState,
+    req: &CompleteRequest,
+) {
+    data.last_progress_time = Instant::now();
+
+    // Look up the task by task_id
+    let task = match data.active_tasks.remove(&req.task_id) {
+        Some(task) => task,
+        None => {
+            // Task not found - might be a duplicate completion or old task
+            println!(
+                "Warning: task {} not found in active_tasks (completion from {})",
+                req.task_id, req.worker_id
+            );
+            return;
+        }
+    };
+
+    match task {
+        ActiveTask::Scan { phenotype_id, partition_id: _, source } => {
+            // Find the phenotype's pipeline state
+            let state = match batch.active_phenotypes.get_mut(&phenotype_id) {
+                Some(state) => state,
+                None => {
+                    println!(
+                        "Warning: phenotype {} not found in active_phenotypes for scan completion",
+                        phenotype_id
+                    );
+                    return;
+                }
+            };
+
+            // Mark partitions as complete
+            for &part_id in &req.partitions {
+                match source {
+                    ManhattanSource::Exome => {
+                        if state.exome_processing.remove(&part_id).is_some() {
+                            state.exome_completed.insert(part_id);
+                        }
+                    }
+                    ManhattanSource::Genome => {
+                        if state.genome_processing.remove(&part_id).is_some() {
+                            state.genome_completed.insert(part_id);
+                        }
+                    }
+                }
+            }
+
+            // Check if scan phase is complete for this phenotype
+            let exome_done = state.exome_completed.len() == state.exome_total_partitions;
+            let genome_done = state.genome_completed.len() == state.genome_total_partitions;
+            let exome_idle = state.exome_pending.is_empty() && state.exome_processing.is_empty();
+            let genome_idle = state.genome_pending.is_empty() && state.genome_processing.is_empty();
+
+            if (exome_done || state.exome_total_partitions == 0)
+                && (genome_done || state.genome_total_partitions == 0)
+                && exome_idle
+                && genome_idle
+            {
+                println!(
+                    "Phenotype {} scan complete, moving to aggregate queue",
+                    phenotype_id
+                );
+
+                // Build aggregate spec and move to ready_to_aggregate
+                let original = &state.original_spec;
+                let aggregate_spec = ManhattanAggregateSpec {
+                    output_path: original.output_path.clone(),
+                    exome_results: original.exome.clone(),
+                    genome_results: original.genome.clone(),
+                    gene_burden: original.gene_burden.clone(),
+                    exome_annotations: original.exome_annotations.clone(),
+                    genome_annotations: original.genome_annotations.clone(),
+                    genes: original.genes.clone(),
+                    threshold: original.threshold,
+                    gene_threshold: original.gene_threshold,
+                    locus_threshold: original.locus_threshold,
+                    locus_window: original.locus_window,
+                    locus_plots: original.locus_plots,
+                    width: original.width,
+                    height: original.height,
+                    layout: state.layout.clone().unwrap_or_default(),
+                    y_scale: state.y_scale.clone().unwrap_or_default(),
+                    cleanup: false,
+                };
+
+                batch.ready_to_aggregate.push((phenotype_id.clone(), aggregate_spec));
+
+                // Remove from active phenotypes
+                batch.active_phenotypes.remove(&phenotype_id);
+            } else {
+                // Log progress
+                let source_name = match source {
+                    ManhattanSource::Exome => "exome",
+                    ManhattanSource::Genome => "genome",
+                };
+                let (done, total) = match source {
+                    ManhattanSource::Exome => (state.exome_completed.len(), state.exome_total_partitions),
+                    ManhattanSource::Genome => (state.genome_completed.len(), state.genome_total_partitions),
+                };
+                println!(
+                    "Phenotype {} {} progress: {}/{} partitions",
+                    phenotype_id, source_name, done, total
+                );
+            }
+        }
+
+        ActiveTask::AggregateBatch { phenotype_ids } => {
+            // Aggregate batch completed - mark all phenotypes as done
+            for phenotype_id in phenotype_ids {
+                batch.completed_count += 1;
+                println!(
+                    "Phenotype {} aggregate complete ({}/{})",
+                    phenotype_id, batch.completed_count, batch.total_phenotypes
+                );
+            }
+        }
+    }
+}
+
 /// Handler for POST /complete - worker reports completion.
 async fn complete_work(
     axum::extract::State(state): axum::extract::State<SharedState>,
@@ -928,10 +1363,20 @@ async fn complete_work(
             req.worker_id, req.partitions, error
         ));
 
+        // Remove task from tracking
+        data.active_tasks.remove(&req.task_id);
+
         // Remove from processing and add to failed
         for &part_id in &req.partitions {
             data.processing_partitions.remove(&part_id);
             data.failed_partitions.insert(part_id);
+        }
+
+        // For batch jobs, update the batch state
+        if let Some(ref mut batch) = data.batch_state {
+            // If this was a scan task, the partitions are tracked per-phenotype
+            // For simplicity, we increment failed_count (the phenotype may retry or fail)
+            batch.failed_count += 1;
         }
 
         // For Manhattan jobs, also update the manhattan state
@@ -949,8 +1394,13 @@ async fn complete_work(
         return axum::Json(CompleteResponse { acknowledged: true });
     }
 
-    // Check if this is a Manhattan pipeline job
-    if data.manhattan_state.is_some() {
+    // Check if this is a batch Manhattan job
+    if data.batch_state.is_some() {
+        let mut batch = data.batch_state.take().unwrap();
+        complete_batch_work(&mut data, &mut batch, &req);
+        data.batch_state = Some(batch);
+    } else if data.manhattan_state.is_some() {
+        // Check if this is a single Manhattan pipeline job
         let mut manhattan = data.manhattan_state.take().unwrap();
         complete_manhattan_work(&mut manhattan, &req, &mut data.last_progress_time);
         data.manhattan_state = Some(manhattan);
@@ -1012,8 +1462,19 @@ async fn get_status(
 ) -> axum::Json<StatusResponse> {
     let data = state.lock().unwrap();
 
-    // Check if this is a Manhattan pipeline job (uses separate tracking)
-    let (pending, processing, completed, total, is_complete) = if let Some(ref m) = data.manhattan_state {
+    // Check for batch Manhattan job
+    let (pending, processing, completed, total, is_complete) = if let Some(ref batch) = data.batch_state {
+        let total = batch.total_phenotypes;
+        let completed = batch.completed_count;
+        let pending = batch.pending_queue.len();
+        let processing = batch.active_phenotypes.len() + batch.ready_to_aggregate.len();
+        let is_complete = batch.pending_queue.is_empty()
+            && batch.active_phenotypes.is_empty()
+            && batch.ready_to_aggregate.is_empty()
+            && (batch.completed_count + batch.failed_count) == batch.total_phenotypes;
+        (pending, processing, completed, total, is_complete)
+    } else if let Some(ref m) = data.manhattan_state {
+        // Check if this is a single Manhattan pipeline job
         let total_parts = m.exome_total_partitions + m.genome_total_partitions;
         let completed_parts = m.exome_completed.len() + m.genome_completed.len();
         let processing_parts = m.exome_processing.len() + m.genome_processing.len();
@@ -1136,14 +1597,18 @@ async fn submit_job(
     }
 
     // Validate request
-    if req.total_partitions == 0 {
+    // ManhattanBatch jobs don't use total_partitions (they manage partitions per-phenotype)
+    let is_batch_job = matches!(&req.job_spec, JobSpec::ManhattanBatch(_));
+    if req.total_partitions == 0 && !is_batch_job {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
             error: Some("total_partitions must be greater than 0".to_string()),
         });
     }
 
-    if req.input_path.is_empty() {
+    // ManhattanBatch and Manhattan jobs don't require input_path (they use per-spec paths)
+    let needs_input_path = !is_batch_job && !matches!(&req.job_spec, JobSpec::Manhattan(_));
+    if req.input_path.is_empty() && needs_input_path {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
             error: Some("input_path is required".to_string()),
@@ -1172,6 +1637,9 @@ async fn submit_job(
     data.job_start_time = Instant::now();
     data.last_progress_time = Instant::now();
     data.aggregated_results.clear();
+    data.manhattan_state = None;
+    data.batch_state = None;
+    data.active_tasks.clear();
 
     // Don't clear worker registry on resubmission/superseding, as we want to keep connected workers
     // Only clear if this is a fresh start and we want to purge stale workers
@@ -1185,7 +1653,45 @@ async fn submit_job(
     // Mark as no longer idle
     data.idle = false;
 
-    // Initialize Manhattan pipeline state if this is a Manhattan job
+    // Handle ManhattanBatch jobs (batch scheduling mode)
+    if let JobSpec::ManhattanBatch(ref specs) = req.job_spec {
+        let total_phenotypes = specs.len();
+
+        // Clear standard partition tracking - batch mode uses its own
+        data.pending_partitions.clear();
+
+        println!(
+            "Initializing Manhattan batch: {} phenotypes (lazy loading, max {} active)",
+            total_phenotypes,
+            BATCH_ACTIVE_LIMIT
+        );
+
+        data.batch_state = Some(BatchState {
+            pending_queue: specs.iter().cloned().collect(),
+            active_phenotypes: HashMap::new(),
+            ready_to_aggregate: Vec::new(),
+            completed_count: 0,
+            failed_count: 0,
+            total_phenotypes,
+        });
+
+        let output_desc = specs.first()
+            .map(|s| s.output_path.clone())
+            .unwrap_or_else(|| "(no output)".to_string());
+        println!(
+            "Job submitted: {} ({} phenotypes, output={})",
+            req.job_spec.description(),
+            total_phenotypes,
+            output_desc
+        );
+
+        return axum::Json(JobConfigResponse {
+            acknowledged: true,
+            error: None,
+        });
+    }
+
+    // Initialize Manhattan pipeline state if this is a single Manhattan job
     data.manhattan_state = if let JobSpec::Manhattan(ref spec) = req.job_spec {
         // For Manhattan jobs, we manage exome/genome partitions separately
         // Use partition counts from spec if available, otherwise fall back to total_partitions
@@ -1260,6 +1766,9 @@ async fn cancel_job(
     // Reset job state
     data.pending_partitions.clear();
     data.processing_partitions.clear();
+    data.manhattan_state = None;
+    data.batch_state = None;
+    data.active_tasks.clear();
     data.idle = true;
 
     let reason = req.reason.unwrap_or_else(|| "User request".to_string());
@@ -1321,8 +1830,31 @@ async fn get_dashboard_summary(
     let elapsed = data.job_start_time.elapsed().as_secs_f64();
     let failed = data.failed_partitions.len();
 
-    // Check if this is a Manhattan pipeline job (uses separate tracking)
-    let (completed, processing, pending, total, is_complete) = if let Some(ref m) = data.manhattan_state {
+    // Check for batch Manhattan job (multi-phenotype mode)
+    let (completed, processing, pending, total, is_complete) = if let Some(ref batch) = data.batch_state {
+        // For batch jobs, track phenotype-level progress
+        let total = batch.total_phenotypes;
+        let completed = batch.completed_count;
+
+        // Count active phenotypes (currently being scanned)
+        let active_count = batch.active_phenotypes.len();
+
+        // Count phenotypes ready to aggregate
+        let ready_count = batch.ready_to_aggregate.len();
+
+        // Pending = queued + active + ready (not yet fully complete)
+        // Processing = active phenotypes being scanned
+        let pending = batch.pending_queue.len();
+        let processing = active_count + ready_count;
+
+        let is_complete = batch.pending_queue.is_empty()
+            && batch.active_phenotypes.is_empty()
+            && batch.ready_to_aggregate.is_empty()
+            && (batch.completed_count + batch.failed_count) == batch.total_phenotypes;
+
+        (completed, processing, pending, total, is_complete)
+    } else if let Some(ref m) = data.manhattan_state {
+        // Check if this is a single Manhattan pipeline job
         let total_parts = m.exome_total_partitions + m.genome_total_partitions;
         let completed_parts = m.exome_completed.len() + m.genome_completed.len();
         let processing_parts = m.exome_processing.len() + m.genome_processing.len();
