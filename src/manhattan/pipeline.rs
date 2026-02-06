@@ -14,7 +14,7 @@ use crate::manhattan::layout::{ChromosomeLayout, YScale};
 use crate::manhattan::sig_writer::SigHitWriter;
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::reference::{calculate_xpos, normalize_contig_name};
-use crate::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
+use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::reference::get_contig_lengths;
 use crate::manhattan::render::ManhattanRenderer;
 use crate::query::join::{JoinedRow, SortedMergeIterator};
@@ -767,7 +767,7 @@ fn render_locus_plot(
         render_variants.push(RenderVariant {
             position: v.position,
             pvalue: v.pvalue,
-            source: DataSource::Genome,
+            source: VariantSource::Genome,
             is_significant: v.pvalue < threshold,
         });
     }
@@ -776,7 +776,7 @@ fn render_locus_plot(
         render_variants.push(RenderVariant {
             position: v.position,
             pvalue: v.pvalue,
-            source: DataSource::Exome,
+            source: VariantSource::Exome,
             is_significant: v.pvalue < threshold,
         });
     }

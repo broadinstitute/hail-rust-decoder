@@ -2567,8 +2567,8 @@ fn run_loci(args: LociArgs) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_locus(args: LocusArgs) -> Result<()> {
-    use hail_decoder::manhattan::data::extract_plot_data;
-    use hail_decoder::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
+    use hail_decoder::manhattan::data::{extract_plot_data, VariantSource};
+    use hail_decoder::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
     use hail_decoder::query::{KeyRange, KeyValue, QueryBound};
 
     // 1. Parse region string (chr:start-end)
@@ -2609,13 +2609,13 @@ fn run_locus(args: LocusArgs) -> Result<()> {
     let mut renderer = LocusRenderer::new(config);
 
     // 3. Helper to fetch variants from a table
-    let fetch_variants = |path: &str, source: DataSource, chrom: &str, start: i32, end: i32, y_field: &str, threshold: f64| -> Result<Vec<RenderVariant>> {
+    let fetch_variants = |path: &str, source: VariantSource, chrom: &str, start: i32, end: i32, y_field: &str, threshold: f64| -> Result<Vec<RenderVariant>> {
         println!(
             "{} {} variants from {}...",
             "Fetching".cyan(),
             match source {
-                DataSource::Exome => "exome",
-                DataSource::Genome => "genome",
+                VariantSource::Exome => "exome",
+                VariantSource::Genome => "genome",
             },
             path.bright_white()
         );
@@ -2681,12 +2681,12 @@ fn run_locus(args: LocusArgs) -> Result<()> {
     let mut all_variants = Vec::new();
 
     if let Some(ref path) = args.genome {
-        let vars = fetch_variants(path, DataSource::Genome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
+        let vars = fetch_variants(path, VariantSource::Genome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
         all_variants.extend(vars);
     }
 
     if let Some(ref path) = args.exome {
-        let vars = fetch_variants(path, DataSource::Exome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
+        let vars = fetch_variants(path, VariantSource::Exome, &chrom, start_pos, end_pos, &args.y_field, args.threshold)?;
         all_variants.extend(vars);
     }
 

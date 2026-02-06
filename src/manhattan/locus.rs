@@ -3,24 +3,18 @@
 //! This module renders a scatter plot for a specific genomic region, distinguishing
 //! between Exome and Genome variants with different shapes and colors.
 
+use crate::manhattan::data::VariantSource;
 use crate::manhattan::layout::YScale;
 use crate::HailError;
 use crate::Result;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
-
-/// Data source for a variant (determines shape and color).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataSource {
-    Genome,
-    Exome,
-}
 
 /// A variant prepared for rendering in the locus plot.
 #[derive(Clone)]
 pub struct RenderVariant {
     pub position: i32,
     pub pvalue: f64,
-    pub source: DataSource,
+    pub source: VariantSource,
     pub is_significant: bool,
 }
 
@@ -110,7 +104,7 @@ impl LocusRenderer {
         let radius = 2.0; // Consistent small size for all points
 
         // Helper to draw variants for a given source
-        let draw_source = |pixmap: &mut Pixmap, config: &LocusPlotConfig, source: DataSource, paint_color: Color| {
+        let draw_source = |pixmap: &mut Pixmap, config: &LocusPlotConfig, source: VariantSource, paint_color: Color| {
             let mut paint = Paint::default();
             paint.set_color(paint_color);
             paint.anti_alias = true;
@@ -129,7 +123,7 @@ impl LocusRenderer {
                 }
 
                 match source {
-                    DataSource::Genome => {
+                    VariantSource::Genome => {
                         // Circle
                         if let Some(path) = PathBuilder::from_circle(x, y, radius) {
                             pixmap.fill_path(
@@ -141,7 +135,7 @@ impl LocusRenderer {
                             );
                         }
                     }
-                    DataSource::Exome => {
+                    VariantSource::Exome => {
                         // Diamond (rotated square)
                         let mut pb = PathBuilder::new();
                         pb.move_to(x, y - radius);
@@ -165,8 +159,8 @@ impl LocusRenderer {
         };
 
         // Draw genome first (background), then exome (foreground)
-        draw_source(&mut self.pixmap, &self.config, DataSource::Genome, genome_color);
-        draw_source(&mut self.pixmap, &self.config, DataSource::Exome, exome_color);
+        draw_source(&mut self.pixmap, &self.config, VariantSource::Genome, genome_color);
+        draw_source(&mut self.pixmap, &self.config, VariantSource::Exome, exome_color);
     }
 
     /// Encode the rendered pixmap as a PNG byte vector.
@@ -215,45 +209,45 @@ mod tests {
             RenderVariant {
                 position: 110_000,
                 pvalue: 1e-1,
-                source: DataSource::Genome,
+                source: VariantSource::Genome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 120_000,
                 pvalue: 1e-2,
-                source: DataSource::Genome,
+                source: VariantSource::Genome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 130_000,
                 pvalue: 1e-3,
-                source: DataSource::Genome,
+                source: VariantSource::Genome,
                 is_significant: false,
             },
             // Genome Significant Hit
             RenderVariant {
                 position: 150_000,
                 pvalue: 1e-9,
-                source: DataSource::Genome,
+                source: VariantSource::Genome,
                 is_significant: true,
             },
             // Exome Signal (should appear on top of genome)
             RenderVariant {
                 position: 148_000,
                 pvalue: 1e-5,
-                source: DataSource::Exome,
+                source: VariantSource::Exome,
                 is_significant: false,
             },
             RenderVariant {
                 position: 150_000,
                 pvalue: 1e-12,
-                source: DataSource::Exome,
+                source: VariantSource::Exome,
                 is_significant: true,
             },
             RenderVariant {
                 position: 152_000,
                 pvalue: 1e-6,
-                source: DataSource::Exome,
+                source: VariantSource::Exome,
                 is_significant: false,
             },
         ];

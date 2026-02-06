@@ -15,7 +15,8 @@ use crate::manhattan::data::{
     ManifestSignificantHits, ManifestStats, ManifestTopHit,
 };
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
-use crate::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
+use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
+use crate::manhattan::data::VariantSource;
 use crate::manhattan::reference::calculate_xpos;
 use crate::query::IntervalList;
 use arrow::array::{Array, Float64Array, Int32Array, StringArray};
@@ -1133,14 +1134,14 @@ fn generate_single_locus_core(
 
     // Read variants from original Hail tables for this region
     let exome_variants = if let Some(table_path) = exome_table {
-        read_locus_variants(table_path, contig, start, end, DataSource::Exome)
+        read_locus_variants(table_path, contig, start, end, VariantSource::Exome)
             .unwrap_or_default()
     } else {
         vec![]
     };
 
     let genome_variants = if let Some(table_path) = genome_table {
-        read_locus_variants(table_path, contig, start, end, DataSource::Genome)
+        read_locus_variants(table_path, contig, start, end, VariantSource::Genome)
             .unwrap_or_default()
     } else {
         vec![]
@@ -1486,7 +1487,7 @@ fn read_locus_variants(
     contig: &str,
     start: i32,
     end: i32,
-    source: DataSource,
+    source: VariantSource,
 ) -> Result<Vec<RenderVariant>> {
     use crate::query::QueryEngine;
     use std::time::Instant;
@@ -1630,39 +1631,6 @@ fn write_locus_file(path: &str, data: &[u8]) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Write variants to a JSON file.
-fn write_variants_json(path: &str, variants: &[RenderVariant]) -> Result<()> {
-    #[derive(serde::Serialize)]
-    struct VariantJson {
-        position: i32,
-        pvalue: f64,
-        neg_log10_p: f64,
-        source: String,
-        is_significant: bool,
-    }
-
-    let json_variants: Vec<VariantJson> = variants
-        .iter()
-        .map(|v| VariantJson {
-            position: v.position,
-            pvalue: v.pvalue,
-            neg_log10_p: if v.pvalue > 0.0 {
-                -v.pvalue.log10()
-            } else {
-                0.0
-            },
-            source: match v.source {
-                DataSource::Exome => "exome".to_string(),
-                DataSource::Genome => "genome".to_string(),
-            },
-            is_significant: v.is_significant,
-        })
-        .collect();
-
-    let json = serde_json::to_string_pretty(&json_variants)?;
-    write_locus_file(path, json.as_bytes())
 }
 
 /// Write loci.parquet and loci_variants.parquet files.
