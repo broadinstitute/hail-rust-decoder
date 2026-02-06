@@ -259,6 +259,55 @@ fn file_exists(path: &str) -> Result<bool> {
     }
 }
 
+/// List subdirectories in a directory (local or cloud).
+fn list_subdirectories(dir_path: &str) -> Result<Vec<String>> {
+    if is_cloud_path(dir_path) {
+        let dir = dir_path.trim_end_matches('/');
+        // gsutil ls returns directories with trailing /
+        let output = std::process::Command::new("gsutil")
+            .args(["ls", dir])
+            .output()
+            .map_err(|e| {
+                crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to run gsutil: {}", e),
+                ))
+            })?;
+
+        if !output.status.success() {
+            // Directory doesn't exist
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let subdirs: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| {
+                // Lines are like gs://bucket/path/chroms/chr1/
+                let trimmed = line.trim().trim_end_matches('/');
+                trimmed.rsplit('/').next().map(|s| s.to_string())
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(subdirs)
+    } else {
+        if !std::path::Path::new(dir_path).exists() {
+            return Ok(vec![]);
+        }
+
+        let mut subdirs = Vec::new();
+        for entry in std::fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    subdirs.push(name.to_string());
+                }
+            }
+        }
+        Ok(subdirs)
+    }
+}
+
 /// Compute xpos from contig and position.
 ///
 /// xpos = contig_index * 1e9 + position
@@ -433,6 +482,7 @@ fn ingest_plots(
     base_path: &str,
     client: &ClickHouseClient,
 ) -> Result<usize> {
+    // Whole-genome plot types
     let plot_types = vec![
         ("exome_manhattan", "exome_manhattan.png"),
         ("genome_manhattan", "genome_manhattan.png"),
@@ -445,6 +495,7 @@ fn ingest_plots(
     let mut uris = StringBuilder::new();
     let mut count = 0;
 
+    // Add whole-genome plots
     for (plot_type, filename) in plot_types {
         let uri = format!("{}/{}", base_path, filename);
         // Only include if file exists
@@ -454,6 +505,32 @@ fn ingest_plots(
             types.append_value(plot_type);
             uris.append_value(&uri);
             count += 1;
+        }
+    }
+
+    // Add per-chromosome plots
+    let chroms_dir = format!("{}/chroms", base_path);
+    if let Ok(chrom_names) = list_subdirectories(&chroms_dir) {
+        for chrom in chrom_names {
+            // Check for exome manhattan
+            let exome_uri = format!("{}/{}/exome_manhattan.png", chroms_dir, chrom);
+            if file_exists(&exome_uri).unwrap_or(false) {
+                phenotypes.append_value(phenotype_id);
+                ancestries.append_value(ancestry);
+                types.append_value(&format!("{}_exome_manhattan", chrom));
+                uris.append_value(&exome_uri);
+                count += 1;
+            }
+
+            // Check for genome manhattan
+            let genome_uri = format!("{}/{}/genome_manhattan.png", chroms_dir, chrom);
+            if file_exists(&genome_uri).unwrap_or(false) {
+                phenotypes.append_value(phenotype_id);
+                ancestries.append_value(ancestry);
+                types.append_value(&format!("{}_genome_manhattan", chrom));
+                uris.append_value(&genome_uri);
+                count += 1;
+            }
         }
     }
 

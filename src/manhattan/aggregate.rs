@@ -166,7 +166,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
                 let out = format!("{}/exome_manhattan.png", chrom_path_base);
                 composite_partial_pngs(&exome_parts, &out, spec.width, spec.height, 0.0)?;
                 chrom_entry.exome = Some(ManifestManhattan {
-                    png: format!("chroms/{}/exome_manhattan.png", chrom),
+                    png: format!("{}/chroms/{}/exome_manhattan.png", output_base, chrom),
                     count: 0,
                 });
                 has_data = true;
@@ -180,7 +180,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
                 let out = format!("{}/genome_manhattan.png", chrom_path_base);
                 composite_partial_pngs(&genome_parts, &out, spec.width, spec.height, 0.0)?;
                 chrom_entry.genome = Some(ManifestManhattan {
-                    png: format!("chroms/{}/genome_manhattan.png", chrom),
+                    png: format!("{}/chroms/{}/genome_manhattan.png", output_base, chrom),
                     count: 0,
                 });
                 has_data = true;
