@@ -1057,13 +1057,8 @@ fn process_manhattan_scan_v2(
             let engine = QueryEngine::open_path(table_path)?;
             let iter = engine.scan_partition_iter(partition_id, &[])?;
 
-            // Build annotation lookup if annotation_path is provided
-            let annotation_lookup: HashMap<(String, i32, String, String), (Option<String>, Option<String>)> =
-                if let Some(annot_path) = annotation_path {
-                    build_annotation_lookup(&engine, partition_id, annot_path)?
-                } else {
-                    HashMap::new()
-                };
+            // Note: Annotations are added during aggregate phase, not scan phase
+            // This avoids expensive per-partition annotation table queries
 
             // Each thread has its own renderer with transparent background
             let mut renderer = ManhattanRenderer::new_transparent(width, height);
@@ -1097,12 +1092,7 @@ fn process_manhattan_scan_v2(
                         let (ref_allele, alt_allele, beta, se, af) =
                             extract_sig_hit_fields(&row);
 
-                        // Look up annotations if available
-                        let (gene, consequence) = annotation_lookup
-                            .get(&(contig_name.to_string(), point.position, ref_allele.clone(), alt_allele.clone()))
-                            .cloned()
-                            .unwrap_or((None, None));
-
+                        // Annotations are added during aggregate phase for efficiency
                         sig_hits.push(SigHitRow {
                             contig: contig_name.to_string(),
                             position: point.position,
@@ -1112,8 +1102,8 @@ fn process_manhattan_scan_v2(
                             beta,
                             se,
                             af,
-                            gene,
-                            consequence,
+                            gene: None,
+                            consequence: None,
                         });
                     }
                 }
@@ -1175,10 +1165,16 @@ fn process_manhattan_scan_v2(
     Ok((total_rows, None))
 }
 
+// ============================================================================
+// Annotation lookup functions (for future use during locus plot generation)
+// These are kept for when we implement annotation during the aggregate phase
+// ============================================================================
+
 /// Build an annotation lookup table for the genomic interval covered by a partition.
 ///
 /// This loads annotations (gene_symbol, consequence) from the annotation Hail table
 /// for the genomic range covered by the results partition, creating a HashMap for O(1) lookup.
+#[allow(dead_code)]
 fn build_annotation_lookup(
     results_engine: &QueryEngine,
     partition_id: usize,
@@ -1234,6 +1230,7 @@ fn build_annotation_lookup(
 }
 
 /// Convert a partition Interval to an IntervalList for querying.
+#[allow(dead_code)]
 fn partition_interval_to_list(interval: &crate::metadata::Interval) -> Result<IntervalList> {
     // Extract start and end locus from the interval
     let (start_contig, start_pos) = extract_locus_from_value(&interval.start);
@@ -1255,6 +1252,7 @@ fn partition_interval_to_list(interval: &crate::metadata::Interval) -> Result<In
 }
 
 /// Extract locus (contig, position) from a serde_json::Value.
+#[allow(dead_code)]
 fn extract_locus_from_value(value: &serde_json::Value) -> (String, i32) {
     if let serde_json::Value::Object(map) = value {
         let contig = map.get("contig")
@@ -1272,6 +1270,7 @@ fn extract_locus_from_value(value: &serde_json::Value) -> (String, i32) {
 }
 
 /// Extract variant key (contig, position, ref, alt) from an encoded row.
+#[allow(dead_code)]
 fn extract_variant_key(row: &crate::codec::EncodedValue) -> Option<(String, i32, String, String)> {
     use crate::codec::EncodedValue;
 

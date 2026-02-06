@@ -58,8 +58,8 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
         0
     };
 
-    // Step 3: Merge pre-annotated significant hits
-    // Annotations were added during the scan phase via streaming merge-join
+    // Step 3: Merge significant hits
+    // TODO: Add annotations during locus plot generation, then backfill sig hits
     println!("  Merging significant hits...");
     let (exome_sig_count, exome_top_hit) = if spec.exome_results.is_some() {
         merge_significant_hits(output_base, "exome")?
