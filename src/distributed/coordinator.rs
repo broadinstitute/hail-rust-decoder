@@ -534,6 +534,7 @@ pub async fn run_coordinator(
         .route("/status", get(get_status))
         .route("/heartbeat", post(handle_heartbeat))
         .route("/dashboard", get(serve_dashboard))
+        .route("/dashboard/phenotypes", get(serve_phenotypes_page))
         .route("/api/dashboard/summary", get(get_dashboard_summary))
         .route("/api/dashboard/workers", get(get_dashboard_workers))
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
@@ -2176,6 +2177,11 @@ async fn get_batch_status(
 /// Handler for GET /dashboard - serve the embedded dashboard HTML.
 async fn serve_dashboard() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/dashboard.html"))
+}
+
+/// Handler for GET /dashboard/phenotypes - serve the phenotypes list page.
+async fn serve_phenotypes_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../static/phenotypes.html"))
 }
 
 /// Handler for GET /api/binary - serve the hail-decoder binary.
