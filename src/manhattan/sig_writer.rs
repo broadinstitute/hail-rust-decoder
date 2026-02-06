@@ -25,6 +25,9 @@ use std::sync::Arc;
 /// - beta: float64 (nullable)
 /// - se: float64 (nullable)
 /// - af: float64 (nullable)
+///
+/// Note: Gene and consequence annotations are not included during scan phase.
+/// These can be added during locus plot generation in the aggregate phase.
 pub struct SigHitWriter<W: Write + Send> {
     writer: ArrowWriter<W>,
     schema: Arc<Schema>,
@@ -128,8 +131,6 @@ impl<W: Write + Send> SigHitWriter<W> {
         let mut beta_builder = Float64Builder::new();
         let mut se_builder = Float64Builder::new();
         let mut af_builder = Float64Builder::new();
-        let mut gene_builder = StringBuilder::new();
-        let mut consequence_builder = StringBuilder::new();
 
         for row in &self.buffer {
             contig_builder.append_value(&row.contig);
@@ -150,14 +151,6 @@ impl<W: Write + Send> SigHitWriter<W> {
                 Some(v) => af_builder.append_value(v),
                 None => af_builder.append_null(),
             }
-            match &row.gene {
-                Some(s) => gene_builder.append_value(s),
-                None => gene_builder.append_null(),
-            }
-            match &row.consequence {
-                Some(s) => consequence_builder.append_value(s),
-                None => consequence_builder.append_null(),
-            }
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -169,8 +162,6 @@ impl<W: Write + Send> SigHitWriter<W> {
             Arc::new(beta_builder.finish()),
             Arc::new(se_builder.finish()),
             Arc::new(af_builder.finish()),
-            Arc::new(gene_builder.finish()),
-            Arc::new(consequence_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -189,8 +180,6 @@ pub fn sig_hit_schema() -> Schema {
         Field::new("beta", DataType::Float64, true),
         Field::new("se", DataType::Float64, true),
         Field::new("af", DataType::Float64, true),
-        Field::new("gene", DataType::Utf8, true),
-        Field::new("consequence", DataType::Utf8, true),
     ])
 }
 
@@ -216,8 +205,6 @@ mod tests {
                 beta: Some(0.5),
                 se: Some(0.1),
                 af: Some(0.01),
-                gene: Some("BRCA1".to_string()),
-                consequence: Some("missense_variant".to_string()),
             })
             .unwrap();
 
@@ -231,8 +218,6 @@ mod tests {
                 beta: None,
                 se: None,
                 af: None,
-                gene: None,
-                consequence: None,
             })
             .unwrap();
 

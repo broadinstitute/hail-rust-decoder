@@ -3,7 +3,7 @@
 //! This module handles the aggregation of scan phase outputs:
 //! 1. Compositing partial PNGs into final Manhattan plots
 //! 2. Processing gene burden table
-//! 3. Merging pre-annotated significant hits (annotations added during scan phase)
+//! 3. Merging significant hits from scan phase
 //! 4. Generating locus plots for significant regions
 //! 5. Writing manifest.json
 
@@ -59,7 +59,6 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<usize> {
     };
 
     // Step 3: Merge significant hits
-    // TODO: Add annotations during locus plot generation, then backfill sig hits
     println!("  Merging significant hits...");
     let (exome_sig_count, exome_top_hit) = if spec.exome_results.is_some() {
         merge_significant_hits(output_base, "exome")?
@@ -194,10 +193,7 @@ fn composite_source_pngs(output_base: &str, source: &str, width: u32, height: u3
     Ok(0)
 }
 
-/// Merge pre-annotated significant hits from scan phase parquet files.
-///
-/// The sig.parquet files already contain gene and consequence columns from
-/// the streaming merge-join performed during scan phase.
+/// Merge significant hits from scan phase parquet files.
 ///
 /// Optimized approach:
 /// - Parallel file reads with rayon
@@ -290,8 +286,8 @@ fn merge_significant_hits(
     let top_hit = global_top.map(|c| ManifestTopHit {
         id: format!("{}:{}:{}:{}", c.contig, c.position, c.ref_allele, c.alt_allele),
         pvalue: c.pvalue,
-        gene: c.gene,
-        consequence: c.consequence,
+        gene: None,
+        consequence: None,
     });
 
     Ok((total_count, top_hit))
@@ -305,8 +301,6 @@ struct TopHitCandidate {
     ref_allele: String,
     alt_allele: String,
     pvalue: f64,
-    gene: Option<String>,
-    consequence: Option<String>,
 }
 
 /// Find the top hit (lowest pvalue) in a set of batches.
@@ -326,8 +320,6 @@ fn find_top_hit_in_batches(batches: &[RecordBatch]) -> Option<TopHitCandidate> {
         let position_idx = schema.fields().iter().position(|f| f.name() == "position")?;
         let ref_idx = schema.fields().iter().position(|f| f.name() == "ref")?;
         let alt_idx = schema.fields().iter().position(|f| f.name() == "alt")?;
-        let gene_idx = schema.fields().iter().position(|f| f.name() == "gene");
-        let csq_idx = schema.fields().iter().position(|f| f.name() == "consequence");
 
         let pvalue_col = batch.column(pvalue_idx).as_any().downcast_ref::<Float64Array>()?;
         let contig_col = batch.column(contig_idx).as_any().downcast_ref::<StringArray>()?;
@@ -346,23 +338,12 @@ fn find_top_hit_in_batches(batches: &[RecordBatch]) -> Option<TopHitCandidate> {
                 continue;
             }
 
-            let gene = gene_idx.and_then(|idx| {
-                batch.column(idx).as_any().downcast_ref::<StringArray>()
-                    .and_then(|arr| if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) })
-            });
-            let consequence = csq_idx.and_then(|idx| {
-                batch.column(idx).as_any().downcast_ref::<StringArray>()
-                    .and_then(|arr| if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) })
-            });
-
             best = Some(TopHitCandidate {
                 contig: contig_col.value(i).to_string(),
                 position: position_col.value(i),
                 ref_allele: ref_col.value(i).to_string(),
                 alt_allele: alt_col.value(i).to_string(),
                 pvalue,
-                gene,
-                consequence,
             });
         }
     }
@@ -636,14 +617,12 @@ fn extract_top_hit(batches: &[RecordBatch]) -> Option<ManifestTopHit> {
     let ref_allele = get_string("ref")?;
     let alt_allele = get_string("alt")?;
     let pvalue = get_f64("pvalue")?;
-    let gene = get_string("gene");
-    let consequence = get_string("consequence");
 
     Some(ManifestTopHit {
         id: format!("{}:{}:{}:{}", contig, position, ref_allele, alt_allele),
         pvalue,
-        gene,
-        consequence,
+        gene: None,
+        consequence: None,
     })
 }
 

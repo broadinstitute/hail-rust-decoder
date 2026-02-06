@@ -156,12 +156,6 @@ pub struct ManhattanScanSpec {
     /// Field name for P-value (Y-axis)
     pub y_field: String,
 
-    /// Path to annotation Hail table for streaming merge-join during scan.
-    /// When provided, workers will join results with annotations on-the-fly
-    /// to populate gene and consequence fields in sig.parquet files.
-    #[serde(default)]
-    pub annotation_path: Option<String>,
-
     // Pre-computed layout from coordinator
     /// Chromosome layout for mapping genomic positions to pixel X coordinates
     pub layout: crate::manhattan::layout::ChromosomeLayout,
@@ -178,7 +172,7 @@ pub struct ManhattanScanSpec {
 /// A single worker receives this to:
 /// 1. Composite partial PNGs into final Manhattan plots
 /// 2. Process gene burden table
-/// 3. Merge pre-annotated significant hits (annotations added during scan phase)
+/// 3. Merge significant hits from scan phase
 /// 4. Generate locus plots for significant regions
 /// 5. Write manifest.json
 #[derive(Debug, Clone, Serialize, Deserialize)]

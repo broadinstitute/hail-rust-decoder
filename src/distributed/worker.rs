@@ -1003,7 +1003,6 @@ fn process_manhattan_scan(
 /// This is the Phase 1 worker task. For each partition, it:
 /// 1. Renders plot points to a partial PNG (transparent background)
 /// 2. Writes significant hits (below threshold) to a Parquet file
-/// 3. If annotation_path is provided, looks up gene/consequence from annotation table
 ///
 /// Output structure:
 /// - {output_path}/{source}/part-{id}.png
@@ -1019,7 +1018,6 @@ fn process_manhattan_scan_v2(
     use crate::manhattan::render::ManhattanRenderer;
     use crate::manhattan::sig_writer::SigHitWriter;
     use rayon::prelude::*;
-    use std::collections::HashMap;
     use std::io::Write;
 
     let source_name = match spec.source {
@@ -1036,7 +1034,6 @@ fn process_manhattan_scan_v2(
     let layout = &spec.layout;
     let y_scale = &spec.y_scale;
     let table_path = &spec.table_path;
-    let annotation_path = &spec.annotation_path;
     let output_base = format!("{}/{}", spec.output_path.trim_end_matches('/'), source_name);
     let width = spec.width;
     let height = spec.height;
@@ -1056,9 +1053,6 @@ fn process_manhattan_scan_v2(
         .map(|&partition_id| {
             let engine = QueryEngine::open_path(table_path)?;
             let iter = engine.scan_partition_iter(partition_id, &[])?;
-
-            // Note: Annotations are added during aggregate phase, not scan phase
-            // This avoids expensive per-partition annotation table queries
 
             // Each thread has its own renderer with transparent background
             let mut renderer = ManhattanRenderer::new_transparent(width, height);
@@ -1092,7 +1086,6 @@ fn process_manhattan_scan_v2(
                         let (ref_allele, alt_allele, beta, se, af) =
                             extract_sig_hit_fields(&row);
 
-                        // Annotations are added during aggregate phase for efficiency
                         sig_hits.push(SigHitRow {
                             contig: contig_name.to_string(),
                             position: point.position,
@@ -1102,8 +1095,6 @@ fn process_manhattan_scan_v2(
                             beta,
                             se,
                             af,
-                            gene: None,
-                            consequence: None,
                         });
                     }
                 }
@@ -1165,182 +1156,6 @@ fn process_manhattan_scan_v2(
     Ok((total_rows, None))
 }
 
-// ============================================================================
-// Annotation lookup functions (for future use during locus plot generation)
-// These are kept for when we implement annotation during the aggregate phase
-// ============================================================================
-
-/// Build an annotation lookup table for the genomic interval covered by a partition.
-///
-/// This loads annotations (gene_symbol, consequence) from the annotation Hail table
-/// for the genomic range covered by the results partition, creating a HashMap for O(1) lookup.
-#[allow(dead_code)]
-fn build_annotation_lookup(
-    results_engine: &QueryEngine,
-    partition_id: usize,
-    annotation_path: &str,
-) -> Result<std::collections::HashMap<(String, i32, String, String), (Option<String>, Option<String>)>> {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    // Get the interval covered by this results partition
-    let interval = results_engine.get_partition_interval(partition_id)?;
-
-    // Convert partition interval to IntervalList for querying
-    let intervals = partition_interval_to_list(&interval)?;
-
-    // Open annotation table and query for this interval
-    let annot_engine = QueryEngine::open_path(annotation_path)?;
-
-    let mut lookup = HashMap::new();
-
-    // Query annotation table using interval-based query (properly handles locus structure)
-    match annot_engine.query_iter_with_intervals(&[], Some(Arc::new(intervals))) {
-        Ok(iter) => {
-            for row_result in iter {
-                if let Ok(row) = row_result {
-                    // Extract key: (contig, position, ref, alt)
-                    if let Some((contig, position, ref_allele, alt_allele)) = extract_variant_key(&row) {
-                        // Normalize contig name
-                        let contig = if contig.starts_with("chr") {
-                            contig[3..].to_string()
-                        } else {
-                            contig
-                        };
-
-                        // Extract gene_symbol and consequence
-                        let gene = extract_string_field(&row, "gene_symbol");
-                        let consequence = extract_string_field(&row, "consequence")
-                            .or_else(|| extract_string_field(&row, "most_severe_consequence"));
-
-                        lookup.insert((contig, position, ref_allele, alt_allele), (gene, consequence));
-                    }
-                }
-            }
-            if partition_id % 100 == 0 {
-                eprintln!("    [annot] partition {} - loaded {} annotations", partition_id, lookup.len());
-            }
-        }
-        Err(e) => {
-            eprintln!("    [annot] partition {} - query error: {}", partition_id, e);
-        }
-    }
-
-    Ok(lookup)
-}
-
-/// Convert a partition Interval to an IntervalList for querying.
-#[allow(dead_code)]
-fn partition_interval_to_list(interval: &crate::metadata::Interval) -> Result<IntervalList> {
-    // Extract start and end locus from the interval
-    let (start_contig, start_pos) = extract_locus_from_value(&interval.start);
-    let (end_contig, end_pos) = extract_locus_from_value(&interval.end);
-
-    let mut intervals = IntervalList::new();
-
-    if start_contig == end_contig {
-        // Same chromosome - single interval
-        intervals.add(start_contig, start_pos, end_pos);
-    } else {
-        // Cross-chromosome interval (rare) - add both endpoints
-        // This is a simplification; ideally we'd add all chromosomes in between
-        intervals.add(start_contig, start_pos, i32::MAX);
-        intervals.add(end_contig, 0, end_pos);
-    }
-
-    Ok(intervals)
-}
-
-/// Extract locus (contig, position) from a serde_json::Value.
-#[allow(dead_code)]
-fn extract_locus_from_value(value: &serde_json::Value) -> (String, i32) {
-    if let serde_json::Value::Object(map) = value {
-        let contig = map.get("contig")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let position = map.get("position")
-            .and_then(|v| v.as_i64())
-            .map(|p| p as i32)
-            .unwrap_or(0);
-        (contig, position)
-    } else {
-        (String::new(), 0)
-    }
-}
-
-/// Extract variant key (contig, position, ref, alt) from an encoded row.
-#[allow(dead_code)]
-fn extract_variant_key(row: &crate::codec::EncodedValue) -> Option<(String, i32, String, String)> {
-    use crate::codec::EncodedValue;
-
-    fn get_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a EncodedValue> {
-        let mut current = value;
-        for &field_name in path {
-            if let EncodedValue::Struct(fields) = current {
-                current = fields.iter().find(|(n, _)| n == field_name).map(|(_, v)| v)?;
-            } else {
-                return None;
-            }
-        }
-        Some(current)
-    }
-
-    // Extract locus
-    let contig = get_field(row, &["locus", "contig"])?.as_string()?;
-    let position = get_field(row, &["locus", "position"])?.as_i32()?;
-
-    // Extract alleles
-    let (ref_allele, alt_allele) = if let Some(EncodedValue::Array(alleles)) = get_field(row, &["alleles"]) {
-        let ref_a = alleles.first().and_then(|v| v.as_string()).unwrap_or_default();
-        let alt_a = alleles.get(1).and_then(|v| v.as_string()).unwrap_or_default();
-        (ref_a, alt_a)
-    } else {
-        return None;
-    };
-
-    Some((contig, position, ref_allele, alt_allele))
-}
-
-/// Extract a string field from an encoded row.
-/// Handles both top-level fields and common nested patterns.
-fn extract_string_field(row: &crate::codec::EncodedValue, field_name: &str) -> Option<String> {
-    use crate::codec::EncodedValue;
-
-    if let EncodedValue::Struct(fields) = row {
-        // First try top-level field
-        for (name, value) in fields {
-            if name == field_name {
-                return value.as_string();
-            }
-        }
-
-        // Special handling for gene_symbol: look in transcript_consequences array
-        if field_name == "gene_symbol" {
-            for (name, value) in fields {
-                if name == "transcript_consequences" {
-                    if let EncodedValue::Array(consequences) = value {
-                        // Get gene_symbol from first non-null entry
-                        for consequence in consequences {
-                            if let EncodedValue::Struct(csq_fields) = consequence {
-                                for (csq_name, csq_value) in csq_fields {
-                                    if csq_name == "gene_symbol" {
-                                        if let Some(s) = csq_value.as_string() {
-                                            if !s.is_empty() {
-                                                return Some(s);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Extract fields for a significant hit from an encoded row.
 fn extract_sig_hit_fields(row: &crate::codec::EncodedValue) -> (String, String, Option<f64>, Option<f64>, Option<f64>) {

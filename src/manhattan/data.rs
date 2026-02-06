@@ -318,8 +318,4 @@ pub struct SigHitRow {
     pub se: Option<f64>,
     /// Allele frequency
     pub af: Option<f64>,
-    /// Gene symbol (from annotation merge-join during scan)
-    pub gene: Option<String>,
-    /// VEP consequence (from annotation merge-join during scan)
-    pub consequence: Option<String>,
 }
