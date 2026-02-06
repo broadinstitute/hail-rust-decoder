@@ -6,6 +6,7 @@ pub mod batch;
 pub mod data;
 pub mod genes;
 pub mod layout;
+pub mod loci_writer;
 pub mod locus;
 pub mod pipeline;
 pub mod reference;

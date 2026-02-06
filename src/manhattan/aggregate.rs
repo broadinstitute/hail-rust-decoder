@@ -10,11 +10,13 @@
 use crate::distributed::message::ManhattanAggregateSpec;
 use crate::error::Result;
 use crate::manhattan::data::{
-    Manifest, ManifestInputs, ManifestLocus, ManifestLocusVariants, ManifestManhattan,
-    ManifestManhattans, ManifestRegion, ManifestSigHits, ManifestSignificantHits, ManifestStats,
-    ManifestTopHit,
+    LocusDefinitionRow, LocusVariantRow, Manifest, ManifestInputs, ManifestLocus,
+    ManifestLocusVariants, ManifestManhattan, ManifestManhattans, ManifestRegion, ManifestSigHits,
+    ManifestSignificantHits, ManifestStats, ManifestTopHit,
 };
+use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::locus::{DataSource, LocusPlotConfig, LocusRenderer, RenderVariant};
+use crate::manhattan::reference::calculate_xpos;
 use crate::query::IntervalList;
 use arrow::array::{Array, Float64Array, Int32Array, StringArray};
 use arrow::record_batch::RecordBatch;
@@ -42,6 +44,10 @@ pub fn generate_loci_standalone(
 ) -> Result<Vec<ManifestLocus>> {
     let output_base = output_dir.trim_end_matches('/');
 
+    // Extract phenotype from path; use default ancestry
+    let phenotype = extract_phenotype_name(output_base);
+    let ancestry = "meta".to_string();
+
     let loci = generate_loci_from_parquet(
         output_base,
         exome_table,
@@ -51,6 +57,8 @@ pub fn generate_loci_standalone(
         threshold,
         gene_threshold,
         num_threads,
+        &phenotype,
+        &ancestry,
     )?;
 
     // Update manifest.json with loci info
@@ -135,35 +143,50 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
         0
     };
 
-    // Step 3: Merge significant hits
-    println!("  Merging significant hits...");
-    let (exome_sig_count, exome_top_hit) = if spec.exome_results.is_some() {
+    // Step 3: Merge significant hits (combined exome + genome into one file)
+    println!("  Merging significant hits (combined exome + genome)...");
+    let has_exome = spec.exome_results.is_some();
+    let has_genome = spec.genome_results.is_some();
+    let (combined_sig_count, _combined_top_hit) =
+        merge_and_combine_hits(output_base, has_exome, has_genome)?;
+
+    // For backward compatibility, also generate per-source files
+    let (exome_sig_count, exome_top_hit) = if has_exome {
         merge_significant_hits(output_base, "exome")?
     } else {
         (0, None)
     };
 
-    let (genome_sig_count, genome_top_hit) = if spec.genome_results.is_some() {
+    let (genome_sig_count, genome_top_hit) = if has_genome {
         merge_significant_hits(output_base, "genome")?
     } else {
         (0, None)
     };
 
+    // Extract phenotype and ancestry from spec or path
+    let phenotype = extract_phenotype_name(output_base);
+    let ancestry = "meta".to_string(); // Default ancestry; could be extracted from spec if available
+
     // Step 4: Compute locus regions and generate plots (if enabled)
     let loci = if spec.locus_plots {
         println!("  Generating locus plots...");
-        generate_locus_plots(spec, output_base)?
+        generate_locus_plots(spec, output_base, &phenotype, &ancestry)?
     } else {
         vec![]
     };
+
+    println!(
+        "  Combined significant hits: {} total, {} exome, {} genome",
+        combined_sig_count, exome_sig_count, genome_sig_count
+    );
 
     // Step 5: Write manifest.json
     println!("  Writing manifest.json...");
     let aggregate_duration = start.elapsed().as_secs_f64();
 
     let manifest = Manifest {
-        phenotype: extract_phenotype_name(output_base),
-        ancestry: None,
+        phenotype: phenotype.clone(),
+        ancestry: Some(ancestry.clone()),
         created_at: chrono_now_iso(),
         inputs: ManifestInputs {
             exome_results: spec.exome_results.clone(),
@@ -365,6 +388,135 @@ fn merge_significant_hits(
     let write_start = Instant::now();
     write_parquet_batches(&output_file, &schema, &all_batches)?;
     println!("    Wrote {} rows in {:.1}s", total_count, write_start.elapsed().as_secs_f64());
+
+    // Convert top candidate to ManifestTopHit
+    let top_hit = global_top.map(|c| ManifestTopHit {
+        id: format!("{}:{}:{}:{}", c.contig, c.position, c.ref_allele, c.alt_allele),
+        pvalue: c.pvalue,
+        gene: None,
+        consequence: None,
+    });
+
+    Ok((total_count, top_hit))
+}
+
+/// Merge and combine significant hits from both exome and genome into a single file.
+///
+/// This function reads all `*-sig.parquet` files from both the `exome/` and `genome/`
+/// directories and writes them to a single `significant.parquet` at the output root.
+/// Since the scan phase now includes `sequencing_type` in the output, we can safely
+/// merge them into one file.
+fn merge_and_combine_hits(
+    output_base: &str,
+    has_exome: bool,
+    has_genome: bool,
+) -> Result<(u64, Option<ManifestTopHit>)> {
+    use crate::io::is_cloud_path;
+    use rayon::prelude::*;
+    use std::path::Path;
+    use std::time::Instant;
+
+    let output_file = format!("{}/significant.parquet", output_base);
+
+    // Collect all sig parquet files from both sources
+    let mut sig_files: Vec<String> = Vec::new();
+
+    if has_exome {
+        let exome_dir = format!("{}/exome", output_base);
+        if is_cloud_path(&exome_dir) {
+            if let Ok(files) = list_cloud_parquet_files(&exome_dir, "-sig.parquet") {
+                sig_files.extend(files);
+            }
+        } else if Path::new(&exome_dir).exists() {
+            if let Ok(files) = list_local_parquet_files(&exome_dir, "-sig.parquet") {
+                sig_files.extend(files);
+            }
+        }
+    }
+
+    if has_genome {
+        let genome_dir = format!("{}/genome", output_base);
+        if is_cloud_path(&genome_dir) {
+            if let Ok(files) = list_cloud_parquet_files(&genome_dir, "-sig.parquet") {
+                sig_files.extend(files);
+            }
+        } else if Path::new(&genome_dir).exists() {
+            if let Ok(files) = list_local_parquet_files(&genome_dir, "-sig.parquet") {
+                sig_files.extend(files);
+            }
+        }
+    }
+
+    if sig_files.is_empty() {
+        return Ok((0, None));
+    }
+
+    let start = Instant::now();
+    println!(
+        "    Reading {} sig.parquet files from exome+genome in parallel...",
+        sig_files.len()
+    );
+
+    // Read all parquet files in parallel
+    let results: Vec<Result<(Vec<RecordBatch>, Option<TopHitCandidate>)>> = sig_files
+        .par_iter()
+        .map(|file_path| {
+            let batches = read_parquet_file(file_path)?;
+            // Find top hit candidate in this file while we have it in memory
+            let top_candidate = find_top_hit_in_batches(&batches);
+            Ok((batches, top_candidate))
+        })
+        .collect();
+
+    // Collect batches and find global top hit
+    let mut all_batches: Vec<RecordBatch> = Vec::new();
+    let mut schema = None;
+    let mut global_top: Option<TopHitCandidate> = None;
+
+    for result in results {
+        let (batches, top_candidate) = result?;
+        for batch in batches {
+            if schema.is_none() {
+                schema = Some(batch.schema());
+            }
+            all_batches.push(batch);
+        }
+        // Update global top hit if this file has a better one
+        if let Some(candidate) = top_candidate {
+            global_top = Some(match global_top {
+                None => candidate,
+                Some(current) if candidate.pvalue < current.pvalue => candidate,
+                Some(current) => current,
+            });
+        }
+    }
+
+    let read_time = start.elapsed();
+    println!(
+        "    Read {} batches in {:.1}s",
+        all_batches.len(),
+        read_time.as_secs_f64()
+    );
+
+    if all_batches.is_empty() {
+        return Ok((0, None));
+    }
+
+    let schema = schema.unwrap();
+    let total_count: u64 = all_batches.iter().map(|b| b.num_rows() as u64).sum();
+
+    if total_count == 0 {
+        return Ok((0, None));
+    }
+
+    // Write concatenated output (no sorting - files are already partition-sorted)
+    let write_start = Instant::now();
+    write_parquet_batches(&output_file, &schema, &all_batches)?;
+    println!(
+        "    Wrote {} rows to significant.parquet in {:.1}s",
+        total_count,
+        write_start.elapsed().as_secs_f64()
+    );
 
     // Convert top candidate to ManifestTopHit
     let top_hit = global_top.map(|c| ManifestTopHit {
@@ -767,6 +919,8 @@ struct SigPosition {
 fn generate_locus_plots(
     spec: &ManhattanAggregateSpec,
     output_base: &str,
+    phenotype: &str,
+    ancestry: &str,
 ) -> Result<Vec<ManifestLocus>> {
     generate_loci_from_parquet(
         output_base,
@@ -777,10 +931,14 @@ fn generate_locus_plots(
         spec.threshold,
         spec.gene_threshold,
         8, // Default thread count for aggregation
+        phenotype,
+        ancestry,
     )
 }
 
 /// Core locus generation logic shared by aggregation and standalone CLI.
+///
+/// Now writes consolidated loci.parquet and loci_variants.parquet files.
 fn generate_loci_from_parquet(
     output_base: &str,
     exome_table: Option<&str>,
@@ -790,6 +948,8 @@ fn generate_loci_from_parquet(
     threshold: f64,
     gene_threshold: f64,
     num_threads: usize,
+    phenotype: &str,
+    ancestry: &str,
 ) -> Result<Vec<ManifestLocus>> {
     use crate::io::is_cloud_path;
     use crate::manhattan::genes::process_complex_gene_burden;
@@ -872,15 +1032,24 @@ fn generate_loci_from_parquet(
         .build()
         .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-    println!("    Generating {} locus plots ({} threads)...", total_regions, num_threads);
+    println!(
+        "    Generating {} locus plots ({} threads)...",
+        total_regions, num_threads
+    );
 
-    let results: Vec<Result<Option<ManifestLocus>>> = pool.install(|| {
+    // Generate loci in parallel, collecting rows for parquet output
+    let results: Vec<
+        Result<Option<(ManifestLocus, LocusDefinitionRow, Vec<LocusVariantRow>)>>,
+    > = pool.install(|| {
         regions
             .par_iter()
             .map(|(contig, start, end)| {
                 let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if done == 1 || done % 20 == 0 || done == total_regions {
-                    println!("      Progress: {}/{} - {}:{}-{}", done, total_regions, contig, start, end);
+                    println!(
+                        "      Progress: {}/{} - {}:{}-{}",
+                        done, total_regions, contig, start, end
+                    );
                 }
 
                 generate_single_locus_core(
@@ -892,6 +1061,8 @@ fn generate_loci_from_parquet(
                     *start,
                     *end,
                     threshold,
+                    phenotype,
+                    ancestry,
                 )
             })
             .collect()
@@ -899,11 +1070,17 @@ fn generate_loci_from_parquet(
 
     // Collect successful results
     let mut manifest_loci = Vec::new();
+    let mut locus_definitions: Vec<LocusDefinitionRow> = Vec::new();
+    let mut locus_variants: Vec<LocusVariantRow> = Vec::new();
     let mut errors = 0;
 
     for result in results {
         match result {
-            Ok(Some(locus)) => manifest_loci.push(locus),
+            Ok(Some((locus, def_row, var_rows))) => {
+                manifest_loci.push(locus);
+                locus_definitions.push(def_row);
+                locus_variants.extend(var_rows);
+            }
             Ok(None) => {}
             Err(e) => {
                 errors += 1;
@@ -916,6 +1093,15 @@ fn generate_loci_from_parquet(
         println!("      Completed with {} errors", errors);
     }
 
+    // Write loci.parquet and loci_variants.parquet
+    if !locus_definitions.is_empty() {
+        println!(
+            "    Writing {} locus definitions to loci.parquet...",
+            locus_definitions.len()
+        );
+        write_loci_parquet(output_base, &locus_definitions, &locus_variants)?;
+    }
+
     // Sort by chromosome and position for consistent output
     manifest_loci.sort_by(|a, b| {
         let chr_a = parse_chrom_order(&a.region.contig);
@@ -926,7 +1112,10 @@ fn generate_loci_from_parquet(
     Ok(manifest_loci)
 }
 
-/// Generate a single locus plot and its associated files.
+/// Generate a single locus plot and its associated data.
+///
+/// Returns a tuple of (ManifestLocus, LocusDefinitionRow, Vec<LocusVariantRow>)
+/// for use in manifest.json and consolidated parquet output.
 fn generate_single_locus_core(
     loci_dir: &str,
     sig_positions: &[SigPosition],
@@ -936,7 +1125,9 @@ fn generate_single_locus_core(
     start: i32,
     end: i32,
     threshold: f64,
-) -> Result<Option<ManifestLocus>> {
+    phenotype: &str,
+    ancestry: &str,
+) -> Result<Option<(ManifestLocus, LocusDefinitionRow, Vec<LocusVariantRow>)>> {
     let region_id = format!("{}_{}_{}",
         contig.replace("chr", ""),
         start,
@@ -974,33 +1165,88 @@ fn generate_single_locus_core(
 
     let png_data = render_locus_plot(&all_variants, start, end, threshold)?;
 
-    // Write files
+    // Write plot file (this remains as a file)
     let plot_path = format!("{}/{}/plot.png", loci_dir, region_id);
     write_locus_file(&plot_path, &png_data)?;
 
-    let exome_json_path = format!("{}/{}/exome.json", loci_dir, region_id);
-    let genome_json_path = format!("{}/{}/genome.json", loci_dir, region_id);
+    // Build LocusVariantRow records (replaces JSON files)
+    let variant_rows: Vec<LocusVariantRow> = exome_variants
+        .iter()
+        .map(|v| LocusVariantRow {
+            locus_id: region_id.clone(),
+            phenotype: phenotype.to_string(),
+            ancestry: ancestry.to_string(),
+            sequencing_type: "exome".to_string(),
+            xpos: calculate_xpos(contig, v.position),
+            position: v.position,
+            pvalue: v.pvalue,
+            neg_log10_p: if v.pvalue > 0.0 {
+                -v.pvalue.log10() as f32
+            } else {
+                0.0
+            },
+            is_significant: v.is_significant,
+        })
+        .chain(genome_variants.iter().map(|v| LocusVariantRow {
+            locus_id: region_id.clone(),
+            phenotype: phenotype.to_string(),
+            ancestry: ancestry.to_string(),
+            sequencing_type: "genome".to_string(),
+            xpos: calculate_xpos(contig, v.position),
+            position: v.position,
+            pvalue: v.pvalue,
+            neg_log10_p: if v.pvalue > 0.0 {
+                -v.pvalue.log10() as f32
+            } else {
+                0.0
+            },
+            is_significant: v.is_significant,
+        }))
+        .collect();
 
-    write_variants_json(&exome_json_path, &exome_variants)?;
-    write_variants_json(&genome_json_path, &genome_variants)?;
+    // Build LocusDefinitionRow
+    let source_str = lead
+        .as_ref()
+        .map(|l| l.source.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let lead_variant_str = lead
+        .as_ref()
+        .map(|l| format!("{}:{}::", l.contig, l.position)) // Note: ref/alt not available from SigPosition
+        .unwrap_or_else(|| "unknown".to_string());
+    let lead_pvalue = lead.as_ref().map(|l| l.pvalue).unwrap_or(1.0);
 
-    Ok(Some(ManifestLocus {
+    let definition_row = LocusDefinitionRow {
+        locus_id: region_id.clone(),
+        phenotype: phenotype.to_string(),
+        ancestry: ancestry.to_string(),
+        contig: contig.to_string(),
+        start,
+        stop: end,
+        xstart: calculate_xpos(contig, start),
+        xstop: calculate_xpos(contig, end),
+        source: source_str.clone(),
+        lead_variant: lead_variant_str.clone(),
+        lead_pvalue,
+        exome_count: exome_variants.len() as u32,
+        genome_count: genome_variants.len() as u32,
+    };
+
+    // Build ManifestLocus (still needed for manifest.json)
+    let manifest_locus = ManifestLocus {
         id: region_id.clone(),
         region: ManifestRegion {
             contig: contig.to_string(),
             start: start as i64,
             end: end as i64,
         },
-        source: lead.as_ref().map(|l| l.source.clone()).unwrap_or_else(|| "unknown".to_string()),
-        lead_variant: lead.as_ref()
-            .map(|l| format!("{}:{}", l.contig, l.position))
-            .unwrap_or_else(|| "unknown".to_string()),
-        lead_pvalue: lead.as_ref().map(|l| l.pvalue).unwrap_or(1.0),
+        source: source_str,
+        lead_variant: lead_variant_str,
+        lead_pvalue,
         lead_gene: None,
         plot: plot_path,
         exome_variants: if !exome_variants.is_empty() {
             Some(ManifestLocusVariants {
-                path: exome_json_path,
+                path: format!("loci_variants.parquet (locus_id={})", region_id),
                 count: exome_variants.len() as u64,
             })
         } else {
@@ -1008,14 +1254,16 @@ fn generate_single_locus_core(
         },
         genome_variants: if !genome_variants.is_empty() {
             Some(ManifestLocusVariants {
-                path: genome_json_path,
+                path: format!("loci_variants.parquet (locus_id={})", region_id),
                 count: genome_variants.len() as u64,
             })
         } else {
             None
         },
         genes: vec![],
-    }))
+    };
+
+    Ok(Some((manifest_locus, definition_row, variant_rows)))
 }
 
 /// Extract significant positions from a merged parquet file.
@@ -1407,7 +1655,11 @@ fn write_variants_json(path: &str, variants: &[RenderVariant]) -> Result<()> {
         .map(|v| VariantJson {
             position: v.position,
             pvalue: v.pvalue,
-            neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() } else { 0.0 },
+            neg_log10_p: if v.pvalue > 0.0 {
+                -v.pvalue.log10()
+            } else {
+                0.0
+            },
             source: match v.source {
                 DataSource::Exome => "exome".to_string(),
                 DataSource::Genome => "genome".to_string(),
@@ -1418,4 +1670,50 @@ fn write_variants_json(path: &str, variants: &[RenderVariant]) -> Result<()> {
 
     let json = serde_json::to_string_pretty(&json_variants)?;
     write_locus_file(path, json.as_bytes())
+}
+
+/// Write loci.parquet and loci_variants.parquet files.
+fn write_loci_parquet(
+    output_base: &str,
+    definitions: &[LocusDefinitionRow],
+    variants: &[LocusVariantRow],
+) -> Result<()> {
+    use crate::io::is_cloud_path;
+
+    let loci_path = format!("{}/loci.parquet", output_base);
+    let variants_path = format!("{}/loci_variants.parquet", output_base);
+
+    // Write loci definitions
+    if is_cloud_path(&loci_path) {
+        use crate::io::CloudWriter;
+        let cloud_writer = CloudWriter::new(&loci_path)?;
+        let mut writer = LocusDefinitionWriter::from_writer(cloud_writer)?;
+        writer.write_batch(definitions)?;
+        let cloud_writer = writer.into_inner()?;
+        cloud_writer.finish()?;
+    } else {
+        let mut writer = LocusDefinitionWriter::new(&loci_path)?;
+        writer.write_batch(definitions)?;
+        let count = writer.finish()?;
+        println!("      Wrote {} locus definitions to loci.parquet", count);
+    }
+
+    // Write loci variants
+    if !variants.is_empty() {
+        if is_cloud_path(&variants_path) {
+            use crate::io::CloudWriter;
+            let cloud_writer = CloudWriter::new(&variants_path)?;
+            let mut writer = LocusVariantWriter::from_writer(cloud_writer)?;
+            writer.write_batch(variants)?;
+            let cloud_writer = writer.into_inner()?;
+            cloud_writer.finish()?;
+        } else {
+            let mut writer = LocusVariantWriter::new(&variants_path)?;
+            writer.write_batch(variants)?;
+            let count = writer.finish()?;
+            println!("      Wrote {} locus variants to loci_variants.parquet", count);
+        }
+    }
+
+    Ok(())
 }
