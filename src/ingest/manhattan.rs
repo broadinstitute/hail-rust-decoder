@@ -646,8 +646,10 @@ fn ingest_variants(
             Arc::new(chr_contigs.finish()),
         ];
 
+        // Skip columns we're adding/replacing to avoid duplicates
+        let skip_columns = ["contig", "phenotype", "ancestry", "sequencing_type", "xpos"];
         for (i, field) in batch.schema().fields().iter().enumerate() {
-            if field.name() != "contig" {
+            if !skip_columns.contains(&field.name().as_str()) {
                 fields.push(field.as_ref().clone());
                 columns.push(batch.column(i).clone());
             }

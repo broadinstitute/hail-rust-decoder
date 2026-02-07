@@ -1943,7 +1943,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut log_cmd = self.provider.get_ssh_command(
             &coordinator.name,
             zone,
-            "tail -f --pid=$(cat /tmp/coordinator.pid) /tmp/coordinator.log",
+            "tail -n +1 -f --pid=$(cat /tmp/coordinator.pid) /tmp/coordinator.log",
         );
 
         // This blocks until coordinator exits or user interrupts
@@ -3118,11 +3118,12 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     fn parse_ingest_manhattan_command(
         args: &[String],
     ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
-        use crate::distributed::message::JobSpec;
+        use crate::distributed::message::{InitStrategy, JobSpec};
 
         let mut input_dir: Option<String> = None;
         let mut clickhouse_url: Option<String> = None;
         let mut database = "default".to_string();
+        let mut init_strategy = InitStrategy::Create;
 
         let mut i = 0;
         while i < args.len() {
@@ -3146,6 +3147,27 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 "--database" => {
                     if i + 1 < args.len() {
                         database = args[i + 1].clone();
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--init-strategy" => {
+                    if i + 1 < args.len() {
+                        init_strategy = match args[i + 1].to_lowercase().as_str() {
+                            "create" => InitStrategy::Create,
+                            "replace" => InitStrategy::Replace,
+                            "append" => InitStrategy::Append,
+                            other => {
+                                return Err(HailError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    format!(
+                                        "Invalid init-strategy '{}'. Must be: create, replace, or append",
+                                        other
+                                    ),
+                                )));
+                            }
+                        };
                         i += 2;
                     } else {
                         i += 1;
@@ -3177,6 +3199,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             input_dir: input_dir.clone(),
             clickhouse_url,
             database,
+            init_strategy,
         };
 
         // Use input_dir as the "input_path" for job tracking

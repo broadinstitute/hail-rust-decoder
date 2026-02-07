@@ -5,3 +5,6 @@
 //! downstream querying and visualization.
 
 pub mod manhattan;
+pub mod schema;
+
+pub use schema::{get_manhattan_schemas, get_manhattan_table_names};

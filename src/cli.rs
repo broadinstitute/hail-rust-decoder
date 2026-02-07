@@ -861,6 +861,11 @@ pub enum ServiceCommands {
     },
 }
 
+/// Re-export InitStrategy from distributed module for CLI usage.
+/// This allows the CLI to use the same enum as the library code.
+#[cfg(feature = "clickhouse")]
+pub use hail_decoder::distributed::message::InitStrategy;
+
 /// Subcommands for ingesting data into external systems.
 #[cfg(feature = "clickhouse")]
 #[derive(Subcommand)]
@@ -884,6 +889,10 @@ pub struct IngestManhattanArgs {
     /// Target database (default: default)
     #[arg(long, default_value = "default")]
     pub database: String,
+
+    /// Table initialization strategy: create (default), replace, or append
+    #[arg(long, value_enum, default_value = "create")]
+    pub init_strategy: InitStrategy,
 
     /// Partitioning arguments for distributed processing
     #[command(flatten)]

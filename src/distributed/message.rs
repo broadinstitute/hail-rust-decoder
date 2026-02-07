@@ -5,6 +5,20 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Table initialization strategy for ingestion.
+///
+/// Controls how tables are created/managed at the start of ingestion.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+pub enum InitStrategy {
+    /// Create tables if they don't exist (default)
+    #[default]
+    Create,
+    /// Drop existing tables and recreate them (replaces all data)
+    Replace,
+    /// Do nothing - assume tables already exist
+    Append,
+}
+
 /// Specification for a distributed job operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -51,6 +65,9 @@ pub enum JobSpec {
         input_dir: String,
         clickhouse_url: String,
         database: String,
+        /// Table initialization strategy (create, replace, append)
+        #[serde(default)]
+        init_strategy: InitStrategy,
     },
     /// Ingest a specific phenotype into ClickHouse (Worker task)
     IngestManhattanTask {

@@ -2124,14 +2124,56 @@ async fn submit_job(
     }
 
     // Handle IngestManhattan jobs (discover phenotypes and queue ingestion tasks)
-    if let JobSpec::IngestManhattan { ref input_dir, ref clickhouse_url, ref database } = req.job_spec {
+    if let JobSpec::IngestManhattan { ref input_dir, ref clickhouse_url, ref database, ref init_strategy } = req.job_spec {
         // Clear standard partition tracking - ingestion uses its own state
         data.pending_partitions.clear();
 
         println!(
-            "Initializing Manhattan ingestion from {} to ClickHouse {}",
-            input_dir, clickhouse_url
+            "Initializing Manhattan ingestion from {} to ClickHouse {} (init_strategy: {:?})",
+            input_dir, clickhouse_url, init_strategy
         );
+
+        // Execute DDL based on init_strategy (before dispatching tasks)
+        #[cfg(feature = "clickhouse")]
+        {
+            use crate::ingest::get_manhattan_schemas;
+            use crate::export::ClickHouseClient;
+            use super::message::InitStrategy;
+
+            if *init_strategy != InitStrategy::Append {
+                println!("  Initializing tables...");
+                let client = ClickHouseClient::new(clickhouse_url);
+                let schemas = get_manhattan_schemas();
+
+                for (table_name, create_sql) in schemas {
+                    // If replace strategy, drop the table first
+                    if *init_strategy == InitStrategy::Replace {
+                        let drop_sql = format!("DROP TABLE IF EXISTS {}", table_name);
+                        match client.execute(&drop_sql) {
+                            Ok(_) => println!("    Dropped table: {}", table_name),
+                            Err(e) => {
+                                return axum::Json(JobConfigResponse {
+                                    acknowledged: false,
+                                    error: Some(format!("Failed to drop table {}: {}", table_name, e)),
+                                });
+                            }
+                        }
+                    }
+
+                    // Create the table (for both Create and Replace strategies)
+                    match client.execute(create_sql) {
+                        Ok(_) => println!("    Created table: {}", table_name),
+                        Err(e) => {
+                            return axum::Json(JobConfigResponse {
+                                acknowledged: false,
+                                error: Some(format!("Failed to create table {}: {}", table_name, e)),
+                            });
+                        }
+                    }
+                }
+                println!("  Table initialization complete.");
+            }
+        }
 
         // Discover phenotypes by scanning for manifest.json files
         // Structure: {input_dir}/{ancestry}/{phenotype_id}/manifest.json
