@@ -725,6 +725,10 @@ pub enum PoolCommands {
         #[arg(long)]
         force: bool,
 
+        /// Skip automatic Linux binary build (use existing binary)
+        #[arg(long)]
+        skip_build: bool,
+
         /// Number of partitions per worker batch (higher = more parallelism per worker)
         #[arg(long)]
         batch_size: Option<usize>,

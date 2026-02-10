@@ -1,0 +1,35 @@
+#!/bin/bash
+# cargo-worker: Build Linux worker binary and install to target/release
+#
+# This script can be invoked as `cargo worker` when in PATH.
+# It cross-compiles hail-decoder for Linux and copies it to target/release/hail-decoder-worker
+# so that `hail-decoder pool submit` can find it automatically.
+#
+# Usage:
+#   cargo worker                        # Build with default features
+#   cargo worker --features clickhouse  # Build with clickhouse feature
+#   cargo worker --features full        # Build with all features
+
+set -e
+
+# Skip the 'worker' argument that cargo passes as $1
+shift 2>/dev/null || true
+
+# Find the project root (where Cargo.toml is)
+PROJECT_ROOT="$(cargo locate-project --message-format=plain 2>/dev/null | xargs dirname)"
+if [ -z "$PROJECT_ROOT" ]; then
+    echo "Error: Could not find Cargo.toml" >&2
+    exit 1
+fi
+
+cd "$PROJECT_ROOT"
+
+echo "Building Linux worker binary..."
+# Increase file descriptor limit for linking (fixes "too many open files" errors)
+ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+cargo zigbuild --target x86_64-unknown-linux-gnu --release "$@"
+
+mkdir -p target/release
+cp target/x86_64-unknown-linux-gnu/release/hail-decoder target/release/hail-decoder-worker
+
+echo "Installed: target/release/hail-decoder-worker"

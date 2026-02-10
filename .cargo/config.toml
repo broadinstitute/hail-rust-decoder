@@ -25,3 +25,7 @@ rustc-wrapper = "sccache"
 # Cross-compile for Linux (for GCP VMs)
 # Usage: cargo linux [--release]
 linux = "zigbuild --target x86_64-unknown-linux-gnu"
+
+# Build Linux worker binary and install to target/release for pool submit
+# Usage: cargo worker (requires scripts/ in PATH)
+# See: scripts/cargo-worker

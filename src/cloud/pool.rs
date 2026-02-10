@@ -38,11 +38,22 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     /// Automatically builds Linux binary if on macOS (unless `skip_build` is true).
     /// If `with_coordinator` is true, also starts the coordinator in idle mode.
     pub fn create(&self, config: &PoolConfig, wait: bool, skip_build: bool) -> Result<()> {
-        // Build Linux binary first (needed for deployment)
-        if !skip_build {
-            Self::build_linux_binary(&[])?;
-        } else {
+        // Determine if we should build
+        // 1. Explicit skip_build -> skip
+        // 2. We have a bundled binary -> skip (Release mode)
+        // 3. Otherwise -> build (Dev mode)
+        let should_build = if skip_build {
             println!("{}", "Skipping binary build (--skip-build)".dimmed());
+            false
+        } else if self.has_bundled_binary() {
+            println!("{}", "Found bundled worker binary, skipping build...".dimmed());
+            false
+        } else {
+            true
+        };
+
+        if should_build {
+            Self::build_linux_binary(&[])?;
         }
 
         println!(
@@ -728,8 +739,17 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 to_add.to_string().bright_white()
             );
 
-            // Build binary first if needed (fail fast before creating VMs)
-            if !skip_build {
+            // Determine if we should build (fail fast before creating VMs)
+            let should_build = if skip_build {
+                false
+            } else if self.has_bundled_binary() {
+                println!("{}", "Found bundled worker binary, skipping build...".dimmed());
+                false
+            } else {
+                true
+            };
+
+            if should_build {
                 Self::build_linux_binary(&[])?;
             }
             let binary = self.locate_binary(binary_path.clone())?;
@@ -944,13 +964,21 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         binary_path: Option<String>,
         skip_build: bool,
     ) -> Result<()> {
-        // Build Linux binary first (unless skipped)
+        // Determine if we should build
         // Note: update_binary doesn't know about job features, defaulting to none.
         // Users needing features should use pool create or manual build.
-        if !skip_build {
-            Self::build_linux_binary(&[])?;
-        } else {
+        let should_build = if skip_build {
             println!("{}", "Skipping binary build (--skip-build)".dimmed());
+            false
+        } else if self.has_bundled_binary() {
+            println!("{}", "Found bundled worker binary, skipping build...".dimmed());
+            false
+        } else {
+            true
+        };
+
+        if should_build {
+            Self::build_linux_binary(&[])?;
         }
 
         // Locate the binary
@@ -1120,6 +1148,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         force_redeploy: bool,
         force: bool,
         autoscale: bool,
+        skip_build: bool,
         batch_size: Option<usize>,
         config: Option<&crate::cloud::ScalingConfig>,
         command: &[String],
@@ -1133,8 +1162,21 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             vec![]
         };
 
-        // Build binary if redeploying (ensures latest code is used)
-        if force_redeploy {
+        // Determine if we should build
+        // 1. Explicit skip_build -> skip
+        // 2. We have a bundled binary -> skip (Release mode)
+        // 3. Otherwise -> build (Dev mode)
+        let should_build = if skip_build {
+            false
+        } else if self.has_bundled_binary() {
+            println!("{}", "Found bundled worker binary, skipping build...".dimmed());
+            false
+        } else {
+            true
+        };
+
+        // Build binary if redeploying (ensures latest code is used) or if needed
+        if force_redeploy || should_build {
             Self::build_linux_binary(&features)?;
         }
 
@@ -1155,10 +1197,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 target.to_string().bright_white()
             );
 
-            // Build binary once (skip if already built for redeploy), then scale
-            if !force_redeploy {
-                Self::build_linux_binary(&features)?;
-            }
+            // Pass skip_build=true because we handled the build logic above
             self.scale(name, target, zone, binary_path.clone(), true, pool_config)?;
         }
 
@@ -2271,10 +2310,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             };
 
             // Use shell to set ulimit first (fixes "too many open files" during linking)
-            // cargo linux is an alias for cargo-zigbuild
+            // Use full zigbuild command (not cargo linux alias) so it works from any directory
             // Suppress compiler warnings (already seen during local build) with RUSTFLAGS
             let cmd = format!(
-                "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo linux --release{}",
+                "ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null; RUSTFLAGS='-Awarnings' cargo zigbuild --target x86_64-unknown-linux-gnu --release{}",
                 features_flag
             );
 
@@ -2285,7 +2324,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     HailError::Io(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         format!(
-                            "Failed to run 'cargo linux'. Is cargo-zigbuild installed?\n\
+                            "Failed to run 'cargo zigbuild'. Is cargo-zigbuild installed?\n\
                              Install with: cargo install cargo-zigbuild\n\
                              Error: {}",
                             e
@@ -2340,6 +2379,19 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         Ok(())
     }
 
+    /// Check if a bundled worker binary exists next to the executable.
+    fn has_bundled_binary(&self) -> bool {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                // Check for hail-decoder-worker (standard release name)
+                if exe_dir.join("hail-decoder-worker").exists() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Locate the Linux binary for deployment.
     fn locate_binary(&self, path: Option<String>) -> Result<PathBuf> {
         if let Some(p) = path {
@@ -2353,13 +2405,23 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             )));
         }
 
-        // Try default cross-compile path
+        // 1. Try bundled binary (Release mode) - Check next to executable
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let bundled_path = exe_dir.join("hail-decoder-worker");
+                if bundled_path.exists() {
+                    return Ok(bundled_path);
+                }
+            }
+        }
+
+        // 2. Try default cross-compile path (Dev mode)
         let default_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/hail-decoder");
         if default_path.exists() {
             return Ok(default_path);
         }
 
-        // Try release path (if running on Linux)
+        // 3. Try release path (if running on Linux)
         let release_path = PathBuf::from("target/release/hail-decoder");
         if release_path.exists() {
             return Ok(release_path);
