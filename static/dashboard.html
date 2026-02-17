@@ -534,6 +534,14 @@
       <h2>Cluster CPU</h2>
       <canvas id="cpu-chart"></canvas>
     </div>
+    <div class="panel">
+      <h2>Cluster Memory</h2>
+      <canvas id="memory-chart"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Cluster Network</h2>
+      <canvas id="network-chart"></canvas>
+    </div>
   </div>
 
   <div class="workers-section">
@@ -586,6 +594,24 @@ const cpuChart = new Chart(document.getElementById('cpu-chart'), {
   options: {
     ...chartOpts,
     scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, max: 100, ticks: { ...chartOpts.scales.y.ticks, callback: v => v + '%' } } }
+  }
+});
+
+const memoryChart = new Chart(document.getElementById('memory-chart'), {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: {
+    ...chartOpts,
+    scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, max: 100, ticks: { ...chartOpts.scales.y.ticks, callback: v => v + '%' } } }
+  }
+});
+
+const networkChart = new Chart(document.getElementById('network-chart'), {
+  type: 'line',
+  data: { labels: [], datasets: [] },
+  options: {
+    ...chartOpts,
+    scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, callback: v => v.toFixed(0) + ' MB/s' } } }
   }
 });
 
@@ -953,21 +979,33 @@ async function update() {
     let totalThroughput = 0;
     for (const wm of metrics.workers) {
       if (!chartData[wm.worker_id]) {
-        chartData[wm.worker_id] = { throughput: [], cpu: [] };
+        chartData[wm.worker_id] = { throughput: [], cpu: [], memory: [], network: [] };
       }
       const wd = chartData[wm.worker_id];
       const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
       if (latest) {
         wd.throughput.push(latest.rows_per_sec || 0);
         wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
+        // Memory usage as percentage
+        const memPct = (latest.memory_used_bytes && latest.memory_total_bytes)
+          ? (latest.memory_used_bytes / latest.memory_total_bytes) * 100
+          : 0;
+        wd.memory.push(memPct);
+        // Network I/O (RX + TX) in MB/s
+        const netMBps = ((latest.network_rx_bytes_sec || 0) + (latest.network_tx_bytes_sec || 0)) / 1e6;
+        wd.network.push(netMBps);
         totalThroughput += (latest.rows_per_sec || 0);
       } else {
         wd.throughput.push(0);
         wd.cpu.push(0);
+        wd.memory.push(0);
+        wd.network.push(0);
       }
       if (wd.throughput.length > MAX_CHART_POINTS) {
         wd.throughput.shift();
         wd.cpu.shift();
+        wd.memory.shift();
+        wd.network.shift();
       }
     }
 
@@ -1004,6 +1042,32 @@ async function update() {
       tension: 0.3,
     }));
     cpuChart.update('none');
+
+    // Rebuild Memory chart
+    memoryChart.data.labels = agg.timestamps;
+    memoryChart.data.datasets = workerIds.map((wid, i) => ({
+      label: wid,
+      data: chartData[wid] ? chartData[wid].memory : [],
+      borderColor: chartColors[i % chartColors.length],
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.3,
+    }));
+    memoryChart.update('none');
+
+    // Rebuild Network chart
+    networkChart.data.labels = agg.timestamps;
+    networkChart.data.datasets = workerIds.map((wid, i) => ({
+      label: wid,
+      data: chartData[wid] ? chartData[wid].network : [],
+      borderColor: chartColors[i % chartColors.length],
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.3,
+    }));
+    networkChart.update('none');
 
   } catch (err) {
     console.error('Dashboard update failed:', err);
