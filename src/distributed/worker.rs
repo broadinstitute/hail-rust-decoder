@@ -642,11 +642,15 @@ fn dispatch_job(
 
 /// Process partitions and export to ClickHouse.
 ///
-/// Uses chunked in-memory uploads to avoid disk space issues:
-/// - Rows are collected into chunks of CHUNK_SIZE rows
-/// - Each chunk is written to an in-memory Parquet buffer
-/// - The buffer is uploaded to ClickHouse immediately
-/// - Memory is bounded to ~CHUNK_SIZE rows per thread
+/// Uses a producer-consumer pattern with bounded concurrency to prevent OOM:
+/// - A semaphore limits how many partitions are processed concurrently (default: 8)
+/// - Each partition spawns a reader thread that sends row chunks via bounded channel
+/// - The consumer thread uploads chunks to ClickHouse
+/// - Backpressure: if uploads are slow, the channel fills and reading pauses
+///
+/// Environment variables for tuning:
+/// - HAIL_DECODER_MAX_CONCURRENT_UPLOADS: max concurrent partitions (default: 8)
+/// - HAIL_DECODER_CLICKHOUSE_CHUNK_SIZE: rows per upload chunk (default: 25000)
 #[cfg(feature = "clickhouse")]
 fn process_clickhouse_export(
     _cached_engine: Option<(String, QueryEngine)>,
@@ -657,71 +661,117 @@ fn process_clickhouse_export(
     telemetry: Option<Arc<TelemetryState>>,
 ) -> Result<(usize, Option<(String, QueryEngine)>)> {
     use crate::export::ClickHouseClient;
+    use crossbeam_channel::bounded;
     use rayon::prelude::*;
 
-    println!("Processing {} partitions to ClickHouse table '{}'...", partitions.len(), table);
+    // Configuration from environment (with defaults)
+    let max_concurrent: usize = std::env::var("HAIL_DECODER_MAX_CONCURRENT_UPLOADS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let chunk_size: usize = std::env::var("HAIL_DECODER_CLICKHOUSE_CHUNK_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(25_000);
+
+    println!(
+        "Processing {} partitions to ClickHouse table '{}' (concurrency: {}, chunk_size: {})...",
+        partitions.len(),
+        table,
+        max_concurrent,
+        chunk_size
+    );
+
+    // Semaphore to limit concurrent partition processing
+    let semaphore = Semaphore::new(max_concurrent);
 
     // Clone refs for the parallel closure
     let input_path = input_path.to_string();
     let url = url.to_string();
     let table = table.to_string();
 
-    // Process partitions in parallel
+    // Process partitions in parallel (but bounded by semaphore)
     let results: Vec<Result<usize>> = partitions
         .par_iter()
         .map(|&partition_id| {
+            // Acquire semaphore permit - blocks if too many partitions in flight
+            let _permit = semaphore.acquire();
+
+            // Bounded channel with capacity 2: provides backpressure
+            // If ClickHouse uploads are slow, reader thread will block
+            let (tx, rx) = bounded::<Result<Vec<crate::codec::EncodedValue>>>(2);
+
+            let input_path_clone = input_path.clone();
+            let chunk_size_clone = chunk_size;
+
+            // Spawn reader thread: reads rows and sends chunks through channel
+            std::thread::spawn(move || {
+                let engine_res = QueryEngine::open_path(&input_path_clone);
+                match engine_res {
+                    Ok(engine) => {
+                        match engine.scan_partition_iter(partition_id, &[]) {
+                            Ok(iter) => {
+                                let mut batch = Vec::with_capacity(chunk_size_clone);
+                                for row_res in iter {
+                                    match row_res {
+                                        Ok(row) => {
+                                            batch.push(row);
+                                            if batch.len() >= chunk_size_clone {
+                                                // Send chunk - blocks if channel is full (backpressure)
+                                                if tx.send(Ok(std::mem::replace(
+                                                    &mut batch,
+                                                    Vec::with_capacity(chunk_size_clone),
+                                                ))).is_err() {
+                                                    // Receiver dropped, stop reading
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = tx.send(Err(e));
+                                            return;
+                                        }
+                                    }
+                                }
+                                // Send remaining rows
+                                if !batch.is_empty() {
+                                    let _ = tx.send(Ok(batch));
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                    }
+                }
+                // tx is dropped here, closing the channel
+            });
+
+            // Consumer: receive chunks and upload to ClickHouse
+            // Open engine to get schema (metadata read is cheap)
             let engine = QueryEngine::open_path(&input_path)?;
             let row_type = engine.row_type().clone();
             let arrow_schema = Arc::new(crate::parquet::schema::create_schema(&row_type)?);
 
-            // Chunk size: ~100K rows per upload
-            // This bounds memory usage while still being efficient for ClickHouse
-            const CHUNK_SIZE: usize = 100_000;
-            const BATCH_SIZE: usize = 4096; // Internal batching for Parquet writing
+            let client = ClickHouseClient::new(&url);
+            let ts = telemetry.clone();
 
-            let mut chunk_rows = Vec::with_capacity(CHUNK_SIZE);
             let mut partition_rows = 0;
             let mut chunks_uploaded = 0;
+            const BATCH_SIZE: usize = 4096; // Internal batching for Parquet writing
 
-            // Stream rows from partition
-            let iter = engine.scan_partition_iter(partition_id, &[])?;
+            // Receive and upload chunks until channel closes
+            for batch_res in rx {
+                let batch = batch_res?;
+                let batch_len = batch.len();
 
-            // Clone telemetry and create client for this thread
-            let ts = telemetry.clone();
-            let client = ClickHouseClient::new(&url);
-
-            for row_result in iter {
-                let row = row_result?;
-                chunk_rows.push(row);
-
-                // When chunk is full, upload it
-                if chunk_rows.len() >= CHUNK_SIZE {
-                    let uploaded = upload_chunk_to_clickhouse(
-                        &client,
-                        &table,
-                        &chunk_rows,
-                        &row_type,
-                        arrow_schema.clone(),
-                        BATCH_SIZE,
-                    )?;
-
-                    partition_rows += uploaded;
-                    chunks_uploaded += 1;
-
-                    if let Some(ref t) = ts {
-                        t.total_rows.fetch_add(uploaded, Ordering::Relaxed);
-                    }
-
-                    chunk_rows.clear();
-                }
-            }
-
-            // Upload remaining rows
-            if !chunk_rows.is_empty() {
                 let uploaded = upload_chunk_to_clickhouse(
                     &client,
                     &table,
-                    &chunk_rows,
+                    &batch,
                     &row_type,
                     arrow_schema.clone(),
                     BATCH_SIZE,
@@ -732,6 +782,14 @@ fn process_clickhouse_export(
 
                 if let Some(ref t) = ts {
                     t.total_rows.fetch_add(uploaded, Ordering::Relaxed);
+                }
+
+                // Log progress every 10 chunks
+                if chunks_uploaded % 10 == 0 {
+                    println!(
+                        "    Partition {} progress: {} rows in {} chunks",
+                        partition_id, partition_rows, chunks_uploaded
+                    );
                 }
             }
 
@@ -1631,6 +1689,48 @@ fn process_manhattan_aggregate(
     }
 
     Ok((rows, summary))
+}
+
+/// A simple counting semaphore for limiting concurrency.
+///
+/// Used to bound memory usage by limiting how many partitions are processed
+/// concurrently, independent of the number of CPU cores available.
+#[derive(Clone)]
+struct Semaphore {
+    inner: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+    max: usize,
+}
+
+impl Semaphore {
+    fn new(max: usize) -> Self {
+        Semaphore {
+            inner: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+            max,
+        }
+    }
+
+    fn acquire(&self) -> SemaphorePermit {
+        let (lock, cvar) = &*self.inner;
+        let mut count = lock.lock().unwrap();
+        while *count >= self.max {
+            count = cvar.wait(count).unwrap();
+        }
+        *count += 1;
+        SemaphorePermit { sem: self.clone() }
+    }
+}
+
+struct SemaphorePermit {
+    sem: Semaphore,
+}
+
+impl Drop for SemaphorePermit {
+    fn drop(&mut self) {
+        let (lock, cvar) = &*self.sem.inner;
+        let mut count = lock.lock().unwrap();
+        *count -= 1;
+        cvar.notify_one();
+    }
 }
 
 /// Verify expected outputs exist and append to checkpoint file.
