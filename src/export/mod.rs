@@ -22,4 +22,4 @@ pub use json::{hail_to_json_sharded_full, JsonWriter};
 #[cfg(feature = "bigquery")]
 pub use bigquery::{BigQueryClient, BigQueryError};
 #[cfg(feature = "clickhouse")]
-pub use clickhouse::{ClickHouseClient, ClickHouseError};
+pub use clickhouse::{generate_create_table, ClickHouseClient, ClickHouseError};

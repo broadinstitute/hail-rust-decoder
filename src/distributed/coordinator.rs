@@ -1970,6 +1970,55 @@ async fn submit_job(
     axum::extract::State(state): axum::extract::State<SharedState>,
     axum::Json(req): axum::Json<JobConfigRequest>,
 ) -> axum::Json<JobConfigResponse> {
+    // Handle ExportClickhouse table creation BEFORE acquiring lock
+    // This avoids holding MutexGuard across await points
+    #[cfg(feature = "clickhouse")]
+    if let JobSpec::ExportClickhouse { ref clickhouse_url, ref table_name } = req.job_spec {
+        use crate::export::{ClickHouseClient, generate_create_table};
+        use crate::query::QueryEngine;
+
+        println!("  Creating ClickHouse table '{}' before dispatching...", table_name);
+
+        let input_path = req.input_path.clone();
+        let table_name_clone = table_name.clone();
+        let clickhouse_url_clone = clickhouse_url.clone();
+
+        // Run blocking I/O operations in spawn_blocking to avoid
+        // "cannot start a runtime from within a runtime" panic.
+        // QueryEngine::open_path() uses IO_RUNTIME.block_on() internally.
+        let result = tokio::task::spawn_blocking(move || -> std::result::Result<(), String> {
+            let engine = QueryEngine::open_path(&input_path)
+                .map_err(|e| format!("Failed to open input table for schema: {}", e))?;
+            let schema = engine.row_type().clone();
+
+            let create_sql = generate_create_table(&table_name_clone, &schema, &[])
+                .map_err(|e| format!("Failed to generate DDL: {}", e))?;
+
+            let client = ClickHouseClient::new(&clickhouse_url_clone);
+            client.execute(&create_sql)
+                .map_err(|e| format!("Failed to create table {}: {}", table_name_clone, e))?;
+
+            println!("    Created table: {}", table_name_clone);
+            Ok(())
+        }).await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return axum::Json(JobConfigResponse {
+                    acknowledged: false,
+                    error: Some(e),
+                });
+            }
+            Err(e) => {
+                return axum::Json(JobConfigResponse {
+                    acknowledged: false,
+                    error: Some(format!("Task panicked: {}", e)),
+                });
+            }
+        }
+    }
+
     let mut data = state.lock().unwrap();
 
     // R1: Check if workers are available
