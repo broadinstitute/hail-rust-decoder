@@ -2170,6 +2170,7 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
             locus_threshold: args.locus_threshold,
             locus_window: args.locus_window,
             locus_plots: args.locus_plots,
+            min_variants_per_locus: args.min_variants_per_locus,
             output: args.output.clone(),
             width: args.width,
             height: args.height,
@@ -2696,6 +2697,8 @@ fn run_loci(args: LociArgs) -> Result<()> {
         args.threshold,
         args.gene_threshold,
         args.threads,
+        args.locus_plots,
+        args.min_variants_per_locus,
     )?;
 
     println!(

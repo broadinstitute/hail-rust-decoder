@@ -444,6 +444,10 @@ pub struct ManhattanArgs {
     #[arg(long)]
     pub locus_plots: bool,
 
+    /// Minimum number of significant variants required to form a locus
+    #[arg(long, default_value = "1")]
+    pub min_variants_per_locus: usize,
+
     // -- Distributed Aggregation --
     /// Path to directory containing distributed scan shards (part-*.json files).
     /// When specified, aggregates shards and renders final PNG instead of scanning tables.
@@ -543,6 +547,10 @@ pub struct ManhattanBatchArgs {
     #[arg(long)]
     pub locus_plots: bool,
 
+    /// Minimum number of significant variants required to form a locus
+    #[arg(long, default_value = "1")]
+    pub min_variants_per_locus: usize,
+
     /// Image width in pixels
     #[arg(long, default_value = "3000")]
     pub width: u32,
@@ -630,6 +638,14 @@ pub struct LociArgs {
     /// Number of parallel threads (default: 8)
     #[arg(long, default_value = "8")]
     pub threads: usize,
+
+    /// Generate locus-zoom style plots for significant regions
+    #[arg(long)]
+    pub locus_plots: bool,
+
+    /// Minimum number of significant variants required to form a locus
+    #[arg(long, default_value = "1")]
+    pub min_variants_per_locus: usize,
 }
 
 #[derive(Args, Debug)]

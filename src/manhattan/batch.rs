@@ -42,6 +42,7 @@ pub struct BatchConfig {
     pub locus_threshold: f64,
     pub locus_window: i32,
     pub locus_plots: bool,
+    pub min_variants_per_locus: usize,
     pub width: u32,
     pub height: u32,
     pub y_field: String,
@@ -285,6 +286,7 @@ pub fn create_specs(inputs: Vec<PhenotypeInput>, config: &BatchConfig) -> Vec<Ma
                 locus_threshold: config.locus_threshold,
                 locus_window: config.locus_window,
                 locus_plots: config.locus_plots,
+                min_variants_per_locus: config.min_variants_per_locus,
 
                 width: config.width,
                 height: config.height,
@@ -385,6 +387,7 @@ mod tests {
             locus_threshold: 0.01,
             locus_window: 1_000_000,
             locus_plots: false,
+            min_variants_per_locus: 1,
             width: 3000,
             height: 800,
             y_field: "Pvalue".to_string(),

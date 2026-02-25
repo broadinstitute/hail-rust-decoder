@@ -47,6 +47,8 @@ pub fn generate_loci_standalone(
     threshold: f64,
     gene_threshold: f64,
     num_threads: usize,
+    render_images: bool,
+    min_variants_per_locus: usize,
 ) -> Result<Vec<ManifestLocus>> {
     let output_base = output_dir.trim_end_matches('/');
 
@@ -66,6 +68,8 @@ pub fn generate_loci_standalone(
         &phenotype,
         &ancestry,
         None, // No styling config for standalone CLI
+        render_images,
+        min_variants_per_locus,
     )?;
 
     // Update manifest.json with loci info
@@ -1241,6 +1245,8 @@ fn generate_locus_plots(
         phenotype,
         ancestry,
         Some(&spec.styling),
+        spec.locus_plots,
+        spec.min_variants_per_locus,
     )
 }
 
@@ -1259,6 +1265,8 @@ fn generate_loci_from_parquet(
     phenotype: &str,
     ancestry: &str,
     styling: Option<&crate::manhattan::config::ManhattanConfig>,
+    render_images: bool,
+    min_variants_per_locus: usize,
 ) -> Result<Vec<ManifestLocus>> {
     use crate::io::is_cloud_path;
     use crate::manhattan::genes::process_complex_gene_burden;
@@ -1310,10 +1318,10 @@ fn generate_loci_from_parquet(
         return Ok(vec![]);
     }
 
-    // Step 2: Compute locus regions (union + merge overlapping)
-    println!("    Computing locus regions (window: {}bp)...", locus_window);
-    let regions = compute_locus_regions_with_genes(&sig_positions, &gene_regions, locus_window);
-    println!("      Found {} merged locus regions", regions.len());
+    // Step 2: Compute locus regions (Greedy P-value clumping + merge with genes)
+    println!("    Computing locus regions (clumping window: {}bp, min_variants: {})...", locus_window, min_variants_per_locus);
+    let regions = compute_locus_regions_with_genes(&sig_positions, &gene_regions, locus_window, min_variants_per_locus);
+    println!("      Found {} clumped/merged locus regions", regions.len());
 
     if regions.is_empty() {
         return Ok(vec![]);
@@ -1366,6 +1374,7 @@ fn generate_loci_from_parquet(
                     phenotype,
                     ancestry,
                     styling,
+                    render_images,
                 )
             })
             .collect()
@@ -1431,6 +1440,7 @@ fn generate_single_locus_core(
     phenotype: &str,
     ancestry: &str,
     styling: Option<&crate::manhattan::config::ManhattanConfig>,
+    render_images: bool,
 ) -> Result<Option<(ManifestLocus, LocusDefinitionRow, Vec<LocusVariantRow>)>> {
     let region_id = format!("{}_{}_{}",
         contig.replace("chr", ""),
@@ -1460,18 +1470,23 @@ fn generate_single_locus_core(
         return Ok(None);
     }
 
-    // Render locus plot
-    let all_variants: Vec<RenderVariant> = exome_variants
-        .iter()
-        .chain(genome_variants.iter())
-        .cloned()
-        .collect();
+    let plot_path = if render_images {
+        // Render locus plot
+        let all_variants: Vec<RenderVariant> = exome_variants
+            .iter()
+            .chain(genome_variants.iter())
+            .cloned()
+            .collect();
 
-    let png_data = render_locus_plot(&all_variants, start, end, threshold, styling)?;
+        let png_data = render_locus_plot(&all_variants, start, end, threshold, styling)?;
 
-    // Write plot file (this remains as a file)
-    let plot_path = format!("{}/{}/plot.png", loci_dir, region_id);
-    write_locus_file(&plot_path, &png_data)?;
+        // Write plot file (this remains as a file)
+        let plot_uri = format!("{}/{}/plot.png", loci_dir, region_id);
+        write_locus_file(&plot_uri, &png_data)?;
+        Some(plot_uri)
+    } else {
+        None
+    };
 
     // Build LocusVariantRow records (replaces JSON files)
     let variant_rows: Vec<LocusVariantRow> = exome_variants
@@ -1701,39 +1716,75 @@ fn compute_locus_regions(
     regions
 }
 
-/// Compute locus regions including gene bounds.
+/// Compute locus regions including gene bounds using Greedy P-value Clumping.
 ///
-/// For variant positions, expands by ±window.
-/// For gene regions, expands the full gene bounds by ±window.
+/// 1. Variants are sorted by p-value.
+/// 2. Iteratively take the most significant unabsorbed variant to form a clump.
+/// 3. Clumps containing fewer than `min_variants` are discarded to remove noise.
+/// 4. Add gene regions (gene bounds expanded by window).
+/// 5. Merge all overlapping regions together.
 fn compute_locus_regions_with_genes(
     positions: &[SigPosition],
     gene_regions: &[(String, i32, i32)],
     window: i32,
+    min_variants: usize,
 ) -> Vec<(String, i32, i32)> {
-    // Collect all expanded regions
     let mut all_regions: Vec<(String, i32, i32)> = Vec::new();
 
-    // Add variant position regions (expanded by window)
-    for pos in positions {
-        let expanded_start = (pos.position - window).max(1);
-        let expanded_end = pos.position + window;
-        all_regions.push((pos.contig.clone(), expanded_start, expanded_end));
+    // 1. Separate variant positions (filter out "gene" source variants which are added directly)
+    let mut variant_positions: Vec<SigPosition> = positions.iter()
+        .filter(|p| p.source != "gene")
+        .cloned()
+        .collect();
+
+    // 2. Greedy clumping
+    if !variant_positions.is_empty() {
+        // Sort by p-value ascending (best first)
+        variant_positions.sort_by(|a, b| a.pvalue.partial_cmp(&b.pvalue).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut absorbed = vec![false; variant_positions.len()];
+
+        for i in 0..variant_positions.len() {
+            if absorbed[i] { continue; }
+            let lead = &variant_positions[i];
+
+            let clump_start = (lead.position - window).max(1);
+            let clump_end = lead.position + window;
+
+            let mut clump_count = 0;
+
+            // Absorb any variants within window
+            for j in i..variant_positions.len() {
+                if !absorbed[j] {
+                    let candidate = &variant_positions[j];
+                    if candidate.contig == lead.contig && candidate.position >= clump_start && candidate.position <= clump_end {
+                        absorbed[j] = true;
+                        clump_count += 1;
+                    }
+                }
+            }
+
+            // Keep clump if it meets the variant count threshold
+            if clump_count >= min_variants {
+                all_regions.push((lead.contig.clone(), clump_start, clump_end));
+            }
+        }
     }
 
-    // Add gene regions (gene bounds expanded by window)
+    // 3. Add gene regions (gene bounds expanded by window)
     for (chrom, start, end) in gene_regions {
         let expanded_start = (start - window).max(1);
         let expanded_end = end + window;
         all_regions.push((chrom.clone(), expanded_start, expanded_end));
     }
 
-    // Group by chromosome
+    // 4. Group by chromosome
     let mut by_chrom: HashMap<String, Vec<(i32, i32)>> = HashMap::new();
     for (chrom, start, end) in all_regions {
         by_chrom.entry(chrom).or_default().push((start, end));
     }
 
-    // Merge overlapping regions per chromosome
+    // 5. Merge overlapping regions per chromosome
     let mut merged_regions = Vec::new();
 
     for (contig, mut intervals) in by_chrom {

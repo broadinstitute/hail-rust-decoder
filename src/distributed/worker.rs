@@ -932,6 +932,8 @@ fn process_loci(spec: &crate::distributed::message::LociSpec) -> Result<usize> {
         spec.threshold,
         spec.gene_threshold,
         8, // threads per worker
+        spec.locus_plots,
+        spec.min_variants_per_locus,
     )?;
 
     println!("Generated {} locus plots", loci.len());

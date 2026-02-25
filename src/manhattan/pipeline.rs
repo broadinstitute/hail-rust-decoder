@@ -49,6 +49,7 @@ pub struct PipelineConfig {
     pub locus_threshold: f64,
     pub locus_window: i32,
     pub locus_plots: bool,
+    pub min_variants_per_locus: usize,
 
     // Output
     pub output: Option<String>,
@@ -72,6 +73,7 @@ impl Default for PipelineConfig {
             locus_threshold: 0.01,
             locus_window: 1_000_000,
             locus_plots: false,
+            min_variants_per_locus: 1,
             output: None,
             width: 3000,
             height: 800,
@@ -249,38 +251,39 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     println!("Wrote {} significant hits to significant.parquet", sig_count);
 
     // 5. Compute Locus Regions
-    if config.locus_plots {
-        println!("Defining locus regions...");
+    println!("Defining locus regions...");
 
-        // We need to re-read significant positions to define regions since we streamed them to parquet
-        // Ideally we would have tracked them in memory too, but let's read back from the file we just wrote
-        // or just rely on gene regions if variants are too many.
-        // For local pipeline, we can just use the buffered variants that are significant?
-        // No, buffered variants are only for specific regions.
+    // We need to re-read significant positions to define regions since we streamed them to parquet
+    // Ideally we would have tracked them in memory too, but let's read back from the file we just wrote
+    // or just rely on gene regions if variants are too many.
+    // For local pipeline, we can just use the buffered variants that are significant?
+    // No, buffered variants are only for specific regions.
 
-        // Let's re-read significant hits for region definition
-        // Note: For large datasets this might be slow, but it's consistent with distributed flow
-        use crate::manhattan::aggregate::extract_sig_positions;
-        let sig_path_str = sig_path.to_str().unwrap();
-        if let Ok(positions) = extract_sig_positions(sig_path_str) {
-            for pos in positions {
-                let start = (pos.position - config.locus_window).max(1);
-                let end = pos.position + config.locus_window;
-                interest_regions.add(pos.contig, start, end);
-            }
+    // Let's re-read significant hits for region definition
+    // Note: For large datasets this might be slow, but it's consistent with distributed flow
+    use crate::manhattan::aggregate::extract_sig_positions;
+    let sig_path_str = sig_path.to_str().unwrap();
+    if let Ok(positions) = extract_sig_positions(sig_path_str) {
+        for pos in positions {
+            let start = (pos.position - config.locus_window).max(1);
+            let end = pos.position + config.locus_window;
+            interest_regions.add(pos.contig, start, end);
         }
+    }
 
-        interest_regions.optimize();
-        println!("Total locus regions: {}", interest_regions.len());
+    interest_regions.optimize();
+    println!("Total locus regions: {}", interest_regions.len());
 
-        // 6. Generate Locus Outputs
-        let loci_dir = output_base.join("loci");
+    // 6. Generate Locus Outputs
+    let loci_dir = output_base.join("loci");
+    if config.locus_plots {
         fs::create_dir_all(&loci_dir)?;
+    }
 
-        // Collect contigs to iterate
-        let contigs: Vec<String> = interest_regions.contigs().cloned().collect();
+    // Collect contigs to iterate
+    let contigs: Vec<String> = interest_regions.contigs().cloned().collect();
 
-        for contig in &contigs {
+    for contig in &contigs {
             if let Some(ranges) = interest_regions.intervals_for_contig(contig) {
                 for range in ranges {
                     let start = *range.start();
@@ -304,7 +307,9 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                     // Create region output directory (for plot only)
                     let region_name = format!("{}_{}_{}", contig, start, end);
                     let region_dir = loci_dir.join(&region_name);
-                    fs::create_dir_all(&region_dir)?;
+                    if config.locus_plots {
+                        fs::create_dir_all(&region_dir)?;
+                    }
 
                     // Collect variants for parquet
                     // Phenotype/Ancestry defaults for local run
@@ -375,6 +380,12 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                         genome_count: genome_subset.len() as u32,
                     });
 
+                    let plot_path = if config.locus_plots {
+                        Some(format!("loci/{}/plot.png", region_name))
+                    } else {
+                        None
+                    };
+
                     // Add to Manifest
                     manifest_loci.push(ManifestLocus {
                         id: region_name.clone(),
@@ -383,28 +394,29 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                         lead_variant: lead.map(|v| format!("{}:{}", v.contig, v.position)).unwrap_or_default(),
                         lead_pvalue: lead.map(|v| v.pvalue).unwrap_or(1.0),
                         lead_gene: lead.and_then(|v| v.gene_symbol.clone()),
-                        plot: format!("loci/{}/plot.png", region_name),
+                        plot: plot_path,
                         exome_variants: if !exome_subset.is_empty() { Some(ManifestLocusVariants { path: format!("loci_variants.parquet (locus_id={})", region_name), count: exome_subset.len() as u64 }) } else { None },
                         genome_variants: if !genome_subset.is_empty() { Some(ManifestLocusVariants { path: format!("loci_variants.parquet (locus_id={})", region_name), count: genome_subset.len() as u64 }) } else { None },
                         genes: vec![],
                     });
 
                     // Render locus plot
-                    let png_data = render_locus_plot(
-                        &exome_subset,
-                        &genome_subset,
-                        contig,
-                        start,
-                        end,
-                        config.threshold,
-                    )?;
-                    fs::write(region_dir.join("plot.png"), png_data)?;
+                    if config.locus_plots {
+                        let png_data = render_locus_plot(
+                            &exome_subset,
+                            &genome_subset,
+                            contig,
+                            start,
+                            end,
+                            config.threshold,
+                        )?;
+                        fs::write(region_dir.join("plot.png"), png_data)?;
+                    }
 
-                    println!("  Generated locus: {}", region_name);
+                    println!("  Generated locus data: {}", region_name);
                 }
             }
         }
-    }
 
     // Write loci parquet files
     if !locus_definitions.is_empty() {

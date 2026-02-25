@@ -261,7 +261,8 @@ pub struct ManifestLocus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lead_gene: Option<String>,
     /// Path to locus plot PNG
-    pub plot: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot: Option<String>,
     /// Exome variants in this region
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exome_variants: Option<ManifestLocusVariants>,

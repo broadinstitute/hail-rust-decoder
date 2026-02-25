@@ -110,6 +110,10 @@ pub struct JobSettings {
     #[serde(default)]
     pub locus_plots: bool,
 
+    /// Minimum number of significant variants required to form a locus
+    #[serde(default = "default_min_variants_per_locus")]
+    pub min_variants_per_locus: usize,
+
     /// Image width in pixels
     #[serde(default = "default_width")]
     pub width: u32,
@@ -166,6 +170,10 @@ fn default_locus_threshold() -> f64 {
 
 fn default_locus_window() -> i32 {
     1_000_000
+}
+
+fn default_min_variants_per_locus() -> usize {
+    1
 }
 
 fn default_width() -> u32 {

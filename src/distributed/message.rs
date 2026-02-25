@@ -140,6 +140,12 @@ pub struct LociSpec {
     /// Significance threshold for gene burden
     #[serde(default = "default_gene_threshold")]
     pub gene_threshold: f64,
+    /// Generate locus-zoom style plots for significant regions
+    #[serde(default)]
+    pub locus_plots: bool,
+    /// Minimum number of significant variants required to form a locus
+    #[serde(default = "default_min_variants_per_locus")]
+    pub min_variants_per_locus: usize,
 }
 
 /// A locus region to generate a plot for.
@@ -231,6 +237,9 @@ pub struct ManhattanSpec {
     /// Generate locus-zoom style plots for significant regions
     #[serde(default)]
     pub locus_plots: bool,
+    /// Minimum number of significant variants required to form a locus
+    #[serde(default = "default_min_variants_per_locus")]
+    pub min_variants_per_locus: usize,
 
     // Output
     /// Image width in pixels
@@ -281,6 +290,10 @@ fn default_locus_threshold() -> f64 {
 
 fn default_locus_window() -> i32 {
     1_000_000
+}
+
+fn default_min_variants_per_locus() -> usize {
+    1
 }
 
 impl ManhattanSpec {
@@ -401,6 +414,9 @@ pub struct ManhattanAggregateSpec {
     /// Generate locus-zoom style plots for significant regions
     #[serde(default)]
     pub locus_plots: bool,
+    /// Minimum number of significant variants required to form a locus
+    #[serde(default = "default_min_variants_per_locus")]
+    pub min_variants_per_locus: usize,
 
     // Rendering config
     /// Image width in pixels

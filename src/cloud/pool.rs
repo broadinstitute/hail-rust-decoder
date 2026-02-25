@@ -2569,6 +2569,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut locus_threshold: f64 = 0.01;
         let mut locus_window: i32 = 1_000_000;
         let mut locus_plots = false;
+        let mut min_variants_per_locus: usize = 1;
         let mut skip_composite = false;
         let mut width: u32 = 3000;
         let mut height: u32 = 800;
@@ -2669,6 +2670,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     locus_plots = true;
                     i += 1;
                 }
+                "--min-variants-per-locus" => {
+                    if i + 1 < args.len() {
+                        min_variants_per_locus = args[i + 1].parse().unwrap_or(1);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 "--no-composite" => {
                     skip_composite = true;
                     i += 1;
@@ -2741,6 +2750,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             locus_threshold,
             locus_window,
             locus_plots,
+            min_variants_per_locus,
             width,
             height,
             y_field,
@@ -3001,6 +3011,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let locus_threshold = locus_threshold.unwrap_or(job_config.job.locus_threshold);
         let locus_window = locus_window.unwrap_or(job_config.job.locus_window);
         let locus_plots = locus_plots.unwrap_or(job_config.job.locus_plots);
+        let min_variants_per_locus = job_config.job.min_variants_per_locus;
         let width = width.unwrap_or(job_config.job.width);
         let height = height.unwrap_or(job_config.job.height);
         let y_field = y_field.unwrap_or(job_config.job.y_field.clone());
@@ -3024,6 +3035,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             locus_threshold,
             locus_window,
             locus_plots,
+            min_variants_per_locus,
             width,
             height,
             y_field,
@@ -3061,6 +3073,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut threshold: f64 = 5e-8;
         let mut gene_threshold: f64 = 2.5e-6;
         let mut locus_window: i32 = 1_000_000;
+        let mut locus_plots: bool = false;
+        let mut min_variants_per_locus: usize = 1;
 
         let mut i = 0;
         while i < args.len() {
@@ -3121,6 +3135,18 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                         i += 1;
                     }
                 }
+                "--locus-plots" => {
+                    locus_plots = true;
+                    i += 1;
+                }
+                "--min-variants-per-locus" => {
+                    if i + 1 < args.len() {
+                        min_variants_per_locus = args[i + 1].parse().unwrap_or(1);
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 _ => {
                     i += 1;
                 }
@@ -3149,6 +3175,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             locus_window,
             threshold,
             gene_threshold,
+            locus_plots,
+            min_variants_per_locus,
         };
 
         // Use output_dir as the "input_path" for job tracking
