@@ -370,13 +370,11 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
     let phenotype = extract_phenotype_name(output_base);
     let ancestry = "meta".to_string(); // Default ancestry; could be extracted from spec if available
 
-    // Step 4: Compute locus regions and generate plots (if enabled)
-    let loci = if spec.locus_plots {
-        println!("  Generating locus plots...");
-        generate_locus_plots(spec, output_base, &phenotype, &ancestry)?
-    } else {
-        vec![]
-    };
+    // Step 4: Compute locus regions (always) and generate plots (if enabled)
+    // Locus data (loci.parquet, loci_variants.parquet) is always written.
+    // PNG rendering is controlled by spec.locus_plots.
+    println!("  Generating locus data...");
+    let loci = generate_locus_plots(spec, output_base, &phenotype, &ancestry)?;
 
     println!(
         "  Combined significant hits: {} total, {} exome, {} genome",
