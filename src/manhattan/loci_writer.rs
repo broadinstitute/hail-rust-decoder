@@ -337,6 +337,9 @@ impl<W: Write + Send> LocusVariantWriter<W> {
         let mut pvalue_builder = Float64Builder::new();
         let mut neg_log10_p_builder = Float32Builder::new();
         let mut is_significant_builder = BooleanBuilder::new();
+        let mut beta_builder = Float64Builder::new();
+        let mut se_builder = Float64Builder::new();
+        let mut af_builder = Float64Builder::new();
 
         for row in &self.buffer {
             locus_id_builder.append_value(&row.locus_id);
@@ -351,6 +354,9 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             pvalue_builder.append_value(row.pvalue);
             neg_log10_p_builder.append_value(row.neg_log10_p);
             is_significant_builder.append_value(row.is_significant);
+            beta_builder.append_option(row.beta);
+            se_builder.append_option(row.se);
+            af_builder.append_option(row.af);
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -366,6 +372,9 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             Arc::new(pvalue_builder.finish()),
             Arc::new(neg_log10_p_builder.finish()),
             Arc::new(is_significant_builder.finish()),
+            Arc::new(beta_builder.finish()),
+            Arc::new(se_builder.finish()),
+            Arc::new(af_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -388,6 +397,9 @@ pub fn locus_variant_schema() -> Schema {
         Field::new("pvalue", DataType::Float64, false),
         Field::new("neg_log10_p", DataType::Float32, false),
         Field::new("is_significant", DataType::Boolean, false),
+        Field::new("beta", DataType::Float64, true),  // nullable
+        Field::new("se", DataType::Float64, true),    // nullable
+        Field::new("af", DataType::Float64, true),    // nullable
     ])
 }
 
@@ -468,6 +480,9 @@ mod tests {
                 pvalue: 1e-10,
                 neg_log10_p: 10.0,
                 is_significant: true,
+                beta: Some(-0.5),
+                se: Some(0.1),
+                af: Some(0.02),
             })
             .unwrap();
 
@@ -485,6 +500,9 @@ mod tests {
                 pvalue: 1e-5,
                 neg_log10_p: 5.0,
                 is_significant: false,
+                beta: None,
+                se: None,
+                af: Some(0.15),
             })
             .unwrap();
 

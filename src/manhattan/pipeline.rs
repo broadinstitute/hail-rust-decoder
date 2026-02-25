@@ -8,6 +8,7 @@
 //! 5. Generate locus plots and JSON exports
 
 use crate::codec::EncodedValue;
+use crate::manhattan::config::BackgroundStyle;
 use crate::manhattan::data::{BufferedVariant, VariantSource, SigHitRow, LocusDefinitionRow, LocusVariantRow, ManifestLocus, ManifestRegion, ManifestLocusVariants};
 use crate::manhattan::genes::{
     render_gene_manhattan, scan_gene_burden_to_parquet, GeneMap, SignificantGene,
@@ -18,7 +19,7 @@ use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::reference::{calculate_xpos, normalize_contig_name};
 use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::reference::get_contig_lengths;
-use crate::manhattan::render::ManhattanRenderer;
+use crate::manhattan::render::{hex_to_color, ManhattanRenderer};
 use crate::query::join::{JoinedRow, SortedMergeIterator};
 use crate::query::{IntervalList, QueryEngine};
 use crate::Result;
@@ -324,6 +325,9 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             pvalue: v.pvalue,
                             neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
                             is_significant: v.pvalue < config.threshold,
+                            beta: v.beta,
+                            se: v.se,
+                            af: v.af,
                         })
                         .chain(genome_subset.iter().map(|v| LocusVariantRow {
                             locus_id: region_name.clone(),
@@ -338,6 +342,9 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             pvalue: v.pvalue,
                             neg_log10_p: if v.pvalue > 0.0 { -v.pvalue.log10() as f32 } else { 0.0 },
                             is_significant: v.pvalue < config.threshold,
+                            beta: v.beta,
+                            se: v.se,
+                            af: v.af,
                         }))
                         .collect();
 
@@ -601,8 +608,7 @@ fn process_joined_row(
     height: u32,
 ) {
     // Extract from left (results)
-    let (contig, position, pvalue, beta, alleles) = match extract_variant_fields(&row.left, y_field)
-    {
+    let v = match extract_variant_fields(&row.left, y_field) {
         Some(v) => v,
         None => return,
     };
@@ -616,17 +622,17 @@ fn process_joined_row(
 
     // Render point to WG
     render_variant(
-        &contig, position, pvalue, layout, y_scale, renderer,
+        &v.contig, v.position, v.pvalue, layout, y_scale, renderer,
     );
 
     // Render point to per-chromosome plot
     render_variant_per_chrom(
-        &contig, position, pvalue, layout, y_scale,
+        &v.contig, v.position, v.pvalue, layout, y_scale,
         contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
     // Check significance
-    if pvalue < variant_threshold {
+    if v.pvalue < variant_threshold {
         // Write to parquet
         let _ = sig_writer.write(SigHitRow {
             phenotype: "local_run".to_string(),
@@ -635,29 +641,31 @@ fn process_joined_row(
                 VariantSource::Exome => "exome".to_string(),
                 VariantSource::Genome => "genome".to_string(),
             },
-            xpos: calculate_xpos(&contig, position),
-            contig: normalize_contig_name(&contig),
-            position,
-            ref_allele: alleles.first().cloned().unwrap_or_default(),
-            alt_allele: alleles.get(1).cloned().unwrap_or_default(),
-            pvalue,
-            beta,
-            se: None, // Need to extract
-            af: None, // Need to extract
+            xpos: calculate_xpos(&v.contig, v.position),
+            contig: normalize_contig_name(&v.contig),
+            position: v.position,
+            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
+            pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
         });
     }
 
     // Buffer if interesting
     let should_buffer =
-        pvalue < locus_threshold || interest_regions.contains(&contig, position);
+        v.pvalue < locus_threshold || interest_regions.contains(&v.contig, v.position);
 
     if should_buffer {
         buffer.push(BufferedVariant {
-            contig,
-            position,
-            alleles,
-            pvalue,
-            beta,
+            contig: v.contig,
+            position: v.position,
+            alleles: v.alleles,
+            pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
             source,
             gene_symbol,
             consequence,
@@ -686,24 +694,24 @@ fn process_single_row(
     width: u32,
     height: u32,
 ) {
-    let (contig, position, pvalue, beta, alleles) = match extract_variant_fields(row, y_field) {
+    let v = match extract_variant_fields(row, y_field) {
         Some(v) => v,
         None => return,
     };
 
     // Render point to WG
     render_variant(
-        &contig, position, pvalue, layout, y_scale, renderer,
+        &v.contig, v.position, v.pvalue, layout, y_scale, renderer,
     );
 
     // Render point to per-chromosome plot
     render_variant_per_chrom(
-        &contig, position, pvalue, layout, y_scale,
+        &v.contig, v.position, v.pvalue, layout, y_scale,
         contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
     // Check significance
-    if pvalue < variant_threshold {
+    if v.pvalue < variant_threshold {
         // Write to parquet
         let _ = sig_writer.write(SigHitRow {
             phenotype: "local_run".to_string(),
@@ -712,29 +720,31 @@ fn process_single_row(
                 VariantSource::Exome => "exome".to_string(),
                 VariantSource::Genome => "genome".to_string(),
             },
-            xpos: calculate_xpos(&contig, position),
-            contig: normalize_contig_name(&contig),
-            position,
-            ref_allele: alleles.first().cloned().unwrap_or_default(),
-            alt_allele: alleles.get(1).cloned().unwrap_or_default(),
-            pvalue,
-            beta,
-            se: None,
-            af: None,
+            xpos: calculate_xpos(&v.contig, v.position),
+            contig: normalize_contig_name(&v.contig),
+            position: v.position,
+            ref_allele: v.alleles.first().cloned().unwrap_or_default(),
+            alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
+            pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
         });
     }
 
     // Buffer if interesting
     let should_buffer =
-        pvalue < locus_threshold || interest_regions.contains(&contig, position);
+        v.pvalue < locus_threshold || interest_regions.contains(&v.contig, v.position);
 
     if should_buffer {
         buffer.push(BufferedVariant {
-            contig,
-            position,
-            alleles,
-            pvalue,
-            beta,
+            contig: v.contig,
+            position: v.position,
+            alleles: v.alleles,
+            pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
             source,
             gene_symbol: None,
             consequence: None,
@@ -817,12 +827,36 @@ fn render_variant_per_chrom(
     }
 }
 
+/// Extracted variant fields from a Hail table row.
+#[derive(Debug, Clone)]
+struct ExtractedVariant {
+    contig: String,
+    position: i32,
+    pvalue: f64,
+    beta: Option<f64>,
+    se: Option<f64>,
+    af: Option<f64>,
+    alleles: Vec<String>,
+}
+
 /// Extract variant fields from a row.
 fn extract_variant_fields(
     row: &EncodedValue,
     y_field: &str,
-) -> Option<(String, i32, f64, Option<f64>, Vec<String>)> {
+) -> Option<ExtractedVariant> {
     if let EncodedValue::Struct(fields) = row {
+        // Helper to extract optional float
+        let get_float = |name: &str| -> Option<f64> {
+            fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, v)| match v {
+                    EncodedValue::Float64(f) => Some(*f),
+                    EncodedValue::Float32(f) => Some(*f as f64),
+                    _ => None,
+                })
+        };
+
         // Extract locus
         let locus = fields.iter().find(|(n, _)| n == "locus").map(|(_, v)| v)?;
 
@@ -855,15 +889,16 @@ fn extract_variant_fields(
             return None;
         }
 
-        // Extract beta (optional)
-        let beta = fields
-            .iter()
-            .find(|(n, _)| n == "BETA")
-            .and_then(|(_, v)| match v {
-                EncodedValue::Float64(f) => Some(*f),
-                EncodedValue::Float32(f) => Some(*f as f64),
-                _ => None,
-            });
+        // Extract beta (optional) - try BETA first, then beta
+        let beta = get_float("BETA").or_else(|| get_float("beta"));
+
+        // Extract SE (optional) - try SE first, then se
+        let se = get_float("SE").or_else(|| get_float("se"));
+
+        // Extract AF (optional) - try AF_Allele2 first, then AF, then af
+        let af = get_float("AF_Allele2")
+            .or_else(|| get_float("AF"))
+            .or_else(|| get_float("af"));
 
         // Extract alleles
         let alleles = fields
@@ -882,7 +917,15 @@ fn extract_variant_fields(
             })
             .unwrap_or_default();
 
-        Some((contig, position, pvalue, beta, alleles))
+        Some(ExtractedVariant {
+            contig,
+            position,
+            pvalue,
+            beta,
+            se,
+            af,
+            alleles,
+        })
     } else {
         None
     }
@@ -936,6 +979,9 @@ fn render_locus_plot(
             ref_allele: v.alleles.first().cloned().unwrap_or_default(),
             alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
             pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
             source: VariantSource::Genome,
             is_significant: v.pvalue < threshold,
         });
@@ -947,6 +993,9 @@ fn render_locus_plot(
             ref_allele: v.alleles.first().cloned().unwrap_or_default(),
             alt_allele: v.alleles.get(1).cloned().unwrap_or_default(),
             pvalue: v.pvalue,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
             source: VariantSource::Exome,
             is_significant: v.pvalue < threshold,
         });
@@ -1448,6 +1497,18 @@ pub fn composite_partial_pngs(
     height: u32,
     threshold: f64,
 ) -> Result<()> {
+    composite_partial_pngs_with_style(parts_dir, output_path, width, height, threshold, &BackgroundStyle::White)
+}
+
+/// Composite multiple partial PNG images into a final Manhattan plot with configurable background.
+pub fn composite_partial_pngs_with_style(
+    parts_dir: &str,
+    output_path: &str,
+    width: u32,
+    height: u32,
+    threshold: f64,
+    background: &BackgroundStyle,
+) -> Result<()> {
     use rayon::prelude::*;
     use std::time::Instant;
     use tiny_skia::Pixmap;
@@ -1499,14 +1560,26 @@ pub fn composite_partial_pngs(
         total_bytes as f64 / 1_000_000.0 / download_duration.as_secs_f64()
     );
 
-    // Create output canvas with white background
+    // Create output canvas with configurable background
     let mut canvas = Pixmap::new(width, height).ok_or_else(|| {
         crate::HailError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
             "Failed to create canvas pixmap",
         ))
     })?;
-    canvas.fill(tiny_skia::Color::WHITE);
+
+    // Fill canvas with configured background
+    match background {
+        BackgroundStyle::Transparent => {
+            // Pixmap is already transparent (zeroed) by default
+        }
+        BackgroundStyle::White => {
+            canvas.fill(tiny_skia::Color::WHITE);
+        }
+        BackgroundStyle::Color(hex) => {
+            canvas.fill(hex_to_color(hex, 1.0));
+        }
+    }
 
     // Composite each partial image using tiny_skia's native alpha blending
     let num_images = downloaded.len();

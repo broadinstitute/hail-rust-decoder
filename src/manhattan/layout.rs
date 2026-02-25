@@ -25,15 +25,25 @@ pub struct ChromosomeInfo {
     pub color: String,
 }
 
-/// Alternating chromosome colors (classic Manhattan style).
-const CHROM_COLORS: [&str; 2] = ["#404040", "#4682B4"];
+/// Default alternating chromosome colors (classic Manhattan style).
+const DEFAULT_CHROM_COLORS: [&str; 2] = ["#404040", "#4682B4"];
 
 impl ChromosomeLayout {
     /// Build a layout from an ordered list of (contig_name, length_bp).
     ///
     /// `width_px` is the total image width. `gap_px` is the visual gap between
-    /// adjacent chromosomes.
+    /// adjacent chromosomes. `chrom_colors` specifies alternating colors for chromosomes.
     pub fn new(contigs: &[(String, u32)], width_px: u32, gap_px: u32) -> Self {
+        Self::new_with_colors(contigs, width_px, gap_px, &default_chrom_colors())
+    }
+
+    /// Build a layout with custom chromosome colors.
+    pub fn new_with_colors(
+        contigs: &[(String, u32)],
+        width_px: u32,
+        gap_px: u32,
+        chrom_colors: &[String],
+    ) -> Self {
         let total_bp: u64 = contigs.iter().map(|(_, len)| *len as u64).sum();
         let total_gaps = contigs.len().saturating_sub(1) as u32 * gap_px;
         let available_width = width_px.saturating_sub(total_gaps);
@@ -44,6 +54,13 @@ impl ChromosomeLayout {
             1.0
         };
 
+        // Fall back to defaults if empty
+        let colors: &[String] = if chrom_colors.is_empty() {
+            &default_chrom_colors()
+        } else {
+            chrom_colors
+        };
+
         let mut offsets = HashMap::new();
         let mut chromosome_info = Vec::new();
         let mut current_x: f32 = 0.0;
@@ -52,7 +69,7 @@ impl ChromosomeLayout {
             let width = (*len as f64 * px_per_bp) as f32;
             offsets.insert(name.clone(), (current_x, width));
 
-            let color = CHROM_COLORS[i % 2].to_string();
+            let color = colors[i % colors.len()].clone();
             chromosome_info.push(ChromosomeInfo {
                 name: name.clone(),
                 x_start_px: current_x,
@@ -83,8 +100,13 @@ impl ChromosomeLayout {
                 return &info.color;
             }
         }
-        CHROM_COLORS[0]
+        DEFAULT_CHROM_COLORS[0]
     }
+}
+
+/// Default chromosome colors.
+fn default_chrom_colors() -> Vec<String> {
+    vec!["#404040".to_string(), "#4682B4".to_string()]
 }
 
 /// Maps -log10(pvalue) values to pixel Y coordinates using a log-log scale.

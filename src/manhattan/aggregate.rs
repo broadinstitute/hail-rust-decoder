@@ -10,14 +10,15 @@
 use crate::distributed::message::ManhattanAggregateSpec;
 use crate::error::Result;
 use crate::io::is_cloud_path;
+use crate::manhattan::config::{BackgroundStyle, PlotType};
 use crate::manhattan::data::{
     LocusDefinitionRow, LocusVariantRow, Manifest, ManifestInputs, ManifestLocus,
     ManifestLocusVariants, ManifestManhattan, ManifestManhattans, ManifestRegion, ManifestSigHits,
     ManifestSignificantHits, ManifestStats, ManifestTopHit,
 };
-use crate::manhattan::genes::{render_gene_manhattan, scan_gene_burden_to_parquet, scan_qq_to_parquet};
+use crate::manhattan::genes::{render_gene_manhattan_styled, scan_gene_burden_to_parquet, scan_qq_to_parquet};
 use crate::manhattan::layout::ChromosomeLayout;
-use crate::manhattan::pipeline::composite_partial_pngs;
+use crate::manhattan::pipeline::composite_partial_pngs_with_style;
 use crate::manhattan::loci_writer::{LocusDefinitionWriter, LocusVariantWriter};
 use crate::manhattan::locus::{LocusPlotConfig, LocusRenderer, RenderVariant};
 use crate::manhattan::data::VariantSource;
@@ -64,6 +65,7 @@ pub fn generate_loci_standalone(
         num_threads,
         &phenotype,
         &ancestry,
+        None, // No styling config for standalone CLI
     )?;
 
     // Update manifest.json with loci info
@@ -125,16 +127,20 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
 
     let output_base = spec.output_path.trim_end_matches('/');
 
+    // Resolve styles for compositing
+    let exome_style = spec.styling.resolve(PlotType::Exome);
+    let genome_style = spec.styling.resolve(PlotType::Genome);
+
     // Step 1: Composite PNGs
     println!("  Compositing partial PNGs...");
     let exome_count = if spec.exome_results.is_some() {
-        composite_source_pngs(output_base, "exome", spec.width, spec.height)?
+        composite_source_pngs(output_base, "exome", spec.width, spec.height, &exome_style.background)?
     } else {
         0
     };
 
     let genome_count = if spec.genome_results.is_some() {
-        composite_source_pngs(output_base, "genome", spec.width, spec.height)?
+        composite_source_pngs(output_base, "genome", spec.width, spec.height, &genome_style.background)?
     } else {
         0
     };
@@ -164,7 +170,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             let exome_parts = format!("{}/exome", chrom_path_base);
             if has_partial_pngs(&exome_parts)? {
                 let out = format!("{}/exome_manhattan.png", chrom_path_base);
-                composite_partial_pngs(&exome_parts, &out, spec.width, spec.height, 0.0)?;
+                composite_partial_pngs_with_style(&exome_parts, &out, spec.width, spec.height, 0.0, &exome_style.background)?;
                 chrom_entry.exome = Some(ManifestManhattan {
                     png: format!("{}/chroms/{}/exome_manhattan.png", output_base, chrom),
                     count: 0,
@@ -178,7 +184,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             let genome_parts = format!("{}/genome", chrom_path_base);
             if has_partial_pngs(&genome_parts)? {
                 let out = format!("{}/genome_manhattan.png", chrom_path_base);
-                composite_partial_pngs(&genome_parts, &out, spec.width, spec.height, 0.0)?;
+                composite_partial_pngs_with_style(&genome_parts, &out, spec.width, spec.height, 0.0, &genome_style.background)?;
                 chrom_entry.genome = Some(ManifestManhattan {
                     png: format!("{}/chroms/{}/genome_manhattan.png", output_base, chrom),
                     count: 0,
@@ -236,14 +242,16 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
         );
         let layout = ChromosomeLayout::new(&contigs, spec.width, 4);
 
-        // Render gene Manhattan plot
+        // Render gene Manhattan plot with styling
+        let gene_style = spec.styling.resolve(PlotType::GeneBurden);
         if !scan_result.plot_points.is_empty() {
-            let gene_png = render_gene_manhattan(
+            let gene_png = render_gene_manhattan_styled(
                 &scan_result.plot_points,
                 spec.width,
                 spec.height,
                 spec.gene_threshold,
                 &layout,
+                Some(&gene_style),
             )?;
 
             let png_path = format!("{}/gene_manhattan.png", output_base);
@@ -479,15 +487,19 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
 }
 
 /// Composite partial PNGs for a source (exome or genome).
-fn composite_source_pngs(output_base: &str, source: &str, width: u32, height: u32) -> Result<u64> {
-    use crate::manhattan::pipeline::composite_partial_pngs;
-
+fn composite_source_pngs(
+    output_base: &str,
+    source: &str,
+    width: u32,
+    height: u32,
+    background: &BackgroundStyle,
+) -> Result<u64> {
     let parts_dir = format!("{}/{}", output_base, source);
     let output_path = format!("{}/{}_manhattan.png", output_base, source);
 
-    // Use existing composite function
+    // Use existing composite function with background style
     // Note: threshold is not used for compositing, pass 0.0
-    composite_partial_pngs(&parts_dir, &output_path, width, height, 0.0)?;
+    composite_partial_pngs_with_style(&parts_dir, &output_path, width, height, 0.0, background)?;
 
     // Count total variants by counting files (rough estimate)
     // TODO: Track actual counts during scan phase
@@ -1228,6 +1240,7 @@ fn generate_locus_plots(
         8, // Default thread count for aggregation
         phenotype,
         ancestry,
+        Some(&spec.styling),
     )
 }
 
@@ -1245,6 +1258,7 @@ fn generate_loci_from_parquet(
     num_threads: usize,
     phenotype: &str,
     ancestry: &str,
+    styling: Option<&crate::manhattan::config::ManhattanConfig>,
 ) -> Result<Vec<ManifestLocus>> {
     use crate::io::is_cloud_path;
     use crate::manhattan::genes::process_complex_gene_burden;
@@ -1351,6 +1365,7 @@ fn generate_loci_from_parquet(
                     threshold,
                     phenotype,
                     ancestry,
+                    styling,
                 )
             })
             .collect()
@@ -1415,6 +1430,7 @@ fn generate_single_locus_core(
     threshold: f64,
     phenotype: &str,
     ancestry: &str,
+    styling: Option<&crate::manhattan::config::ManhattanConfig>,
 ) -> Result<Option<(ManifestLocus, LocusDefinitionRow, Vec<LocusVariantRow>)>> {
     let region_id = format!("{}_{}_{}",
         contig.replace("chr", ""),
@@ -1451,7 +1467,7 @@ fn generate_single_locus_core(
         .cloned()
         .collect();
 
-    let png_data = render_locus_plot(&all_variants, start, end, threshold)?;
+    let png_data = render_locus_plot(&all_variants, start, end, threshold, styling)?;
 
     // Write plot file (this remains as a file)
     let plot_path = format!("{}/{}/plot.png", loci_dir, region_id);
@@ -1477,6 +1493,9 @@ fn generate_single_locus_core(
                 0.0
             },
             is_significant: v.is_significant,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
         })
         .chain(genome_variants.iter().map(|v| LocusVariantRow {
             locus_id: region_id.clone(),
@@ -1495,6 +1514,9 @@ fn generate_single_locus_core(
                 0.0
             },
             is_significant: v.is_significant,
+            beta: v.beta,
+            se: v.se,
+            af: v.af,
         }))
         .collect();
 
@@ -1826,15 +1848,18 @@ fn read_locus_variants(
         let row = row_result?;
 
         // Extract locus, pvalue, and alleles
-        if let Some((pos, pvalue, ref_allele, alt_allele)) = extract_locus_info(&row) {
-            if pvalue > 0.0 && pvalue <= 1.0 && pvalue.is_finite() {
+        if let Some(info) = extract_locus_info(&row) {
+            if info.pvalue > 0.0 && info.pvalue <= 1.0 && info.pvalue.is_finite() {
                 variants.push(RenderVariant {
-                    position: pos,
-                    ref_allele,
-                    alt_allele,
-                    pvalue,
+                    position: info.position,
+                    ref_allele: info.ref_allele,
+                    alt_allele: info.alt_allele,
+                    pvalue: info.pvalue,
+                    beta: info.beta,
+                    se: info.se,
+                    af: info.af,
                     source,
-                    is_significant: pvalue < threshold,
+                    is_significant: info.pvalue < threshold,
                 });
             }
         }
@@ -1849,8 +1874,19 @@ fn read_locus_variants(
     Ok(variants)
 }
 
-/// Extract position, p-value, and alleles from an encoded row.
-fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<(i32, f64, String, String)> {
+/// Extracted locus variant info including effect size fields.
+struct ExtractedLocusInfo {
+    position: i32,
+    pvalue: f64,
+    ref_allele: String,
+    alt_allele: String,
+    beta: Option<f64>,
+    se: Option<f64>,
+    af: Option<f64>,
+}
+
+/// Extract position, p-value, alleles, and effect size fields from an encoded row.
+fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<ExtractedLocusInfo> {
     use crate::codec::EncodedValue;
 
     fn get_field<'a>(value: &'a EncodedValue, path: &[&str]) -> Option<&'a EncodedValue> {
@@ -1865,18 +1901,23 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<(i32, f64, Str
         Some(current)
     }
 
+    fn get_float(row: &EncodedValue, names: &[&str]) -> Option<f64> {
+        for name in names {
+            if let Some(v) = get_field(row, &[name]) {
+                match v {
+                    EncodedValue::Float64(f) => return Some(*f),
+                    EncodedValue::Float32(f) => return Some(*f as f64),
+                    _ => continue,
+                }
+            }
+        }
+        None
+    }
+
     let position = get_field(row, &["locus", "position"])?.as_i32()?;
 
     // Try common p-value field names
-    let pvalue = get_field(row, &["Pvalue"])
-        .or_else(|| get_field(row, &["pvalue"]))
-        .or_else(|| get_field(row, &["p_value"]))
-        .or_else(|| get_field(row, &["P"]))
-        .and_then(|v| match v {
-            EncodedValue::Float64(f) => Some(*f),
-            EncodedValue::Float32(f) => Some(*f as f64),
-            _ => None,
-        })?;
+    let pvalue = get_float(row, &["Pvalue", "pvalue", "p_value", "P"])?;
 
     // Extract alleles from the "alleles" array field
     let (ref_allele, alt_allele) = if let Some(EncodedValue::Array(alleles)) = get_field(row, &["alleles"]) {
@@ -1887,7 +1928,24 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<(i32, f64, Str
         (String::new(), String::new())
     };
 
-    Some((position, pvalue, ref_allele, alt_allele))
+    // Extract beta (effect size)
+    let beta = get_float(row, &["BETA", "beta", "Beta"]);
+
+    // Extract SE (standard error)
+    let se = get_float(row, &["SE", "se", "Se"]);
+
+    // Extract AF (allele frequency)
+    let af = get_float(row, &["AF_Allele2", "AF", "af", "allele_frequency"]);
+
+    Some(ExtractedLocusInfo {
+        position,
+        pvalue,
+        ref_allele,
+        alt_allele,
+        beta,
+        se,
+        af,
+    })
 }
 
 /// Render a locus plot and return PNG bytes.
@@ -1896,6 +1954,7 @@ fn render_locus_plot(
     start: i32,
     end: i32,
     threshold: f64,
+    styling: Option<&crate::manhattan::config::ManhattanConfig>,
 ) -> Result<Vec<u8>> {
     // Calculate y_max from data
     let y_max = variants
@@ -1913,7 +1972,19 @@ fn render_locus_plot(
         y_max,
     };
 
-    let mut renderer = LocusRenderer::new(config);
+    let mut renderer = if let Some(style_config) = styling {
+        let locus_style = style_config.resolve(PlotType::Locus);
+        let (exome_color, genome_color) = style_config.locus_colors();
+        LocusRenderer::new_with_style(
+            config,
+            &locus_style.background,
+            exome_color,
+            genome_color,
+            locus_style.point_radius,
+        )
+    } else {
+        LocusRenderer::new(config)
+    };
     renderer.draw_threshold_line(threshold);
     renderer.draw_variants(variants);
 

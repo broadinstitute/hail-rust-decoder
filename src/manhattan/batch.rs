@@ -3,6 +3,7 @@
 //! Parses assets.json files into phenotype groups and generates ManhattanSpecs.
 
 use crate::distributed::message::ManhattanSpec;
+use crate::manhattan::config::ManhattanConfig;
 use crate::{HailError, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -47,6 +48,8 @@ pub struct BatchConfig {
     pub genes_path: Option<String>,
     pub exome_annotations: Option<String>,
     pub genome_annotations: Option<String>,
+    /// Styling configuration for plots
+    pub styling: ManhattanConfig,
 }
 
 /// Summary statistics for loaded batch.
@@ -106,6 +109,15 @@ struct AssetsWrapper {
 /// Supports two JSON formats:
 /// 1. Plain array: `[{...}, {...}]`
 /// 2. Object with assets field: `{"assets": [{...}, {...}]}`
+///
+/// Parameter behavior:
+/// - `analysis_ids`: Guaranteed inclusions (always in result, processed first)
+/// - `ancestries`: Filter applied to all phenotypes
+/// - `sample`: Fraction of remaining phenotypes to randomly sample (after guaranteed)
+/// - `limit`: Total max phenotypes (guaranteed + sampled)
+///
+/// Example: analysis_ids=[A,B,C], sample=0.1, limit=100
+/// Result: A, B, C (guaranteed) + up to 97 randomly sampled phenotypes
 pub fn load_and_group_assets(
     path: &str,
     analysis_ids: Option<&[String]>,
@@ -131,19 +143,19 @@ pub fn load_and_group_assets(
         ));
     };
 
-    // Group by (ancestry, analysis_id)
-    // Key: "ancestry:id"
-    let mut groups: HashMap<String, PhenotypeInput> = HashMap::new();
+    // Build a set of guaranteed IDs for quick lookup
+    let guaranteed_ids: std::collections::HashSet<&String> = analysis_ids
+        .map(|ids| ids.iter().collect())
+        .unwrap_or_default();
+
+    // Group by (ancestry, analysis_id) into two buckets:
+    // 1. guaranteed: phenotypes in analysis_ids (always included)
+    // 2. candidates: all other phenotypes (for sampling)
+    let mut guaranteed: HashMap<String, PhenotypeInput> = HashMap::new();
+    let mut candidates: HashMap<String, PhenotypeInput> = HashMap::new();
 
     for asset in assets {
-        // Filter by analysis ID if requested
-        if let Some(ids) = analysis_ids {
-            if !ids.contains(&asset.analysis_id) {
-                continue;
-            }
-        }
-
-        // Filter by ancestry if requested
+        // Filter by ancestry if requested (applies to both guaranteed and candidates)
         if let Some(ancs) = ancestries {
             if !ancs.contains(&asset.ancestry_group) {
                 continue;
@@ -159,6 +171,13 @@ pub fn load_and_group_assets(
         }
 
         let key = format!("{}:{}", asset.ancestry_group, asset.analysis_id);
+        let is_guaranteed = guaranteed_ids.contains(&asset.analysis_id);
+
+        let groups = if is_guaranteed {
+            &mut guaranteed
+        } else {
+            &mut candidates
+        };
 
         let entry = groups.entry(key).or_insert_with(|| PhenotypeInput {
             ancestry: asset.ancestry_group.clone(),
@@ -188,32 +207,47 @@ pub fn load_and_group_assets(
         }
     }
 
-    let mut result: Vec<PhenotypeInput> = groups.into_values().collect();
-
-    // Sort for deterministic order
+    // Start with guaranteed phenotypes
+    let mut result: Vec<PhenotypeInput> = guaranteed.into_values().collect();
     result.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
 
-    // Sample a fraction if requested (applied before limit)
-    if let Some(frac) = sample {
-        use rand::seq::SliceRandom;
-        use rand::SeedableRng;
+    let guaranteed_count = result.len();
 
-        let frac = frac.clamp(0.0, 1.0);
-        let sample_count = ((result.len() as f64) * frac).ceil() as usize;
+    // Calculate how many additional phenotypes we can add
+    let remaining_slots = limit.map(|n| n.saturating_sub(guaranteed_count));
 
-        // Use seeded RNG for reproducibility
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        result.shuffle(&mut rng);
-        result.truncate(sample_count);
+    // If we have room for more and there are candidates, sample from them
+    if remaining_slots.map(|s| s > 0).unwrap_or(true) && !candidates.is_empty() {
+        let mut candidate_list: Vec<PhenotypeInput> = candidates.into_values().collect();
 
-        // Re-sort after sampling for consistent output order
-        result.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
+        // Sample from candidates if requested
+        if let Some(frac) = sample {
+            use rand::seq::SliceRandom;
+            use rand::SeedableRng;
+
+            let frac = frac.clamp(0.0, 1.0);
+            let sample_count = ((candidate_list.len() as f64) * frac).ceil() as usize;
+
+            // Use seeded RNG for reproducibility
+            let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+            candidate_list.shuffle(&mut rng);
+            candidate_list.truncate(sample_count);
+        }
+
+        // Sort candidates for deterministic order
+        candidate_list.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
+
+        // Apply remaining slots limit if set
+        if let Some(slots) = remaining_slots {
+            candidate_list.truncate(slots);
+        }
+
+        // Append sampled candidates to guaranteed
+        result.extend(candidate_list);
     }
 
-    // Apply limit after sampling
-    if let Some(n) = limit {
-        result.truncate(n);
-    }
+    // Final sort for consistent output order
+    result.sort_by(|a, b| a.ancestry.cmp(&b.ancestry).then(a.id.cmp(&b.id)));
 
     Ok(result)
 }
@@ -264,6 +298,9 @@ pub fn create_specs(inputs: Vec<PhenotypeInput>, config: &BatchConfig) -> Vec<Ma
                 skip_composite: false, // Batch mode assumes we want the final output
                 exome_partitions: None,
                 genome_partitions: None,
+
+                // Styling configuration
+                styling: config.styling.clone(),
             }
         })
         .collect()
@@ -337,6 +374,8 @@ mod tests {
             exome_path: Some("gs://bucket/exome.ht".to_string()),
             genome_path: Some("gs://bucket/genome.ht".to_string()),
             gene_burden_path: None,
+            exome_exp_p_path: None,
+            genome_exp_p_path: None,
         }];
 
         let config = BatchConfig {
@@ -352,6 +391,7 @@ mod tests {
             genes_path: None,
             exome_annotations: None,
             genome_annotations: None,
+            styling: ManhattanConfig::default(),
         };
 
         let specs = create_specs(inputs, &config);
@@ -374,6 +414,8 @@ mod tests {
                 exome_path: Some("gs://bucket/exome.ht".to_string()),
                 genome_path: Some("gs://bucket/genome.ht".to_string()),
                 gene_burden_path: None,
+                exome_exp_p_path: None,
+                genome_exp_p_path: None,
             },
             PhenotypeInput {
                 ancestry: "meta".to_string(),
@@ -381,6 +423,8 @@ mod tests {
                 exome_path: Some("gs://bucket/exome.ht".to_string()),
                 genome_path: None,
                 gene_burden_path: None,
+                exome_exp_p_path: None,
+                genome_exp_p_path: None,
             },
             PhenotypeInput {
                 ancestry: "afr".to_string(),
@@ -388,6 +432,8 @@ mod tests {
                 exome_path: None,
                 genome_path: Some("gs://bucket/genome.ht".to_string()),
                 gene_burden_path: None,
+                exome_exp_p_path: None,
+                genome_exp_p_path: None,
             },
         ];
 

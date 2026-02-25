@@ -8,6 +8,7 @@
 
 use crate::codec::EncodedValue;
 use crate::io::{is_cloud_path, StreamingCloudWriter};
+use crate::manhattan::config::ResolvedStyle;
 use crate::manhattan::data::{GeneAssociationRow, GenePlotPoint, PlotPoint};
 use crate::manhattan::gene_writer::GeneAssociationWriter;
 use crate::manhattan::layout::{ChromosomeLayout, YScale};
@@ -536,7 +537,8 @@ pub fn scan_gene_burden_to_parquet(
             let pvalue = get_f64("Pvalue");
             let pvalue_burden = get_f64("Pvalue_Burden");
             let pvalue_skat = get_f64("Pvalue_SKAT");
-            let beta_burden = get_f64("BETA_Burden");
+            // Try BETA_Burden first, then META_Stats_Burden (used for META ancestry)
+            let beta_burden = get_f64("BETA_Burden").or_else(|| get_f64("META_Stats_Burden"));
             let mac = get_i64("MAC");
 
             // Extract location - try interval first, then CHR/POS
@@ -720,7 +722,37 @@ pub fn render_gene_manhattan(
     threshold: f64,
     layout: &ChromosomeLayout,
 ) -> Result<Vec<u8>> {
-    let mut renderer = ManhattanRenderer::new(width, height);
+    render_gene_manhattan_styled(points, width, height, threshold, layout, None)
+}
+
+/// Render a Manhattan plot for gene results with custom styling.
+pub fn render_gene_manhattan_styled(
+    points: &[GenePlotPoint],
+    width: u32,
+    height: u32,
+    threshold: f64,
+    layout: &ChromosomeLayout,
+    style: Option<&ResolvedStyle>,
+) -> Result<Vec<u8>> {
+    // Use style settings or defaults for gene burden plots
+    let (background, point_radius, point_alpha, threshold_color, threshold_alpha) = match style {
+        Some(s) => (
+            &s.background,
+            s.point_radius,
+            s.point_alpha,
+            &s.threshold_line_color,
+            s.threshold_line_alpha,
+        ),
+        None => (
+            &crate::manhattan::config::BackgroundStyle::White,
+            5.0f32, // Larger default for genes
+            0.9f32,
+            &"#B71C1C".to_string(),
+            0.5f32,
+        ),
+    };
+
+    let mut renderer = ManhattanRenderer::new_with_background(width, height, background);
 
     // Y-Scale: cap at 30 or max value in data
     let max_log_p = points
@@ -732,7 +764,7 @@ pub fn render_gene_manhattan(
     let y_scale = YScale::new(height, max_log_p.max(10.0).min(50.0));
 
     // Draw threshold line
-    renderer.render_threshold_line(y_scale.threshold_y(threshold), width);
+    renderer.render_threshold_line_styled(y_scale.threshold_y(threshold), width, threshold_color, threshold_alpha);
 
     // Draw points
     for pt in points {
@@ -752,8 +784,7 @@ pub fn render_gene_manhattan(
             let y = y_scale.get_y(neg_log_p);
             let color = layout.get_color(contig);
 
-            // Use slightly larger points for genes (0.9 vs 0.6 for variants)
-            renderer.render_point(x, y, color, 0.9);
+            renderer.render_point_with_radius(x, y, color, point_alpha, point_radius);
         }
     }
 

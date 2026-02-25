@@ -15,7 +15,12 @@ CREATE TABLE IF NOT EXISTS loci_variants (
     -- Association stats
     pvalue               Float64,
     neg_log10_p          Float32,
-    is_significant       Bool
+    is_significant       Bool,
+
+    -- Effect size fields (nullable)
+    beta                 Nullable(Float64),
+    se                   Nullable(Float64),
+    af                   Nullable(Float64)
 )
 ENGINE = MergeTree()
 PARTITION BY phenotype

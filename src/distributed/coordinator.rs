@@ -17,6 +17,7 @@ use crate::distributed::message::{
     TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
+use crate::manhattan::config::PlotType;
 use crate::Result;
 use axum::body::Body;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1037,6 +1038,13 @@ fn get_batch_work(
         let ancestry = state.original_spec.ancestry.clone()
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Resolve style based on source type
+        let plot_type = match source {
+            ManhattanSource::Exome => PlotType::Exome,
+            ManhattanSource::Genome => PlotType::Genome,
+        };
+        let style = state.original_spec.styling.resolve(plot_type);
+
         let scan_spec = ManhattanScanSpec {
             phenotype,
             ancestry,
@@ -1050,6 +1058,7 @@ fn get_batch_work(
             width: state.original_spec.width,
             height: state.original_spec.height,
             contig_lengths: state.contig_lengths.clone(),
+            style,
         };
 
         return axum::Json(WorkResponse::Task {
@@ -1296,6 +1305,13 @@ fn get_manhattan_work(
             let ancestry = manhattan.original_spec.ancestry.clone()
                 .unwrap_or_else(|| "unknown".to_string());
 
+            // Resolve style based on source type
+            let plot_type = match source {
+                ManhattanSource::Exome => PlotType::Exome,
+                ManhattanSource::Genome => PlotType::Genome,
+            };
+            let style = manhattan.original_spec.styling.resolve(plot_type);
+
             let scan_spec = ManhattanScanSpec {
                 phenotype,
                 ancestry,
@@ -1309,6 +1325,7 @@ fn get_manhattan_work(
                 width: manhattan.original_spec.width,
                 height: manhattan.original_spec.height,
                 contig_lengths: manhattan.contig_lengths.clone(),
+                style,
             };
 
             axum::Json(WorkResponse::Task {
@@ -1370,6 +1387,7 @@ fn get_manhattan_work(
                 layout: manhattan.layout.clone().unwrap_or_default(),
                 y_scale: manhattan.y_scale.clone().unwrap_or_default(),
                 cleanup: false, // TODO: Add cleanup option to ManhattanSpec
+                styling: manhattan.original_spec.styling.clone(),
             };
 
             axum::Json(WorkResponse::Task {
@@ -1583,6 +1601,7 @@ fn complete_batch_work(
                     layout: state.layout.clone().unwrap_or_default(),
                     y_scale: state.y_scale.clone().unwrap_or_default(),
                     cleanup: false,
+                    styling: original.styling.clone(),
                 };
 
                 // Store spec for potential retries

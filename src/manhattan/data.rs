@@ -20,6 +20,8 @@ pub struct BufferedVariant {
     pub alleles: Vec<String>,
     pub pvalue: f64,
     pub beta: Option<f64>,
+    pub se: Option<f64>,
+    pub af: Option<f64>,
     pub source: VariantSource,
     pub gene_symbol: Option<String>,
     pub consequence: Option<String>,
@@ -397,6 +399,12 @@ pub struct LocusVariantRow {
     pub neg_log10_p: f32,
     /// Whether this variant is significant (p < threshold)
     pub is_significant: bool,
+    /// Effect size (beta coefficient)
+    pub beta: Option<f64>,
+    /// Standard error of beta
+    pub se: Option<f64>,
+    /// Allele frequency (from association)
+    pub af: Option<f64>,
 }
 
 // =============================================================================

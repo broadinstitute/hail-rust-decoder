@@ -485,15 +485,25 @@ pub struct ManhattanArgs {
 ///
 /// This command reads an assets JSON file (from axaou-server query-assets) and
 /// submits a batch of Manhattan plot jobs to the coordinator for parallel processing.
+///
+/// Settings can be provided via CLI arguments or a TOML config file (--config).
+/// CLI arguments override config file settings.
 #[derive(Args, Debug)]
 pub struct ManhattanBatchArgs {
+    /// Path to TOML configuration file (contains all settings)
+    ///
+    /// When provided, most other arguments become optional as they can be
+    /// specified in the config file. CLI arguments override config values.
+    #[arg(long)]
+    pub config: Option<String>,
+
     /// Path to assets JSON file (from axaou-server query-assets)
     #[arg(long)]
-    pub assets_json: String,
+    pub assets_json: Option<String>,
 
     /// Base output directory (e.g., gs://bucket/manhattans)
     #[arg(long)]
-    pub output_dir: String,
+    pub output_dir: Option<String>,
 
     /// Filter to specific analysis IDs (comma-separated)
     #[arg(long, value_delimiter = ',')]
@@ -562,6 +572,24 @@ pub struct ManhattanBatchArgs {
     /// Output progress as JSON lines
     #[arg(long, hide = true)]
     pub progress_json: bool,
+
+    // Styling Options
+
+    /// Path to TOML configuration file for styling
+    #[arg(long)]
+    pub style_config: Option<String>,
+
+    /// Override point radius for all plot types (pixels, default: 2.5)
+    #[arg(long)]
+    pub point_radius: Option<f32>,
+
+    /// Override background style: "transparent", "white", or hex color (default: white)
+    #[arg(long)]
+    pub background: Option<String>,
+
+    /// Override chromosome colors (comma-separated hex, e.g., "#404040,#4682B4")
+    #[arg(long, value_delimiter = ',')]
+    pub chrom_colors: Option<Vec<String>>,
 }
 
 /// Arguments for generating locus plots from existing Manhattan output

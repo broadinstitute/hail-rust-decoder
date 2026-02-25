@@ -44,4 +44,7 @@ pub enum HailError {
 
     #[error("Parse error: {0}")]
     ParseError(String),
+
+    #[error("Configuration error: {0}")]
+    Config(String),
 }

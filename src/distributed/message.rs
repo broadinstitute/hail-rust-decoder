@@ -2,6 +2,7 @@
 //!
 //! These messages are exchanged over HTTP as JSON.
 
+use crate::manhattan::config::{ManhattanConfig, ResolvedStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -264,6 +265,10 @@ pub struct ManhattanSpec {
     /// Number of partitions in genome results table
     #[serde(default)]
     pub genome_partitions: Option<usize>,
+
+    /// Styling configuration for all plots
+    #[serde(default)]
+    pub styling: ManhattanConfig,
 }
 
 fn default_gene_threshold() -> f64 {
@@ -334,6 +339,10 @@ pub struct ManhattanScanSpec {
     /// Contig lengths for per-chromosome layout generation
     #[serde(default)]
     pub contig_lengths: HashMap<String, u32>,
+
+    /// Resolved styling for this scan (background, colors, point size)
+    #[serde(default)]
+    pub style: ResolvedStyle,
 }
 
 /// Phase 2: Aggregate job specification.
@@ -408,6 +417,10 @@ pub struct ManhattanAggregateSpec {
     /// Delete intermediate shards after aggregation
     #[serde(default)]
     pub cleanup: bool,
+
+    /// Styling configuration for all plots (gene burden, locus, etc.)
+    #[serde(default)]
+    pub styling: ManhattanConfig,
 }
 
 impl JobSpec {

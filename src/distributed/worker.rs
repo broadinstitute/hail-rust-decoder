@@ -1433,6 +1433,7 @@ fn process_manhattan_scan_v2(
     let phenotype = &spec.phenotype;
     let ancestry = &spec.ancestry;
     let contig_lengths = &spec.contig_lengths;
+    let style = &spec.style;
 
     // Update telemetry with first partition
     if let Some(ref ts) = telemetry {
@@ -1477,7 +1478,7 @@ fn process_manhattan_scan_v2(
                     if let Some(x) = layout.get_x(contig_for_layout, point.position) {
                         let y = y_scale.get_y(point.neg_log10_p);
                         let color = layout.get_color(contig_for_layout);
-                        renderer.render_point(x, y, color, 0.6);
+                        renderer.render_point_with_radius(x, y, color, style.point_alpha, style.point_radius);
                     }
 
                     // 2. Per-Chromosome Plot
@@ -1500,7 +1501,7 @@ fn process_manhattan_scan_v2(
                             let y = y_scale.get_y(point.neg_log10_p);
                             // Use same color scheme as WG plot
                             let color = layout.get_color(contig_for_layout);
-                            chrom_renderer.render_point(x, y, color, 0.6);
+                            chrom_renderer.render_point_with_radius(x, y, color, style.point_alpha, style.point_radius);
                         }
                     }
 

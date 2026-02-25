@@ -3,8 +3,10 @@
 //! This module renders a scatter plot for a specific genomic region, distinguishing
 //! between Exome and Genome variants with different shapes and colors.
 
+use crate::manhattan::config::BackgroundStyle;
 use crate::manhattan::data::VariantSource;
 use crate::manhattan::layout::YScale;
+use crate::manhattan::render::hex_to_color;
 use crate::HailError;
 use crate::Result;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
@@ -16,6 +18,9 @@ pub struct RenderVariant {
     pub ref_allele: String,
     pub alt_allele: String,
     pub pvalue: f64,
+    pub beta: Option<f64>,
+    pub se: Option<f64>,
+    pub af: Option<f64>,
     pub source: VariantSource,
     pub is_significant: bool,
 }
@@ -59,6 +64,12 @@ impl LocusPlotConfig {
 pub struct LocusRenderer {
     pixmap: Pixmap,
     config: LocusPlotConfig,
+    /// Exome variant color
+    exome_color: String,
+    /// Genome variant color
+    genome_color: String,
+    /// Point radius
+    point_radius: f32,
 }
 
 impl LocusRenderer {
@@ -67,7 +78,45 @@ impl LocusRenderer {
         let mut pixmap = Pixmap::new(config.width, config.height)
             .expect("Failed to allocate locus pixmap (dimensions too large?)");
         pixmap.fill(Color::WHITE);
-        Self { pixmap, config }
+        Self {
+            pixmap,
+            config,
+            exome_color: "#BF616A".to_string(), // Default exome color (red)
+            genome_color: "#5E81AC".to_string(), // Default genome color (blue)
+            point_radius: 3.0,
+        }
+    }
+
+    /// Create a new renderer with custom styling.
+    pub fn new_with_style(
+        config: LocusPlotConfig,
+        background: &BackgroundStyle,
+        exome_color: String,
+        genome_color: String,
+        point_radius: f32,
+    ) -> Self {
+        let mut pixmap = Pixmap::new(config.width, config.height)
+            .expect("Failed to allocate locus pixmap (dimensions too large?)");
+
+        match background {
+            BackgroundStyle::Transparent => {
+                // Pixmap is already transparent by default
+            }
+            BackgroundStyle::White => {
+                pixmap.fill(Color::WHITE);
+            }
+            BackgroundStyle::Color(hex) => {
+                pixmap.fill(hex_to_color(hex, 1.0));
+            }
+        }
+
+        Self {
+            pixmap,
+            config,
+            exome_color,
+            genome_color,
+            point_radius,
+        }
     }
 
     /// Draw a dashed horizontal line at the significance threshold.
@@ -97,16 +146,14 @@ impl LocusRenderer {
     /// Draws Genome variants first (background), then Exome variants (foreground).
     /// This layering ensures sparser exome variants aren't buried under genome variants.
     pub fn draw_variants(&mut self, variants: &[RenderVariant]) {
-        // Define colors - same for significant and non-significant
-        // Genome: Steel Blue #4682B4
-        let genome_color = hex_to_color("#4682B4", 0.7);
-        // Exome: Orange #F57C00
-        let exome_color = hex_to_color("#F57C00", 0.8);
+        // Use configured colors
+        let genome_color = hex_to_color(&self.genome_color, 0.7);
+        let exome_color = hex_to_color(&self.exome_color, 0.8);
 
-        let radius = 2.0; // Consistent small size for all points
+        let radius = self.point_radius;
 
         // Helper to draw variants for a given source
-        let draw_source = |pixmap: &mut Pixmap, config: &LocusPlotConfig, source: VariantSource, paint_color: Color| {
+        let draw_source = |pixmap: &mut Pixmap, config: &LocusPlotConfig, source: VariantSource, paint_color: Color, radius: f32| {
             let mut paint = Paint::default();
             paint.set_color(paint_color);
             paint.anti_alias = true;
@@ -161,8 +208,8 @@ impl LocusRenderer {
         };
 
         // Draw genome first (background), then exome (foreground)
-        draw_source(&mut self.pixmap, &self.config, VariantSource::Genome, genome_color);
-        draw_source(&mut self.pixmap, &self.config, VariantSource::Exome, exome_color);
+        draw_source(&mut self.pixmap, &self.config, VariantSource::Genome, genome_color, radius);
+        draw_source(&mut self.pixmap, &self.config, VariantSource::Exome, exome_color, radius);
     }
 
     /// Encode the rendered pixmap as a PNG byte vector.
@@ -174,16 +221,6 @@ impl LocusRenderer {
             ))
         })
     }
-}
-
-/// Parse a hex color string (e.g. "#4682B4") into a tiny-skia Color with alpha.
-fn hex_to_color(hex: &str, alpha: f32) -> Color {
-    let hex = hex.trim_start_matches('#');
-    let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-    let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-    let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-
-    Color::from_rgba8(r, g, b, (alpha * 255.0) as u8)
 }
 
 #[cfg(test)]
@@ -213,6 +250,9 @@ mod tests {
                 ref_allele: "A".to_string(),
                 alt_allele: "G".to_string(),
                 pvalue: 1e-1,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
             },
@@ -221,6 +261,9 @@ mod tests {
                 ref_allele: "C".to_string(),
                 alt_allele: "T".to_string(),
                 pvalue: 1e-2,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
             },
@@ -229,6 +272,9 @@ mod tests {
                 ref_allele: "G".to_string(),
                 alt_allele: "A".to_string(),
                 pvalue: 1e-3,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
             },
@@ -238,6 +284,9 @@ mod tests {
                 ref_allele: "T".to_string(),
                 alt_allele: "C".to_string(),
                 pvalue: 1e-9,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Genome,
                 is_significant: true,
             },
@@ -247,6 +296,9 @@ mod tests {
                 ref_allele: "A".to_string(),
                 alt_allele: "T".to_string(),
                 pvalue: 1e-5,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Exome,
                 is_significant: false,
             },
@@ -255,6 +307,9 @@ mod tests {
                 ref_allele: "G".to_string(),
                 alt_allele: "C".to_string(),
                 pvalue: 1e-12,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Exome,
                 is_significant: true,
             },
@@ -263,6 +318,9 @@ mod tests {
                 ref_allele: "C".to_string(),
                 alt_allele: "A".to_string(),
                 pvalue: 1e-6,
+                beta: None,
+                se: None,
+                af: None,
                 source: VariantSource::Exome,
                 is_significant: false,
             },

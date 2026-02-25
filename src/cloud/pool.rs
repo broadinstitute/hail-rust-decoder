@@ -2751,6 +2751,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             skip_composite,
             exome_partitions: None, // Computed by submit_distributed
             genome_partitions: None, // Computed by submit_distributed
+            styling: crate::manhattan::config::ManhattanConfig::default(),
         };
 
         Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))
@@ -2758,14 +2759,16 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
     /// Parse a `manhattan-batch` command into a ManhattanBatch job.
     ///
-    /// Supports: manhattan-batch --assets-json <path> --output-dir <path> [--analysis-ids <id,...>] ...
+    /// Supports: manhattan-batch --config <path> or --assets-json <path> --output-dir <path> [--analysis-ids <id,...>] ...
     fn parse_manhattan_batch_command(
         args: &[String],
     ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
         use crate::distributed::message::{JobSpec, ManhattanSpec};
         use crate::manhattan::batch::{load_and_group_assets, create_specs, BatchConfig};
+        use crate::manhattan::config::ManhattanJobConfig;
 
         // Parse named arguments
+        let mut config_path: Option<String> = None;
         let mut assets_json: Option<String> = None;
         let mut output_dir: Option<String> = None;
         let mut analysis_ids: Option<Vec<String>> = None;
@@ -2775,18 +2778,26 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut genes: Option<String> = None;
         let mut exome_annotations: Option<String> = None;
         let mut genome_annotations: Option<String> = None;
-        let mut threshold: f64 = 5e-8;
-        let mut gene_threshold: f64 = 2.5e-6;
-        let mut locus_threshold: f64 = 0.01;
-        let mut locus_window: i32 = 1_000_000;
-        let mut locus_plots = false;
-        let mut width: u32 = 3000;
-        let mut height: u32 = 800;
-        let mut y_field = "Pvalue".to_string();
+        let mut threshold: Option<f64> = None;
+        let mut gene_threshold: Option<f64> = None;
+        let mut locus_threshold: Option<f64> = None;
+        let mut locus_window: Option<i32> = None;
+        let mut locus_plots: Option<bool> = None;
+        let mut width: Option<u32> = None;
+        let mut height: Option<u32> = None;
+        let mut y_field: Option<String> = None;
 
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--config" => {
+                    if i + 1 < args.len() {
+                        config_path = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 "--assets-json" => {
                     if i + 1 < args.len() {
                         assets_json = Some(args[i + 1].clone());
@@ -2875,7 +2886,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--threshold" | "--variant-threshold" => {
                     if i + 1 < args.len() {
-                        threshold = args[i + 1].parse().unwrap_or(5e-8);
+                        threshold = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2883,7 +2894,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--gene-threshold" => {
                     if i + 1 < args.len() {
-                        gene_threshold = args[i + 1].parse().unwrap_or(2.5e-6);
+                        gene_threshold = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2891,7 +2902,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--locus-threshold" => {
                     if i + 1 < args.len() {
-                        locus_threshold = args[i + 1].parse().unwrap_or(0.01);
+                        locus_threshold = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2899,19 +2910,19 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--locus-window" => {
                     if i + 1 < args.len() {
-                        locus_window = args[i + 1].parse().unwrap_or(1_000_000);
+                        locus_window = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
                     }
                 }
                 "--locus-plots" => {
-                    locus_plots = true;
+                    locus_plots = Some(true);
                     i += 1;
                 }
                 "--width" => {
                     if i + 1 < args.len() {
-                        width = args[i + 1].parse().unwrap_or(3000);
+                        width = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2919,7 +2930,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--height" => {
                     if i + 1 < args.len() {
-                        height = args[i + 1].parse().unwrap_or(800);
+                        height = args[i + 1].parse().ok();
                         i += 2;
                     } else {
                         i += 1;
@@ -2927,7 +2938,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--y-field" => {
                     if i + 1 < args.len() {
-                        y_field = args[i + 1].clone();
+                        y_field = Some(args[i + 1].clone());
                         i += 2;
                     } else {
                         i += 1;
@@ -2939,20 +2950,61 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         }
 
-        // Validate required arguments
-        let assets_json = assets_json.ok_or_else(|| {
-            HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "manhattan-batch command requires --assets-json <path>",
-            ))
-        })?;
+        // Load config file if provided
+        let job_config = if let Some(ref path) = config_path {
+            ManhattanJobConfig::load(std::path::Path::new(path))?
+        } else {
+            ManhattanJobConfig::default()
+        };
 
-        let output_dir = output_dir.ok_or_else(|| {
-            HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "manhattan-batch command requires --output-dir <path>",
-            ))
-        })?;
+        // Merge CLI arguments with config (CLI overrides config)
+        let assets_json = assets_json
+            .or(job_config.job.assets_json.clone())
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "manhattan-batch requires --assets-json <path> or job.assets_json in config",
+                ))
+            })?;
+
+        let output_dir = output_dir
+            .or(job_config.job.output_dir.clone())
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "manhattan-batch requires --output-dir <path> or job.output_dir in config",
+                ))
+            })?;
+
+        // Merge other settings (CLI overrides config)
+        let analysis_ids = analysis_ids.or_else(|| {
+            if job_config.job.analysis_ids.is_empty() {
+                None
+            } else {
+                Some(job_config.job.analysis_ids.clone())
+            }
+        });
+        let ancestries = ancestries.or_else(|| {
+            if job_config.job.ancestries.is_empty() {
+                None
+            } else {
+                Some(job_config.job.ancestries.clone())
+            }
+        });
+        let sample = sample.or(job_config.job.sample);
+        let limit = limit.or(job_config.job.limit);
+        let genes = genes.or(job_config.job.genes.clone());
+        let exome_annotations = exome_annotations.or(job_config.job.exome_annotations.clone());
+        let genome_annotations = genome_annotations.or(job_config.job.genome_annotations.clone());
+        let threshold = threshold.unwrap_or(job_config.job.threshold);
+        let gene_threshold = gene_threshold.unwrap_or(job_config.job.gene_threshold);
+        let locus_threshold = locus_threshold.unwrap_or(job_config.job.locus_threshold);
+        let locus_window = locus_window.unwrap_or(job_config.job.locus_window);
+        let locus_plots = locus_plots.unwrap_or(job_config.job.locus_plots);
+        let width = width.unwrap_or(job_config.job.width);
+        let height = height.unwrap_or(job_config.job.height);
+        let y_field = y_field.unwrap_or(job_config.job.y_field.clone());
+        let styling = job_config.styling();
 
         // Load and group assets
         let inputs = load_and_group_assets(&assets_json, analysis_ids.as_deref(), ancestries.as_deref(), sample, limit)?;
@@ -2978,6 +3030,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             genes_path: genes,
             exome_annotations,
             genome_annotations,
+            styling,
         };
 
         // Convert to specs
@@ -3137,15 +3190,25 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         args: &[String],
     ) -> Result<(String, crate::distributed::message::JobSpec, Vec<String>, Vec<String>)> {
         use crate::distributed::message::{InitStrategy, JobSpec};
+        use crate::manhattan::config::ManhattanJobConfig;
 
+        let mut config_path: Option<String> = None;
         let mut input_dir: Option<String> = None;
         let mut clickhouse_url: Option<String> = None;
-        let mut database = "default".to_string();
-        let mut init_strategy = InitStrategy::Create;
+        let mut database: Option<String> = None;
+        let mut init_strategy: Option<InitStrategy> = None;
 
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
+                "--config" => {
+                    if i + 1 < args.len() {
+                        config_path = Some(args[i + 1].clone());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
                 "--input-dir" => {
                     if i + 1 < args.len() {
                         input_dir = Some(args[i + 1].clone());
@@ -3164,7 +3227,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--database" => {
                     if i + 1 < args.len() {
-                        database = args[i + 1].clone();
+                        database = Some(args[i + 1].clone());
                         i += 2;
                     } else {
                         i += 1;
@@ -3172,7 +3235,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 }
                 "--init-strategy" => {
                     if i + 1 < args.len() {
-                        init_strategy = match args[i + 1].to_lowercase().as_str() {
+                        init_strategy = Some(match args[i + 1].to_lowercase().as_str() {
                             "create" => InitStrategy::Create,
                             "replace" => InitStrategy::Replace,
                             "append" => InitStrategy::Append,
@@ -3185,7 +3248,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                                     ),
                                 )));
                             }
-                        };
+                        });
                         i += 2;
                     } else {
                         i += 1;
@@ -3197,21 +3260,43 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
         }
 
-        let input_dir = input_dir.ok_or_else(|| {
-            HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Ingest manhattan requires --input-dir <gcs_path>\n\
-                 Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
+        // Load config file if provided
+        let job_config = if let Some(ref path) = config_path {
+            ManhattanJobConfig::load(std::path::Path::new(path))?
+        } else {
+            ManhattanJobConfig::default()
+        };
+
+        // Merge CLI args with config (CLI overrides)
+        let input_dir = input_dir
+            .or(job_config.ingest_input_dir())
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Ingest manhattan requires --input-dir <gcs_path> or ingest.input_dir/job.output_dir in config\n\
+                     Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
+                ))
+            })?;
+
+        let clickhouse_url = clickhouse_url
+            .or(job_config.ingest.clickhouse_url.clone())
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Ingest manhattan requires --clickhouse-url <url> or ingest.clickhouse_url in config\n\
+                     Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
             ))
         })?;
 
-        let clickhouse_url = clickhouse_url.ok_or_else(|| {
-            HailError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Ingest manhattan requires --clickhouse-url <url>\n\
-                 Example: ingest manhattan --input-dir gs://bucket/manhattans/ --clickhouse-url http://ch:8123",
-            ))
-        })?;
+        // Merge database and init_strategy with config defaults
+        let database = database.unwrap_or(job_config.ingest.database.clone());
+        let init_strategy = init_strategy.unwrap_or_else(|| {
+            match job_config.ingest.init_strategy.to_lowercase().as_str() {
+                "replace" => InitStrategy::Replace,
+                "append" => InitStrategy::Append,
+                _ => InitStrategy::Create,
+            }
+        });
 
         let spec = JobSpec::IngestManhattan {
             input_dir: input_dir.clone(),

@@ -3,6 +3,7 @@
 pub mod aggregate;
 pub mod annotate;
 pub mod batch;
+pub mod config;
 pub mod data;
 pub mod gene_writer;
 pub mod genes;

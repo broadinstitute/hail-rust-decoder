@@ -2510,39 +2510,72 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
 /// Phase 1: Stub implementation - actual logic comes in Phase 3.
 fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
     use hail_decoder::manhattan::batch::{load_and_group_assets, BatchSummary};
+    use hail_decoder::manhattan::config::ManhattanJobConfig;
+    use std::path::Path;
+
+    // Load config file if provided
+    let job_config = if let Some(ref path) = args.config {
+        ManhattanJobConfig::load(Path::new(path))?
+    } else {
+        ManhattanJobConfig::default()
+    };
+
+    // Merge CLI args with config (CLI overrides)
+    let assets_json = args.assets_json.clone()
+        .or(job_config.job.assets_json.clone())
+        .ok_or_else(|| hail_decoder::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manhattan-batch requires --assets-json or job.assets_json in config",
+        )))?;
+
+    let output_dir = args.output_dir.clone()
+        .or(job_config.job.output_dir.clone())
+        .ok_or_else(|| hail_decoder::HailError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "manhattan-batch requires --output-dir or job.output_dir in config",
+        )))?;
+
+    let analysis_ids = args.analysis_ids.clone().or_else(|| {
+        if job_config.job.analysis_ids.is_empty() { None } else { Some(job_config.job.analysis_ids.clone()) }
+    });
+    let ancestries = args.ancestries.clone().or_else(|| {
+        if job_config.job.ancestries.is_empty() { None } else { Some(job_config.job.ancestries.clone()) }
+    });
+    let sample = args.sample.or(job_config.job.sample);
+    let limit = args.limit.or(job_config.job.limit);
 
     println!(
         "{} Manhattan batch validation",
         "Running".green().bold()
     );
-    println!("  Assets JSON: {}", args.assets_json.bright_white());
-    println!("  Output dir: {}", args.output_dir.bright_white());
+    println!("  Assets JSON: {}", assets_json.bright_white());
+    println!("  Output dir: {}", output_dir.bright_white());
 
-    if let Some(ref ids) = args.analysis_ids {
+    if let Some(ref ids) = analysis_ids {
         println!("  Analysis IDs filter: {:?}", ids);
     }
 
-    if let Some(ref ancs) = args.ancestries {
+    if let Some(ref ancs) = ancestries {
         println!("  Ancestries filter: {:?}", ancs);
     }
 
-    if let Some(sample) = args.sample {
-        println!("  Sample: {:.0}%", sample * 100.0);
+    if let Some(sample_val) = sample {
+        println!("  Sample: {:.0}%", sample_val * 100.0);
     }
 
-    if let Some(limit) = args.limit {
-        println!("  Limit: {}", limit);
+    if let Some(limit_val) = limit {
+        println!("  Limit: {}", limit_val);
     }
 
     println!();
 
     // Load and group assets
     let inputs = load_and_group_assets(
-        &args.assets_json,
-        args.analysis_ids.as_deref(),
-        args.ancestries.as_deref(),
-        args.sample,
-        args.limit,
+        &assets_json,
+        analysis_ids.as_deref(),
+        ancestries.as_deref(),
+        sample,
+        limit,
     )?;
 
     if inputs.is_empty() {
@@ -2609,13 +2642,22 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
 
     println!();
     println!("{}", "Ready for Submission".green().bold());
-    println!(
-        "  To submit this batch to a pool, run:\n    \
-         hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
-         --assets-json {} \\\n      \
-         --output-dir {}",
-        args.assets_json, args.output_dir
-    );
+    if let Some(ref config_path) = args.config {
+        println!(
+            "  To submit this batch to a pool, run:\n    \
+             hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
+             --config {}",
+            config_path
+        );
+    } else {
+        println!(
+            "  To submit this batch to a pool, run:\n    \
+             hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
+             --assets-json {} \\\n      \
+             --output-dir {}",
+            assets_json, output_dir
+        );
+    }
 
     Ok(())
 }
@@ -2756,6 +2798,9 @@ fn run_locus(args: LocusArgs) -> Result<()> {
                         ref_allele: String::new(),
                         alt_allele: String::new(),
                         pvalue: pt.pvalue,
+                        beta: None,
+                        se: None,
+                        af: None,
                         source,
                         is_significant: pt.pvalue < threshold,
                     });
