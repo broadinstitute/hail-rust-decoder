@@ -598,6 +598,9 @@ pub struct TelemetrySnapshot {
     /// Cumulative network bytes transmitted (for totals display)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_tx_total_bytes: Option<u64>,
+    /// Last 50 lines of the worker's log file
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<Vec<String>>,
 }
 
 /// Heartbeat request from worker to coordinator.
@@ -730,7 +733,7 @@ pub struct ExportMetricsResponse {
 }
 
 /// Dashboard info about a single worker.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DashboardWorker {
     /// Worker identifier
     pub worker_id: String,
@@ -744,6 +747,9 @@ pub struct DashboardWorker {
     pub total_rows: usize,
     /// Total partitions completed by this worker
     pub partitions_completed: usize,
+    /// Currently assigned task, if any
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<ActiveTaskInfo>,
 }
 
 /// Time-series metrics data for charts.
@@ -775,4 +781,53 @@ pub struct JobResultResponse {
     /// Error message if result retrieval failed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Information about a task currently being processed by a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveTaskInfo {
+    pub task_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phenotype_id: Option<String>,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub partitions: Vec<usize>,
+    pub started_at_ms: u64,
+}
+
+/// A historical event in the cluster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobEvent {
+    pub timestamp_ms: u64,
+    pub event_type: String, // "assigned", "completed", "failed", "requeued"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phenotype_id: Option<String>,
+    pub details: String,
+}
+
+/// A record of a failed task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailureRecord {
+    pub timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phenotype_id: Option<String>,
+    pub partitions: Vec<usize>,
+    pub worker_id: String,
+    pub error: String,
+    pub retry_count: usize,
+}
+
+/// Response for GET /api/events endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EventsResponse {
+    pub events: Vec<JobEvent>,
+}
+
+/// Response for GET /api/failures endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FailuresResponse {
+    pub failures: Vec<FailureRecord>,
 }

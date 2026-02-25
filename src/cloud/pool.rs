@@ -3308,6 +3308,307 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // Use input_dir as the "input_path" for job tracking
         Ok((input_dir, spec, Vec::new(), Vec::new()))
     }
+
+    /// Show real-time worker activity.
+    pub fn workers(&self, name: &str, zone: &str) -> Result<()> {
+        use crate::distributed::message::DashboardWorker;
+
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"))
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No coordinator found for pool '{}'", name),
+                ))
+            })?;
+
+        let mut cmd = self.provider.get_ssh_command(
+            &coordinator.name,
+            zone,
+            "curl -s http://localhost:3000/api/dashboard/workers",
+        );
+        cmd.stdout(std::process::Stdio::piped());
+
+        let output = cmd.output().map_err(HailError::Io)?;
+        if !output.status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to fetch worker data from coordinator",
+            )));
+        }
+
+        let workers: Vec<DashboardWorker> =
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to parse worker response: {}", e),
+                ))
+            })?;
+
+        println!("{}", "Worker Activity".bold().underline());
+        println!();
+
+        for w in &workers {
+            let status_color = match w.status.as_str() {
+                "active" | "Active" => w.status.green().to_string(),
+                "idle" | "Idle" => w.status.yellow().to_string(),
+                _ => w.status.red().to_string(),
+            };
+
+            println!(
+                "  {} [{}] last seen {:.1}s ago",
+                w.worker_id.cyan(),
+                status_color,
+                w.last_seen_secs
+            );
+
+            if let Some(ref task) = w.current_task {
+                let duration_s = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+                    - task.started_at_ms)
+                    / 1000;
+                println!(
+                    "    Task: {} phase={} partitions={:?} ({}s)",
+                    task.task_id.dimmed(),
+                    task.phase.bright_white(),
+                    task.partitions,
+                    duration_s
+                );
+            } else {
+                println!("    {}", "(no active task)".dimmed());
+            }
+
+            if let Some(ref latest) = w.latest {
+                let cpu = latest.cpu_percent.unwrap_or(0.0);
+                let mem_gb = latest
+                    .memory_used_bytes
+                    .map(|b| b as f64 / 1_073_741_824.0)
+                    .unwrap_or(0.0);
+                println!(
+                    "    CPU: {:.1}%  Mem: {:.1} GB  Rows/s: {:.0}",
+                    cpu, mem_gb, latest.rows_per_sec
+                );
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    /// Tail the event log.
+    pub fn events(&self, name: &str, zone: &str, follow: bool) -> Result<()> {
+        use crate::distributed::message::EventsResponse;
+
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"))
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No coordinator found for pool '{}'", name),
+                ))
+            })?;
+
+        let fetch_events = |since_ms: u64| -> Result<EventsResponse> {
+            let cmd_str = format!(
+                "curl -s 'http://localhost:3000/api/events?since_ms={}'",
+                since_ms
+            );
+            let mut cmd = self.provider.get_ssh_command(&coordinator.name, zone, &cmd_str);
+            cmd.stdout(std::process::Stdio::piped());
+
+            let output = cmd.output().map_err(HailError::Io)?;
+            if !output.status.success() {
+                return Err(HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to fetch events from coordinator",
+                )));
+            }
+
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to parse events response: {}", e),
+                ))
+            })
+        };
+
+        let print_event = |event: &crate::distributed::message::JobEvent| {
+            let type_color = match event.event_type.as_str() {
+                "completed" => event.event_type.green().to_string(),
+                "failed" => event.event_type.red().to_string(),
+                "assigned" => event.event_type.cyan().to_string(),
+                "requeued" => event.event_type.yellow().to_string(),
+                _ => event.event_type.to_string(),
+            };
+
+            // Format timestamp as seconds since epoch for simplicity
+            let secs = event.timestamp_ms / 1000;
+            let millis = event.timestamp_ms % 1000;
+            let timestamp = format!("{}.{:03}", secs, millis);
+
+            println!(
+                "[{}] {} {} {}",
+                timestamp.dimmed(),
+                type_color,
+                event
+                    .worker_id
+                    .as_deref()
+                    .unwrap_or("-")
+                    .cyan(),
+                event.details
+            );
+        };
+
+        println!("{}", "Event Log".bold().underline());
+        println!();
+
+        // Initial fetch (get all events)
+        let response = fetch_events(0)?;
+        let mut last_timestamp = 0u64;
+        for event in &response.events {
+            print_event(event);
+            if event.timestamp_ms > last_timestamp {
+                last_timestamp = event.timestamp_ms;
+            }
+        }
+
+        if follow {
+            println!();
+            println!("{}", "(following events, Ctrl+C to stop)".dimmed());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let response = fetch_events(last_timestamp)?;
+                for event in &response.events {
+                    print_event(event);
+                    if event.timestamp_ms > last_timestamp {
+                        last_timestamp = event.timestamp_ms;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Show recent task failures.
+    pub fn failures(&self, name: &str, zone: &str) -> Result<()> {
+        use crate::distributed::message::FailuresResponse;
+
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"))
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No coordinator found for pool '{}'", name),
+                ))
+            })?;
+
+        let mut cmd = self.provider.get_ssh_command(
+            &coordinator.name,
+            zone,
+            "curl -s http://localhost:3000/api/failures",
+        );
+        cmd.stdout(std::process::Stdio::piped());
+
+        let output = cmd.output().map_err(HailError::Io)?;
+        if !output.status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to fetch failures from coordinator",
+            )));
+        }
+
+        let response: FailuresResponse = serde_json::from_slice(&output.stdout).map_err(|e| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to parse failures response: {}", e),
+            ))
+        })?;
+
+        println!("{}", "Recent Failures".bold().underline());
+        println!();
+
+        if response.failures.is_empty() {
+            println!("{}", "No failures recorded.".green());
+        } else {
+            for f in &response.failures {
+                // Format timestamp as seconds since epoch for simplicity
+                let secs = f.timestamp_ms / 1000;
+                let millis = f.timestamp_ms % 1000;
+                let timestamp = format!("{}.{:03}", secs, millis);
+
+                println!(
+                    "[{}] {} partitions {:?}",
+                    timestamp.dimmed(),
+                    f.worker_id.cyan(),
+                    f.partitions
+                );
+                println!("  {}: {}", "Error".red(), f.error);
+                if f.retry_count > 0 {
+                    println!("  Retry count: {}", f.retry_count);
+                }
+                println!();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Show tail of a specific worker's logs.
+    pub fn logs(&self, name: &str, zone: &str, worker_id: &str) -> Result<()> {
+        let instances = self.provider.list_instances(name)?;
+        let coordinator = instances
+            .iter()
+            .find(|i| i.name.ends_with("-coordinator"))
+            .ok_or_else(|| {
+                HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No coordinator found for pool '{}'", name),
+                ))
+            })?;
+
+        let cmd_str = format!(
+            "curl -s 'http://localhost:3000/api/workers/{}/logs'",
+            worker_id
+        );
+        let mut cmd = self.provider.get_ssh_command(&coordinator.name, zone, &cmd_str);
+        cmd.stdout(std::process::Stdio::piped());
+
+        let output = cmd.output().map_err(HailError::Io)?;
+        if !output.status.success() {
+            return Err(HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to fetch worker logs from coordinator",
+            )));
+        }
+
+        let logs: Vec<String> = serde_json::from_slice(&output.stdout).map_err(|e| {
+            HailError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to parse logs response: {}", e),
+            ))
+        })?;
+
+        println!(
+            "{} (last 50 lines)",
+            format!("Logs for worker {}", worker_id).bold().underline()
+        );
+        println!();
+
+        for line in &logs {
+            println!("{}", line);
+        }
+
+        Ok(())
+    }
 }
 
 /// Messages sent from worker threads to the coordinator.

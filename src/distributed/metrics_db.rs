@@ -143,7 +143,7 @@ impl MetricsDb {
                     total_rows: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
-                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec, log_tail)
                     cpu_per_core: None,
                     disk_read_bytes_sec: None,
                     disk_write_bytes_sec: None,
@@ -153,6 +153,7 @@ impl MetricsDb {
                     network_tx_bytes_sec: row.get(11)?,
                     network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
                     network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                    log_tail: None,
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -192,7 +193,7 @@ impl MetricsDb {
                     total_rows: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
-                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec, log_tail)
                     cpu_per_core: None,
                     disk_read_bytes_sec: None,
                     disk_write_bytes_sec: None,
@@ -202,6 +203,7 @@ impl MetricsDb {
                     network_tx_bytes_sec: row.get(11)?,
                     network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
                     network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
+                    log_tail: None,
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -271,6 +273,7 @@ mod tests {
             network_tx_bytes_sec: Some(500_000.0),
             network_rx_total_bytes: Some(10_000_000_000),
             network_tx_total_bytes: Some(5_000_000_000),
+            log_tail: None,
         };
 
         db.insert_snapshot("worker-1", &snapshot).unwrap();

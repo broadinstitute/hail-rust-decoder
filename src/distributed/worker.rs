@@ -431,6 +431,22 @@ fn spawn_telemetry_loop(
                 (Some(rx_sec), Some(tx_sec), Some(current_rx), Some(current_tx))
             };
 
+            // Read the last 50 lines of the worker log file
+            let log_tail = std::fs::read_to_string("/tmp/worker.log")
+                .ok()
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    lines
+                        .into_iter()
+                        .rev()
+                        .take(50)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .map(String::from)
+                        .collect()
+                });
+
             let snapshot = TelemetrySnapshot {
                 timestamp_ms,
                 cpu_percent: cpu,
@@ -454,6 +470,7 @@ fn spawn_telemetry_loop(
                 network_tx_bytes_sec: net_tx_sec,
                 network_rx_total_bytes: net_rx_total,
                 network_tx_total_bytes: net_tx_total,
+                log_tail,
             };
 
             let req = HeartbeatRequest {

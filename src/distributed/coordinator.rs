@@ -9,12 +9,13 @@
 //! A background task monitors for timed-out workers and reschedules their work.
 
 use crate::distributed::message::{
-    BatchStatusResponse, CancelRequest, CancelResponse, CompleteRequest, CompleteResponse,
-    DashboardBatchProgress, DashboardMetrics, DashboardSummary, DashboardWorker,
-    ExportMetricsRequest, ExportMetricsResponse, HeartbeatRequest, HeartbeatResponse,
-    JobConfigRequest, JobConfigResponse, JobResultResponse, JobSpec, ManhattanAggregateSpec,
-    ManhattanScanSpec, ManhattanSource, ManhattanSpec, PhenotypeStatus, StatusResponse,
-    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
+    ActiveTaskInfo, BatchStatusResponse, CancelRequest, CancelResponse, CompleteRequest,
+    CompleteResponse, DashboardBatchProgress, DashboardMetrics, DashboardSummary, DashboardWorker,
+    EventsResponse, ExportMetricsRequest, ExportMetricsResponse, FailureRecord, FailuresResponse,
+    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, JobEvent,
+    JobResultResponse, JobSpec, ManhattanAggregateSpec, ManhattanScanSpec, ManhattanSource,
+    ManhattanSpec, PhenotypeStatus, StatusResponse, TelemetrySnapshot, WorkRequest, WorkResponse,
+    WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::manhattan::config::PlotType;
@@ -23,7 +24,7 @@ use axum::body::Body;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Configuration for the coordinator.
@@ -229,6 +230,10 @@ struct WorkerState {
     total_rows: usize,
     /// Total partitions completed by this worker
     partitions_completed: usize,
+    /// The task this worker is currently processing
+    current_task: Option<ActiveTaskInfo>,
+    /// Latest log tail received via heartbeat
+    latest_log_tail: Option<Vec<String>>,
 }
 
 /// Internal state of the coordinator.
@@ -269,9 +274,44 @@ struct CoordinatorData {
     last_error: Option<String>,
     /// Ingestion state (for IngestManhattan jobs)
     ingestion_state: Option<IngestionState>,
+    /// Ring buffer of recent events (max 1000)
+    events: VecDeque<JobEvent>,
+    /// Ring buffer of recent failures (max 100)
+    failures: VecDeque<FailureRecord>,
 }
 
 type SharedState = Arc<Mutex<CoordinatorData>>;
+
+/// Maximum events in the ring buffer
+const MAX_EVENTS: usize = 1000;
+/// Maximum failures in the ring buffer
+const MAX_FAILURES: usize = 100;
+
+impl CoordinatorData {
+    /// Log an event to the ring buffer
+    fn log_event(&mut self, event: JobEvent) {
+        self.events.push_back(event);
+        if self.events.len() > MAX_EVENTS {
+            self.events.pop_front();
+        }
+    }
+
+    /// Log a failure to the ring buffer
+    fn log_failure(&mut self, failure: FailureRecord) {
+        self.failures.push_back(failure);
+        if self.failures.len() > MAX_FAILURES {
+            self.failures.pop_front();
+        }
+    }
+
+    /// Get current timestamp in milliseconds
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+}
 
 /// Start the coordinator server using a config struct.
 ///
@@ -383,6 +423,8 @@ pub async fn run_coordinator(
         active_tasks: HashMap::new(),
         last_error: None,
         ingestion_state: None,
+        events: VecDeque::new(),
+        failures: VecDeque::new(),
     }));
 
     // Start background timeout monitor
@@ -573,6 +615,9 @@ pub async fn run_coordinator(
         .route("/api/result", get(get_job_result))
         .route("/api/binary", get(serve_binary))
         .route("/api/export-metrics", post(export_metrics))
+        .route("/api/events", get(get_events))
+        .route("/api/failures", get(get_failures))
+        .route("/api/workers/:worker_id/logs", get(get_worker_logs))
         .with_state(state);
 
     println!("Dashboard available at http://0.0.0.0:{}/dashboard", port);
@@ -750,6 +795,8 @@ fn touch_worker(data: &mut CoordinatorData, worker_id: &str) {
             metrics_history: VecDeque::new(),
             total_rows: 0,
             partitions_completed: 0,
+            current_task: None,
+            latest_log_tail: None,
         });
     worker.last_seen = Instant::now();
 }
@@ -1697,6 +1744,12 @@ async fn complete_work(
     axum::Json(req): axum::Json<CompleteRequest>,
 ) -> axum::Json<CompleteResponse> {
     let mut data = state.lock().unwrap();
+    let now_ms = CoordinatorData::now_ms();
+
+    // Clear the current_task from the worker
+    if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
+        w.current_task = None;
+    }
 
     // Check if this is a failure report
     if let Some(ref error) = req.error {
@@ -1711,6 +1764,25 @@ async fn complete_work(
             "Worker {} failed on partitions {:?}: {}",
             req.worker_id, req.partitions, error
         ));
+
+        // Log failure to ring buffer
+        data.log_failure(FailureRecord {
+            timestamp_ms: now_ms,
+            phenotype_id: None,
+            partitions: req.partitions.clone(),
+            worker_id: req.worker_id.clone(),
+            error: error.clone(),
+            retry_count: 0,
+        });
+
+        // Log event
+        data.log_event(JobEvent {
+            timestamp_ms: now_ms,
+            event_type: "failed".to_string(),
+            worker_id: Some(req.worker_id.clone()),
+            phenotype_id: None,
+            details: format!("Failed partitions {:?}: {}", req.partitions, error),
+        });
 
         // Look up task BEFORE removing (need to know what type of task failed)
         let failed_task = data.active_tasks.remove(&req.task_id);
@@ -1865,6 +1937,17 @@ async fn complete_work(
         w.partitions_completed += req.partitions.len();
     }
 
+    // Log completion event (only for successful completions, not errors)
+    if req.error.is_none() {
+        data.log_event(JobEvent {
+            timestamp_ms: now_ms,
+            event_type: "completed".to_string(),
+            worker_id: Some(req.worker_id.clone()),
+            phenotype_id: None,
+            details: format!("Completed partitions {:?} ({} rows)", req.partitions, req.rows_processed),
+        });
+    }
+
     let total = data.config.total_partitions;
     let done = data.completed_partitions.len();
 
@@ -1973,6 +2056,10 @@ async fn handle_heartbeat(
         w.metrics_history.push_back(req.telemetry.clone());
         if w.metrics_history.len() > MAX_METRICS_HISTORY {
             w.metrics_history.pop_front();
+        }
+        // Update latest log tail
+        if let Some(ref tail) = req.telemetry.log_tail {
+            w.latest_log_tail = Some(tail.clone());
         }
     }
 
@@ -2548,6 +2635,7 @@ async fn get_dashboard_workers(
             latest: w.metrics_history.back().cloned(),
             total_rows: w.total_rows,
             partitions_completed: w.partitions_completed,
+            current_task: w.current_task.clone(),
         })
         .collect();
 
@@ -2603,6 +2691,51 @@ async fn get_batch_status(
         Vec::new()
     };
     axum::Json(BatchStatusResponse { phenotypes })
+}
+
+/// Query parameters for GET /api/events
+#[derive(serde::Deserialize)]
+struct EventsQuery {
+    #[serde(default)]
+    since_ms: u64,
+}
+
+/// Handler for GET /api/events - get recent events.
+async fn get_events(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+    axum::extract::Query(query): axum::extract::Query<EventsQuery>,
+) -> axum::Json<EventsResponse> {
+    let data = state.lock().unwrap();
+    let events = data
+        .events
+        .iter()
+        .filter(|e| e.timestamp_ms > query.since_ms)
+        .cloned()
+        .collect();
+    axum::Json(EventsResponse { events })
+}
+
+/// Handler for GET /api/failures - get recent failures.
+async fn get_failures(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<FailuresResponse> {
+    let data = state.lock().unwrap();
+    let failures = data.failures.iter().cloned().collect();
+    axum::Json(FailuresResponse { failures })
+}
+
+/// Handler for GET /api/workers/:worker_id/logs - get worker log tail.
+async fn get_worker_logs(
+    axum::extract::Path(worker_id): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<Vec<String>> {
+    let data = state.lock().unwrap();
+    let logs = data
+        .worker_registry
+        .get(&worker_id)
+        .and_then(|w| w.latest_log_tail.clone())
+        .unwrap_or_else(|| vec!["No logs available for this worker".to_string()]);
+    axum::Json(logs)
 }
 
 /// Handler for GET /dashboard - serve the embedded dashboard HTML.

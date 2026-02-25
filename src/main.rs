@@ -1938,6 +1938,18 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
         PoolCommands::Cancel { name, zone } => {
             manager.cancel(&name, &zone)?;
         }
+        PoolCommands::Workers { name, zone } => {
+            manager.workers(&name, &zone)?;
+        }
+        PoolCommands::Events { name, zone, follow } => {
+            manager.events(&name, &zone, follow)?;
+        }
+        PoolCommands::Failures { name, zone } => {
+            manager.failures(&name, &zone)?;
+        }
+        PoolCommands::Logs { name, zone, worker } => {
+            manager.logs(&name, &zone, &worker)?;
+        }
     }
 
     Ok(())

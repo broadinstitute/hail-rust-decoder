@@ -845,6 +845,54 @@ pub enum PoolCommands {
         #[arg(long, default_value = "us-central1-a")]
         zone: String,
     },
+
+    /// Show real-time worker activity
+    Workers {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+    },
+
+    /// Tail the event log
+    Events {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Follow the event stream (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+    },
+
+    /// Show recent task failures
+    Failures {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+    },
+
+    /// Show tail of a specific worker's logs
+    Logs {
+        /// Name of the pool
+        name: String,
+
+        /// GCP zone where the pool is located
+        #[arg(long, default_value = "us-central1-a")]
+        zone: String,
+
+        /// Worker ID to query logs for
+        #[arg(long)]
+        worker: String,
+    },
 }
 
 /// Subcommands for running distributed service components.
