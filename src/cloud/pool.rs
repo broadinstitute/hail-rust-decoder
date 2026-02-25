@@ -229,10 +229,50 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             )))?;
 
         // Submit via curl through SSH
-        let curl_cmd = format!(
-            "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/job",
-            json_payload.replace('\'', "'\\''") // Escape single quotes for shell
-        );
+        // Determine submission method based on payload size
+        // 4KB is a safe limit for command line arguments across most systems
+        let curl_cmd = if json_payload.len() < 4096 {
+            format!(
+                "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://localhost:3000/api/job",
+                json_payload.replace('\'', "'\\''") // Escape single quotes for shell
+            )
+        } else {
+            use std::io::Write;
+            use std::time::{SystemTime, UNIX_EPOCH};
+
+            println!("{}", "  Payload large, uploading job config file...".dimmed());
+
+            // Create local temp file
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
+            let local_filename = format!("hail_job_{}.json", timestamp);
+            let mut local_path = std::env::temp_dir();
+            local_path.push(&local_filename);
+
+            {
+                let mut file = std::fs::File::create(&local_path).map_err(HailError::Io)?;
+                file.write_all(json_payload.as_bytes())
+                    .map_err(HailError::Io)?;
+            }
+
+            let remote_path = format!("/tmp/{}", local_filename);
+
+            // Upload to coordinator
+            self.provider
+                .upload_file(&local_path, &remote_path, &coordinator.name, zone)?;
+
+            // Clean up local file
+            let _ = std::fs::remove_file(&local_path);
+
+            // Construct curl command using @file syntax
+            // Also remove the remote file after successful submission
+            format!(
+                "curl -s -X POST -H 'Content-Type: application/json' -d @{} http://localhost:3000/api/job && rm {}",
+                remote_path, remote_path
+            )
+        };
 
         let mut cmd = self.provider.get_ssh_command(&coordinator.name, zone, &curl_cmd);
         cmd.stdout(std::process::Stdio::piped());
@@ -328,7 +368,6 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     ///
     /// Deletes all VMs tagged with the pool name.
     /// If `metrics_bucket` is provided, exports metrics to GCS before deletion.
-    /// Otherwise, attempts to download metrics via SSH (may timeout).
     pub fn destroy(&self, name: &str, zone: &str, metrics_bucket: Option<&str>) -> Result<()> {
         println!("{} pool '{}'...", "Destroying".red(), name.bright_white());
 
@@ -344,14 +383,10 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             println!("   - {}", inst.name.dimmed());
         }
 
-        // Try to export/download metrics database from coordinator before destroying
-        if let Some(coordinator) = instances.iter().find(|i| i.name.ends_with("-coordinator")) {
-            if let Some(bucket) = metrics_bucket {
-                // Export to GCS via API (fast and reliable)
+        // Export metrics database to GCS before destroying (if bucket provided)
+        if let Some(bucket) = metrics_bucket {
+            if let Some(coordinator) = instances.iter().find(|i| i.name.ends_with("-coordinator")) {
                 self.export_metrics_to_gcs(name, coordinator, zone, bucket);
-            } else {
-                // Fall back to SSH download (may timeout)
-                self.download_metrics_db(name, &coordinator.name, zone);
             }
         }
 
@@ -460,85 +495,6 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     "Warning:".yellow(),
                     e,
                     stdout.trim()
-                );
-            }
-        }
-    }
-
-    /// Download metrics database from coordinator VM.
-    /// Best-effort: failures are logged but don't block pool destruction.
-    /// Saves to ~/.local/share/hail-decoder/<pool-name>-<timestamp>-metrics.db
-    fn download_metrics_db(&self, pool_name: &str, coordinator_name: &str, zone: &str) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        // Use XDG data directory: ~/.local/share/hail-decoder/
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("hail-decoder");
-
-        // Create directory if it doesn't exist
-        if let Err(e) = std::fs::create_dir_all(&data_dir) {
-            println!(
-                "   {} Failed to create data directory: {}",
-                "Warning:".yellow(),
-                e
-            );
-            return;
-        }
-
-        // Generate timestamp for unique filename
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        let local_path = data_dir.join(format!("{}-{}-metrics.db", pool_name, timestamp));
-
-        println!(
-            "{} Downloading metrics database...",
-            "Saving:".cyan()
-        );
-
-        // Use gcloud compute scp to download the file
-        let result = std::process::Command::new("gcloud")
-            .args([
-                "compute",
-                "scp",
-                &format!("{}:/tmp/hail-coordinator-metrics.db", coordinator_name),
-                local_path.to_str().unwrap_or("metrics.db"),
-                "--zone",
-                zone,
-                "--quiet",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .output();
-
-        match result {
-            Ok(output) if output.status.success() => {
-                println!(
-                    "   {} Metrics saved to {}",
-                    "OK".green().bold(),
-                    local_path.display().to_string().bright_white()
-                );
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if stderr.contains("No such file") {
-                    println!("   {} No metrics database found on coordinator", "Note:".yellow());
-                } else {
-                    println!(
-                        "   {} Failed to download metrics: {}",
-                        "Warning:".yellow(),
-                        stderr.trim()
-                    );
-                }
-            }
-            Err(e) => {
-                println!(
-                    "   {} Failed to download metrics: {}",
-                    "Warning:".yellow(),
-                    e
                 );
             }
         }
