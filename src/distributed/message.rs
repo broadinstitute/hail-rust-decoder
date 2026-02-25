@@ -661,6 +661,15 @@ pub struct DashboardSummary {
     /// Build version (git commit hash)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_version: Option<String>,
+    /// Cumulative CPU-seconds spent in scan phase
+    #[serde(default)]
+    pub scan_cpu_secs: f64,
+    /// Cumulative CPU-seconds spent in aggregate phase
+    #[serde(default)]
+    pub aggregate_cpu_secs: f64,
+    /// Cumulative CPU-seconds wasted due to failures/preemption
+    #[serde(default)]
+    pub wasted_cpu_secs: f64,
 }
 
 /// Request to submit a new job to an idle coordinator.
@@ -818,6 +827,9 @@ pub struct FailureRecord {
     pub worker_id: String,
     pub error: String,
     pub retry_count: usize,
+    /// Time wasted on this failed task (milliseconds)
+    #[serde(default)]
+    pub wasted_duration_ms: u64,
 }
 
 /// Response for GET /api/events endpoint.
@@ -830,4 +842,23 @@ pub struct EventsResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FailuresResponse {
     pub failures: Vec<FailureRecord>,
+}
+
+/// Response for GET /api/dashboard/bottlenecks endpoint.
+///
+/// Provides real-time bottleneck analysis based on aggregated worker telemetry.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DashboardBottleneck {
+    /// Bottleneck identifier: "CPU", "Memory", "Network RX", "Network TX", "I/O Wait", "Mixed", "Idle"
+    pub bottleneck: String,
+    /// Human-readable description of the bottleneck state
+    pub description: String,
+    /// Average CPU utilization across active workers (0-100%)
+    pub avg_cpu_percent: f32,
+    /// Average memory utilization across active workers (0-100%)
+    pub avg_mem_percent: f32,
+    /// Average network download rate across active workers (MB/s)
+    pub avg_network_rx_mb: f64,
+    /// Average network upload rate across active workers (MB/s)
+    pub avg_network_tx_mb: f64,
 }

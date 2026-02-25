@@ -10,12 +10,12 @@
 
 use crate::distributed::message::{
     ActiveTaskInfo, BatchStatusResponse, CancelRequest, CancelResponse, CompleteRequest,
-    CompleteResponse, DashboardBatchProgress, DashboardMetrics, DashboardSummary, DashboardWorker,
-    EventsResponse, ExportMetricsRequest, ExportMetricsResponse, FailureRecord, FailuresResponse,
-    HeartbeatRequest, HeartbeatResponse, JobConfigRequest, JobConfigResponse, JobEvent,
-    JobResultResponse, JobSpec, ManhattanAggregateSpec, ManhattanScanSpec, ManhattanSource,
-    ManhattanSpec, PhenotypeStatus, StatusResponse, TelemetrySnapshot, WorkRequest, WorkResponse,
-    WorkerMetricsSeries,
+    CompleteResponse, DashboardBatchProgress, DashboardBottleneck, DashboardMetrics,
+    DashboardSummary, DashboardWorker, EventsResponse, ExportMetricsRequest, ExportMetricsResponse,
+    FailureRecord, FailuresResponse, HeartbeatRequest, HeartbeatResponse, JobConfigRequest,
+    JobConfigResponse, JobEvent, JobResultResponse, JobSpec, ManhattanAggregateSpec,
+    ManhattanScanSpec, ManhattanSource, ManhattanSpec, PhenotypeStatus, StatusResponse,
+    TelemetrySnapshot, WorkRequest, WorkResponse, WorkerMetricsSeries,
 };
 use crate::distributed::metrics_db::MetricsDb;
 use crate::manhattan::config::PlotType;
@@ -114,11 +114,15 @@ enum ActiveTask {
         partition_id: usize,
         /// Source (exome or genome)
         source: ManhattanSource,
+        /// Timestamp when this task was assigned (milliseconds since epoch)
+        started_at_ms: u64,
     },
     /// An aggregate batch task processing multiple phenotypes
     AggregateBatch {
         /// IDs of phenotypes being aggregated
         phenotype_ids: Vec<String>,
+        /// Timestamp when this task was assigned (milliseconds since epoch)
+        started_at_ms: u64,
     },
 }
 
@@ -248,6 +252,12 @@ struct CoordinatorData {
     config: CoordinatorConfig,
     /// Total rows processed (reported by workers)
     total_rows: usize,
+    /// Cumulative CPU-seconds spent in scan phase
+    scan_cpu_secs: f64,
+    /// Cumulative CPU-seconds spent in aggregate phase
+    aggregate_cpu_secs: f64,
+    /// Cumulative CPU-seconds wasted due to failures/preemption
+    wasted_cpu_secs: f64,
     /// Track retry counts per partition
     retry_counts: HashMap<usize, usize>,
     /// Partitions that permanently failed (exceeded max retries)
@@ -410,6 +420,9 @@ pub async fn run_coordinator(
             intervals: Vec::new(),
         },
         total_rows: 0,
+        scan_cpu_secs: 0.0,
+        aggregate_cpu_secs: 0.0,
+        wasted_cpu_secs: 0.0,
         retry_counts: HashMap::new(),
         failed_partitions: HashSet::new(),
         worker_registry: HashMap::new(),
@@ -607,6 +620,7 @@ pub async fn run_coordinator(
         .route("/dashboard", get(serve_dashboard))
         .route("/dashboard/phenotypes", get(serve_phenotypes_page))
         .route("/api/dashboard/summary", get(get_dashboard_summary))
+        .route("/api/dashboard/bottlenecks", get(get_dashboard_bottlenecks))
         .route("/api/dashboard/workers", get(get_dashboard_workers))
         .route("/api/dashboard/metrics", get(get_dashboard_metrics))
         .route("/api/dashboard/batch", get(get_batch_status))
@@ -758,26 +772,30 @@ fn check_timeouts(state: &SharedState, timeout_secs: u64) {
     let mut timed_out = Vec::new();
     for (part_id, (worker, start_time)) in &data.processing_partitions {
         if now.duration_since(*start_time) > timeout {
-            timed_out.push((*part_id, worker.clone()));
+            timed_out.push((*part_id, worker.clone(), *start_time));
         }
     }
 
-    for (part_id, worker) in timed_out {
+    for (part_id, worker, start_time) in timed_out {
         data.processing_partitions.remove(&part_id);
+
+        // Track the wasted time from this timeout
+        let elapsed_secs = now.duration_since(start_time).as_secs_f64();
+        data.wasted_cpu_secs += elapsed_secs;
 
         let retries = data.retry_counts.entry(part_id).or_insert(0);
         *retries += 1;
 
         if *retries > 3 {
             println!(
-                "Partition {} exceeded max retries (worker: {}). Marking as failed.",
-                part_id, worker
+                "Partition {} exceeded max retries (worker: {}). Marking as failed. (wasted {:.1}s)",
+                part_id, worker, elapsed_secs
             );
             data.failed_partitions.insert(part_id);
         } else {
             println!(
-                "Partition {} timed out (worker: {}), rescheduling (retry {})",
-                part_id, worker, retries
+                "Partition {} timed out (worker: {}), rescheduling (retry {}) (wasted {:.1}s)",
+                part_id, worker, retries, elapsed_secs
             );
             data.pending_partitions.push_front(part_id);
         }
@@ -986,6 +1004,7 @@ fn get_batch_work(
             task_id.clone(),
             ActiveTask::AggregateBatch {
                 phenotype_ids: phenotype_ids.clone(),
+                started_at_ms: CoordinatorData::now_ms(),
             },
         );
 
@@ -1061,6 +1080,7 @@ fn get_batch_work(
                 phenotype_id: phenotype_id.clone(),
                 partition_id: partitions[0],
                 source,
+                started_at_ms: CoordinatorData::now_ms(),
             },
         );
 
@@ -1575,8 +1595,14 @@ fn complete_batch_work(
         }
     };
 
+    let now_ms = CoordinatorData::now_ms();
+
     match task {
-        ActiveTask::Scan { phenotype_id, partition_id: _, source } => {
+        ActiveTask::Scan { phenotype_id, partition_id: _, source, started_at_ms } => {
+            // Track CPU time for this scan task
+            let duration_secs = (now_ms.saturating_sub(started_at_ms)) as f64 / 1000.0;
+            data.scan_cpu_secs += duration_secs;
+
             // Find the phenotype's pipeline state
             let state = match batch.active_phenotypes.get_mut(&phenotype_id) {
                 Some(state) => state,
@@ -1674,7 +1700,11 @@ fn complete_batch_work(
             }
         }
 
-        ActiveTask::AggregateBatch { phenotype_ids } => {
+        ActiveTask::AggregateBatch { phenotype_ids, started_at_ms } => {
+            // Track CPU time for this aggregate task
+            let duration_secs = (now_ms.saturating_sub(started_at_ms)) as f64 / 1000.0;
+            data.aggregate_cpu_secs += duration_secs;
+
             // Extract individual summaries if available
             let results_map: HashMap<String, serde_json::Value> =
                 if let Some(ref json) = req.result_json {
@@ -1753,10 +1783,23 @@ async fn complete_work(
 
     // Check if this is a failure report
     if let Some(ref error) = req.error {
+        // Look up task BEFORE removing (need to know what type of task failed and when it started)
+        let failed_task = data.active_tasks.remove(&req.task_id);
+
+        // Calculate wasted time based on when the task started
+        let wasted_duration_ms = match &failed_task {
+            Some(ActiveTask::Scan { started_at_ms, .. }) => now_ms.saturating_sub(*started_at_ms),
+            Some(ActiveTask::AggregateBatch { started_at_ms, .. }) => now_ms.saturating_sub(*started_at_ms),
+            None => 0,
+        };
+
+        // Track wasted CPU time
+        data.wasted_cpu_secs += (wasted_duration_ms as f64) / 1000.0;
+
         // Log the error prominently
         println!(
-            "ERROR from worker {}: partitions {:?} failed: {}",
-            req.worker_id, req.partitions, error
+            "ERROR from worker {}: partitions {:?} failed: {} (wasted {:.1}s)",
+            req.worker_id, req.partitions, error, wasted_duration_ms as f64 / 1000.0
         );
 
         // Store the error for dashboard display
@@ -1765,7 +1808,7 @@ async fn complete_work(
             req.worker_id, req.partitions, error
         ));
 
-        // Log failure to ring buffer
+        // Log failure to ring buffer (with wasted duration)
         data.log_failure(FailureRecord {
             timestamp_ms: now_ms,
             phenotype_id: None,
@@ -1773,6 +1816,7 @@ async fn complete_work(
             worker_id: req.worker_id.clone(),
             error: error.clone(),
             retry_count: 0,
+            wasted_duration_ms,
         });
 
         // Log event
@@ -1781,11 +1825,8 @@ async fn complete_work(
             event_type: "failed".to_string(),
             worker_id: Some(req.worker_id.clone()),
             phenotype_id: None,
-            details: format!("Failed partitions {:?}: {}", req.partitions, error),
+            details: format!("Failed partitions {:?}: {} (wasted {:.1}s)", req.partitions, error, wasted_duration_ms as f64 / 1000.0),
         });
-
-        // Look up task BEFORE removing (need to know what type of task failed)
-        let failed_task = data.active_tasks.remove(&req.task_id);
 
         // Remove from processing and add to failed (for non-batch jobs)
         for &part_id in &req.partitions {
@@ -1796,7 +1837,7 @@ async fn complete_work(
         // For batch jobs, handle retry logic based on task type
         if let Some(ref mut batch) = data.batch_state {
             match failed_task {
-                Some(ActiveTask::AggregateBatch { phenotype_ids }) => {
+                Some(ActiveTask::AggregateBatch { phenotype_ids, .. }) => {
                     // Re-queue aggregate tasks for retry
                     for phenotype_id in phenotype_ids {
                         let retries = batch.aggregate_retry_counts.entry(phenotype_id.clone()).or_insert(0);
@@ -1825,7 +1866,7 @@ async fn complete_work(
                         }
                     }
                 }
-                Some(ActiveTask::Scan { phenotype_id, partition_id, source }) => {
+                Some(ActiveTask::Scan { phenotype_id, source, .. }) => {
                     // Re-queue scan partitions back to the phenotype
                     if let Some(state) = batch.active_phenotypes.get_mut(&phenotype_id) {
                         // Put partitions back in pending
@@ -2615,6 +2656,123 @@ async fn get_dashboard_summary(
         last_error: data.last_error.clone(),
         batch_progress,
         build_version: Some(env!("GIT_HASH").to_string()),
+        scan_cpu_secs: data.scan_cpu_secs,
+        aggregate_cpu_secs: data.aggregate_cpu_secs,
+        wasted_cpu_secs: data.wasted_cpu_secs,
+    })
+}
+
+/// Handler for GET /api/dashboard/bottlenecks - analyze cluster bottlenecks.
+///
+/// Aggregates telemetry from active workers to identify the current limiting factor:
+/// - CPU: High CPU utilization indicates compute-bound workload (scanning/decoding)
+/// - Memory: High memory usage indicates aggregate-phase or high partition counts
+/// - Network RX: High download rate indicates GCS fetch bottleneck
+/// - Network TX: High upload rate indicates GCS write bottleneck
+/// - I/O Wait: Low CPU with active workers indicates waiting on external I/O
+async fn get_dashboard_bottlenecks(
+    axum::extract::State(state): axum::extract::State<SharedState>,
+) -> axum::Json<DashboardBottleneck> {
+    let data = state.lock().unwrap();
+
+    let mut active_count = 0;
+    let mut total_cpu = 0.0_f32;
+    let mut total_mem_pct = 0.0_f64;
+    let mut total_rx = 0.0_f64;
+    let mut total_tx = 0.0_f64;
+
+    for worker in data.worker_registry.values() {
+        if worker.status == WorkerStatus::Active {
+            if let Some(telemetry) = worker.metrics_history.back() {
+                active_count += 1;
+                total_cpu += telemetry.cpu_percent.unwrap_or(0.0);
+
+                if let (Some(used), Some(total)) =
+                    (telemetry.memory_used_bytes, telemetry.memory_total_bytes)
+                {
+                    if total > 0 {
+                        total_mem_pct += (used as f64 / total as f64) * 100.0;
+                    }
+                }
+                total_rx += telemetry.network_rx_bytes_sec.unwrap_or(0.0);
+                total_tx += telemetry.network_tx_bytes_sec.unwrap_or(0.0);
+            }
+        }
+    }
+
+    if active_count == 0 {
+        return axum::Json(DashboardBottleneck {
+            bottleneck: "Idle".to_string(),
+            description: "No active workers available for analysis".to_string(),
+            avg_cpu_percent: 0.0,
+            avg_mem_percent: 0.0,
+            avg_network_rx_mb: 0.0,
+            avg_network_tx_mb: 0.0,
+        });
+    }
+
+    let avg_cpu = total_cpu / active_count as f32;
+    let avg_mem = (total_mem_pct / active_count as f64) as f32;
+    let avg_rx_mb = (total_rx / active_count as f64) / 1_048_576.0;
+    let avg_tx_mb = (total_tx / active_count as f64) / 1_048_576.0;
+
+    let (bottleneck, description) = if avg_cpu > 85.0 {
+        (
+            "CPU".to_string(),
+            format!(
+                "CPU Bound ({:.1}% utilization) - Scanning phase or heavy decoding.",
+                avg_cpu
+            ),
+        )
+    } else if avg_mem > 85.0 {
+        (
+            "Memory".to_string(),
+            format!(
+                "Memory Bound ({:.1}% utilization) - Aggregation phase or high partition count.",
+                avg_mem
+            ),
+        )
+    } else if avg_rx_mb > 800.0 {
+        (
+            "Network RX".to_string(),
+            format!(
+                "Network Downlink Bound ({:.1} MB/s) - Saturated VM network fetching from GCS.",
+                avg_rx_mb
+            ),
+        )
+    } else if avg_tx_mb > 500.0 {
+        (
+            "Network TX".to_string(),
+            format!(
+                "Network Uplink Bound ({:.1} MB/s) - Saturated VM network writing to GCS.",
+                avg_tx_mb
+            ),
+        )
+    } else if avg_cpu < 30.0 {
+        (
+            "I/O Wait".to_string(),
+            format!(
+                "Low Utilization ({:.1}% CPU). Likely waiting on external I/O or single-threaded aggregation.",
+                avg_cpu
+            ),
+        )
+    } else {
+        (
+            "Mixed".to_string(),
+            format!(
+                "Healthy distribution. CPU: {:.1}%, Mem: {:.1}%",
+                avg_cpu, avg_mem
+            ),
+        )
+    };
+
+    axum::Json(DashboardBottleneck {
+        bottleneck,
+        description,
+        avg_cpu_percent: avg_cpu,
+        avg_mem_percent: avg_mem,
+        avg_network_rx_mb: avg_rx_mb,
+        avg_network_tx_mb: avg_tx_mb,
     })
 }
 
