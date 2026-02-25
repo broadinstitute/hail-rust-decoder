@@ -289,6 +289,134 @@
 
   .no-data { text-align: center; color: var(--text-dim); padding: 40px; font-size: 12px; }
 
+  /* Efficiency metrics section */
+  .efficiency-section { margin-bottom: 12px; }
+  .efficiency-section.hidden { display: none; }
+  .efficiency-grid {
+    display: grid;
+    grid-template-columns: 1fr 2fr;
+    gap: 12px;
+  }
+  @media (max-width: 900px) { .efficiency-grid { grid-template-columns: 1fr; } }
+
+  /* Bottleneck indicator */
+  .bottleneck-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .bottleneck-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .bottleneck-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+  .bottleneck-value {
+    font-size: 16px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 4px;
+  }
+  .bottleneck-value.cpu { background: rgba(248,81,73,0.15); color: var(--red); }
+  .bottleneck-value.memory { background: rgba(163,113,247,0.15); color: var(--purple); }
+  .bottleneck-value.network { background: rgba(219,109,40,0.15); color: var(--orange); }
+  .bottleneck-value.io-wait { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .bottleneck-value.mixed { background: rgba(63,185,80,0.15); color: var(--green); }
+  .bottleneck-value.idle { background: rgba(125,133,144,0.15); color: var(--text-dim); }
+  .bottleneck-desc { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+  .bottleneck-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .bottleneck-metric {
+    font-size: 10px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .bottleneck-metric-label { color: var(--text-dim); }
+  .bottleneck-metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* CPU time breakdown */
+  .cpu-time-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+  }
+  .cpu-time-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .cpu-time-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+  .cpu-time-total { font-size: 14px; font-weight: 600; color: var(--text); }
+  .cpu-time-bar-outer {
+    height: 24px;
+    background: rgba(255,255,255,0.05);
+    border-radius: 4px;
+    overflow: hidden;
+    display: flex;
+    margin-bottom: 10px;
+  }
+  .cpu-time-bar-segment {
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 600;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    transition: width 0.5s ease;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .cpu-time-bar-segment.scan { background: var(--cyan); }
+  .cpu-time-bar-segment.aggregate { background: var(--yellow); }
+  .cpu-time-bar-segment.wasted { background: var(--red); }
+  .cpu-time-legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .cpu-time-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .cpu-time-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+  .cpu-time-legend-dot.scan { background: var(--cyan); }
+  .cpu-time-legend-dot.aggregate { background: var(--yellow); }
+  .cpu-time-legend-dot.wasted { background: var(--red); }
+  .cpu-time-legend-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .cpu-time-legend-label { color: var(--text-dim); }
+  .preemption-overhead {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .preemption-label { color: var(--text-dim); }
+  .preemption-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .preemption-value.low { color: var(--green); }
+  .preemption-value.medium { color: var(--yellow); }
+  .preemption-value.high { color: var(--red); }
+
   /* Batch progress section */
   .batch-section { margin-bottom: 12px; }
   .batch-section.hidden { display: none; }
@@ -485,6 +613,70 @@
     <div class="stat-card">
       <div class="stat-label">Partitions</div>
       <div class="stat-value" id="total-partitions">0</div>
+    </div>
+  </div>
+
+  <!-- Efficiency metrics section (shown for batch/Manhattan jobs) -->
+  <div class="efficiency-section hidden" id="efficiency-section">
+    <h2>Cluster Efficiency</h2>
+    <div class="efficiency-grid">
+      <div class="bottleneck-card">
+        <div class="bottleneck-header">
+          <span class="bottleneck-label">Current Bottleneck</span>
+          <span class="bottleneck-value idle" id="bottleneck-value">Idle</span>
+        </div>
+        <div class="bottleneck-desc" id="bottleneck-desc">No active workers available for analysis</div>
+        <div class="bottleneck-metrics">
+          <div class="bottleneck-metric">
+            <span class="bottleneck-metric-label">Avg CPU</span>
+            <span class="bottleneck-metric-value" id="bottleneck-cpu">--%</span>
+          </div>
+          <div class="bottleneck-metric">
+            <span class="bottleneck-metric-label">Avg Memory</span>
+            <span class="bottleneck-metric-value" id="bottleneck-mem">--%</span>
+          </div>
+          <div class="bottleneck-metric">
+            <span class="bottleneck-metric-label">Avg Net RX</span>
+            <span class="bottleneck-metric-value" id="bottleneck-rx">-- MB/s</span>
+          </div>
+          <div class="bottleneck-metric">
+            <span class="bottleneck-metric-label">Avg Net TX</span>
+            <span class="bottleneck-metric-value" id="bottleneck-tx">-- MB/s</span>
+          </div>
+        </div>
+      </div>
+      <div class="cpu-time-card">
+        <div class="cpu-time-header">
+          <span class="cpu-time-label">CPU Time Breakdown</span>
+          <span class="cpu-time-total" id="cpu-time-total">0s total</span>
+        </div>
+        <div class="cpu-time-bar-outer">
+          <div class="cpu-time-bar-segment scan" id="cpu-bar-scan" style="width:0%"></div>
+          <div class="cpu-time-bar-segment aggregate" id="cpu-bar-aggregate" style="width:0%"></div>
+          <div class="cpu-time-bar-segment wasted" id="cpu-bar-wasted" style="width:0%"></div>
+        </div>
+        <div class="cpu-time-legend">
+          <div class="cpu-time-legend-item">
+            <div class="cpu-time-legend-dot scan"></div>
+            <span class="cpu-time-legend-value" id="cpu-scan-time">0s</span>
+            <span class="cpu-time-legend-label">Scan</span>
+          </div>
+          <div class="cpu-time-legend-item">
+            <div class="cpu-time-legend-dot aggregate"></div>
+            <span class="cpu-time-legend-value" id="cpu-aggregate-time">0s</span>
+            <span class="cpu-time-legend-label">Aggregate</span>
+          </div>
+          <div class="cpu-time-legend-item">
+            <div class="cpu-time-legend-dot wasted"></div>
+            <span class="cpu-time-legend-value" id="cpu-wasted-time">0s</span>
+            <span class="cpu-time-legend-label">Wasted</span>
+          </div>
+        </div>
+        <div class="preemption-overhead">
+          <span class="preemption-label">Preemption Overhead</span>
+          <span class="preemption-value low" id="preemption-overhead">0%</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -794,12 +986,30 @@ function renderWorkerCard(w, metricsData) {
     </div>`;
 }
 
+function formatCpuTime(secs) {
+  if (!secs || secs <= 0) return '0s';
+  if (secs >= 3600) return (secs / 3600).toFixed(1) + 'h';
+  if (secs >= 60) return (secs / 60).toFixed(1) + 'm';
+  return secs.toFixed(1) + 's';
+}
+
+function getBottleneckClass(bottleneck) {
+  const b = bottleneck.toLowerCase();
+  if (b === 'cpu') return 'cpu';
+  if (b === 'memory') return 'memory';
+  if (b.includes('network')) return 'network';
+  if (b.includes('i/o') || b.includes('wait')) return 'io-wait';
+  if (b === 'mixed') return 'mixed';
+  return 'idle';
+}
+
 async function update() {
   try {
-    const [summary, workers, metrics] = await Promise.all([
+    const [summary, workers, metrics, bottleneck] = await Promise.all([
       fetchJSON('/api/dashboard/summary'),
       fetchJSON('/api/dashboard/workers'),
       fetchJSON('/api/dashboard/metrics'),
+      fetchJSON('/api/dashboard/bottlenecks').catch(() => null),
     ]);
 
     // Handle idle state overlay
@@ -904,6 +1114,76 @@ async function update() {
       document.getElementById('error-message').textContent = summary.last_error;
     } else {
       errorSection.classList.add('hidden');
+    }
+
+    // Efficiency metrics section (for batch/Manhattan jobs with CPU time tracking)
+    const efficiencySection = document.getElementById('efficiency-section');
+    const hasCpuTimeData = summary.scan_cpu_secs > 0 || summary.aggregate_cpu_secs > 0 || summary.wasted_cpu_secs > 0;
+    const isBatchOrManhattan = summary.batch_progress || (summary.job_spec && (
+      summary.job_spec.type === 'Manhattan' ||
+      summary.job_spec.type === 'ManhattanBatch' ||
+      summary.job_spec.type === 'ManhattanScan' ||
+      summary.job_spec.type === 'ManhattanAggregate'
+    ));
+
+    if (hasCpuTimeData || isBatchOrManhattan) {
+      efficiencySection.classList.remove('hidden');
+
+      // Update bottleneck indicator
+      if (bottleneck) {
+        const bnValue = document.getElementById('bottleneck-value');
+        bnValue.textContent = bottleneck.bottleneck;
+        bnValue.className = 'bottleneck-value ' + getBottleneckClass(bottleneck.bottleneck);
+        document.getElementById('bottleneck-desc').textContent = bottleneck.description;
+        document.getElementById('bottleneck-cpu').textContent = bottleneck.avg_cpu_percent.toFixed(1) + '%';
+        document.getElementById('bottleneck-mem').textContent = bottleneck.avg_mem_percent.toFixed(1) + '%';
+        document.getElementById('bottleneck-rx').textContent = bottleneck.avg_network_rx_mb.toFixed(1) + ' MB/s';
+        document.getElementById('bottleneck-tx').textContent = bottleneck.avg_network_tx_mb.toFixed(1) + ' MB/s';
+      }
+
+      // Update CPU time breakdown
+      const scanSecs = summary.scan_cpu_secs || 0;
+      const aggSecs = summary.aggregate_cpu_secs || 0;
+      const wastedSecs = summary.wasted_cpu_secs || 0;
+      const totalSecs = scanSecs + aggSecs + wastedSecs;
+
+      document.getElementById('cpu-time-total').textContent = formatCpuTime(totalSecs) + ' total';
+      document.getElementById('cpu-scan-time').textContent = formatCpuTime(scanSecs);
+      document.getElementById('cpu-aggregate-time').textContent = formatCpuTime(aggSecs);
+      document.getElementById('cpu-wasted-time').textContent = formatCpuTime(wastedSecs);
+
+      // Update stacked bar
+      if (totalSecs > 0) {
+        const scanPct = (scanSecs / totalSecs) * 100;
+        const aggPct = (aggSecs / totalSecs) * 100;
+        const wastedPct = (wastedSecs / totalSecs) * 100;
+        document.getElementById('cpu-bar-scan').style.width = scanPct + '%';
+        document.getElementById('cpu-bar-aggregate').style.width = aggPct + '%';
+        document.getElementById('cpu-bar-wasted').style.width = wastedPct + '%';
+
+        // Show percentage labels if segment is wide enough
+        const scanBar = document.getElementById('cpu-bar-scan');
+        const aggBar = document.getElementById('cpu-bar-aggregate');
+        const wastedBar = document.getElementById('cpu-bar-wasted');
+        scanBar.textContent = scanPct > 10 ? scanPct.toFixed(0) + '%' : '';
+        aggBar.textContent = aggPct > 10 ? aggPct.toFixed(0) + '%' : '';
+        wastedBar.textContent = wastedPct > 10 ? wastedPct.toFixed(0) + '%' : '';
+      }
+
+      // Calculate preemption overhead
+      const usefulSecs = scanSecs + aggSecs;
+      const overheadPct = usefulSecs > 0 ? (wastedSecs / usefulSecs) * 100 : 0;
+      const overheadEl = document.getElementById('preemption-overhead');
+      overheadEl.textContent = overheadPct.toFixed(1) + '%';
+      if (overheadPct < 5) {
+        overheadEl.className = 'preemption-value low';
+      } else if (overheadPct < 15) {
+        overheadEl.className = 'preemption-value medium';
+      } else {
+        overheadEl.className = 'preemption-value high';
+      }
+    } else {
+      efficiencySection.classList.add('hidden');
     }
 
     // Batch progress section (for batch Manhattan jobs)
