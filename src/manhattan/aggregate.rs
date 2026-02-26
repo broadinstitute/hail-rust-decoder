@@ -131,6 +131,12 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
 
     let output_base = spec.output_path.trim_end_matches('/');
 
+    // Create plots directory for consolidated output
+    let plots_dir = format!("{}/plots", output_base);
+    if !is_cloud_path(&plots_dir) {
+        std::fs::create_dir_all(&plots_dir)?;
+    }
+
     // Resolve styles for compositing
     let exome_style = spec.styling.resolve(PlotType::Exome);
     let genome_style = spec.styling.resolve(PlotType::Genome);
@@ -249,6 +255,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
         // Render gene Manhattan plot with styling
         let gene_style = spec.styling.resolve(PlotType::GeneBurden);
         if !scan_result.plot_points.is_empty() {
+            // Render combined/legacy gene Manhattan plot
             let gene_png = render_gene_manhattan_styled(
                 &scan_result.plot_points,
                 spec.width,
@@ -258,15 +265,24 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
                 Some(&gene_style),
             )?;
 
-            let png_path = format!("{}/gene_manhattan.png", output_base);
-            if is_cloud_path(&png_path) {
-                use crate::io::CloudWriter;
-                use std::io::Write;
-                let mut writer = CloudWriter::new(&png_path)?;
-                writer.write_all(&gene_png)?;
-                writer.finish()?;
-            } else {
-                std::fs::write(&png_path, &gene_png)?;
+            let png_path = format!("{}/plots/gene_manhattan.png", output_base);
+            write_locus_file(&png_path, &gene_png)?;
+
+            // Render grouped plots for each (annotation, MAF) combination
+            for ((annotation, maf_str), points) in &scan_result.plot_points_by_group {
+                if points.is_empty() {
+                    continue;
+                }
+                let group_png = render_gene_manhattan_styled(
+                    points,
+                    spec.width,
+                    spec.height,
+                    spec.gene_threshold,
+                    &layout,
+                    Some(&gene_style),
+                )?;
+                let group_path = format!("{}/plots/gene_manhattan_{}_maf{}.png", output_base, annotation, maf_str);
+                write_locus_file(&group_path, &group_png)?;
             }
         }
 
@@ -397,7 +413,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
         manhattans: ManifestManhattans {
             exome: if spec.exome_results.is_some() {
                 Some(ManifestManhattan {
-                    png: format!("{}/exome_manhattan.png", output_base),
+                    png: format!("{}/plots/exome_manhattan.png", output_base),
                     count: exome_count,
                 })
             } else {
@@ -405,7 +421,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             },
             genome: if spec.genome_results.is_some() {
                 Some(ManifestManhattan {
-                    png: format!("{}/genome_manhattan.png", output_base),
+                    png: format!("{}/plots/genome_manhattan.png", output_base),
                     count: genome_count,
                 })
             } else {
@@ -413,7 +429,7 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
             },
             gene: if spec.gene_burden.is_some() {
                 Some(ManifestManhattan {
-                    png: format!("{}/gene_manhattan.png", output_base),
+                    png: format!("{}/plots/gene_manhattan.png", output_base),
                     count: gene_count,
                 })
             } else {
@@ -498,7 +514,8 @@ fn composite_source_pngs(
     background: &BackgroundStyle,
 ) -> Result<u64> {
     let parts_dir = format!("{}/{}", output_base, source);
-    let output_path = format!("{}/{}_manhattan.png", output_base, source);
+    // Output to plots/ subdirectory
+    let output_path = format!("{}/plots/{}_manhattan.png", output_base, source);
 
     // Use existing composite function with background style
     // Note: threshold is not used for compositing, pass 0.0

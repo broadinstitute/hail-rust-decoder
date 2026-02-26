@@ -96,6 +96,10 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     let output_base = Path::new(config.output.as_deref().unwrap_or("."));
     fs::create_dir_all(output_base)?;
 
+    // Create plots directory for consolidated output
+    let plots_dir = output_base.join("plots");
+    fs::create_dir_all(&plots_dir)?;
+
     // 1. Load Gene Map if provided (used for locus gene tracks)
     let _gene_map = if let Some(path) = &config.genes {
         println!("Loading genes from: {}", path);
@@ -115,6 +119,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     let mut interest_regions = IntervalList::new();
     let mut sig_genes: Vec<SignificantGene> = Vec::new();
     let mut gene_plot_points: Vec<crate::manhattan::data::GenePlotPoint> = Vec::new();
+    let mut gene_plot_points_by_group: HashMap<(String, String), Vec<crate::manhattan::data::GenePlotPoint>> = HashMap::new();
 
     if run_scan && config.gene_burden.is_some() {
         let burden_path = config.gene_burden.as_ref().unwrap();
@@ -149,6 +154,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
 
         sig_genes = scan_result.significant_genes;
         gene_plot_points = scan_result.plot_points;
+        gene_plot_points_by_group = scan_result.plot_points_by_group;
 
         // Add significant gene regions to interest regions
         for gene in &sig_genes {
@@ -200,6 +206,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     // 2b. Render Gene Manhattan plot (now that we have the layout)
     if run_aggregate && !gene_plot_points.is_empty() {
         println!("Rendering gene Manhattan plot ({} genes)...", gene_plot_points.len());
+        // Render combined/legacy gene Manhattan
         let gene_png = render_gene_manhattan(
             &gene_plot_points,
             config.width,
@@ -207,7 +214,23 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             config.gene_threshold,
             &chrom_layout,
         )?;
-        fs::write(output_base.join("gene_manhattan.png"), &gene_png)?;
+        fs::write(plots_dir.join("gene_manhattan.png"), &gene_png)?;
+
+        // Render grouped gene Manhattan plots for each (annotation, MAF) combination
+        for ((annotation, maf_str), points) in &gene_plot_points_by_group {
+            if points.is_empty() {
+                continue;
+            }
+            let group_png = render_gene_manhattan(
+                points,
+                config.width,
+                config.height,
+                config.gene_threshold,
+                &chrom_layout,
+            )?;
+            let filename = format!("gene_manhattan_{}_maf{}.png", annotation, maf_str);
+            fs::write(plots_dir.join(filename), &group_png)?;
+        }
     }
 
     // 3. Scan Exomes (if provided) - NO annotations during main scan for speed
@@ -225,7 +248,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                 &interest_regions,
                 &mut exome_buffer,
                 &mut sig_writer,
-                output_base.join("exome_manhattan.png").to_str().unwrap(),
+                plots_dir.join("exome_manhattan.png").to_str().unwrap(),
             )?;
         }
 
@@ -243,7 +266,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                 &interest_regions,
                 &mut genome_buffer,
                 &mut sig_writer,
-                output_base.join("genome_manhattan.png").to_str().unwrap(),
+                plots_dir.join("genome_manhattan.png").to_str().unwrap(),
             )?;
         }
     }

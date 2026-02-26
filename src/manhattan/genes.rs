@@ -431,6 +431,8 @@ pub struct GeneScanResult {
     pub significant_genes: Vec<SignificantGene>,
     /// Plot points (one per gene, using best p-value) for Manhattan rendering
     pub plot_points: Vec<GenePlotPoint>,
+    /// Plot points grouped by (annotation, MAF) for combinatorial gene burden plots
+    pub plot_points_by_group: HashMap<(String, String), Vec<GenePlotPoint>>,
 }
 
 /// Internal tracker for gene-level statistics during scanning.
@@ -442,6 +444,8 @@ struct GeneTracker {
     best_pvalue: f64,
     best_test_desc: String,
     sig_tests: Vec<SignificantTest>,
+    /// Best p-value per (annotation, MAF) group: maps (annotation, maf_str) -> (best_pvalue, best_test_desc)
+    group_best_pvalues: HashMap<(String, String), (f64, String)>,
 }
 
 /// Scan a gene burden table, export ALL rows to Parquet, and collect plotting data.
@@ -597,12 +601,22 @@ pub fn scan_gene_burden_to_parquet(
                     best_pvalue: 1.0,
                     best_test_desc: String::new(),
                     sig_tests: Vec::new(),
+                    group_best_pvalues: HashMap::new(),
                 });
 
-                // Update best p-value if this is lower
+                // Update best p-value globally if this is lower
                 if min_p < tracker.best_pvalue {
                     tracker.best_pvalue = min_p;
                     tracker.best_test_desc = format!("{}:{}:maf{:.4}", annotation, best_field, max_maf);
+                }
+
+                // Update best p-value per (annotation, max_maf) group
+                let maf_str = max_maf.to_string();
+                let group_key = (annotation.clone(), maf_str.clone());
+                let group_entry = tracker.group_best_pvalues.entry(group_key).or_insert((1.0, String::new()));
+                if min_p < group_entry.0 {
+                    group_entry.0 = min_p;
+                    group_entry.1 = format!("{}:{}:maf{}", annotation, best_field, maf_str);
                 }
 
                 // Track significant tests
@@ -624,9 +638,10 @@ pub fn scan_gene_burden_to_parquet(
     // Convert tracking to results
     let mut significant_genes = Vec::new();
     let mut plot_points = Vec::new();
+    let mut plot_points_by_group: HashMap<(String, String), Vec<GenePlotPoint>> = HashMap::new();
 
     for (gene_id, tracker) in gene_tracking {
-        // Create plot point for every gene with valid p-value
+        // Create plot point for every gene with valid p-value (combined/legacy plot)
         plot_points.push(GenePlotPoint {
             gene_id: gene_id.clone(),
             gene_symbol: tracker.symbol.clone(),
@@ -635,6 +650,18 @@ pub fn scan_gene_burden_to_parquet(
             best_pvalue: tracker.best_pvalue,
             best_test: tracker.best_test_desc.clone(),
         });
+
+        // Populate grouped plot points for each (annotation, MAF) combination
+        for (group_key, (best_p, best_desc)) in &tracker.group_best_pvalues {
+            plot_points_by_group.entry(group_key.clone()).or_default().push(GenePlotPoint {
+                gene_id: gene_id.clone(),
+                gene_symbol: tracker.symbol.clone(),
+                contig: tracker.contig.clone(),
+                position: tracker.start,
+                best_pvalue: *best_p,
+                best_test: best_desc.clone(),
+            });
+        }
 
         // Only include genes with significant tests in significant_genes list
         if !tracker.sig_tests.is_empty() {
@@ -654,6 +681,7 @@ pub fn scan_gene_burden_to_parquet(
         total_rows,
         significant_genes,
         plot_points,
+        plot_points_by_group,
     })
 }
 

@@ -259,6 +259,49 @@ fn file_exists(path: &str) -> Result<bool> {
     }
 }
 
+/// List PNG files in a directory (local or cloud).
+fn list_png_files(dir_path: &str) -> Result<Vec<String>> {
+    if is_cloud_path(dir_path) {
+        let dir = dir_path.trim_end_matches('/');
+        let output = std::process::Command::new("gsutil")
+            .args(["ls", &format!("{}/*.png", dir)])
+            .output()
+            .map_err(|e| {
+                crate::HailError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to run gsutil: {}", e),
+                ))
+            })?;
+
+        if !output.status.success() {
+            // No PNG files found
+            return Ok(vec![]);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let files: Vec<String> = stdout
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Ok(files)
+    } else {
+        if !std::path::Path::new(dir_path).exists() {
+            return Ok(vec![]);
+        }
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir_path)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".png") {
+                    files.push(entry.path().to_string_lossy().to_string());
+                }
+            }
+        }
+        Ok(files)
+    }
+}
+
 /// List subdirectories in a directory (local or cloud).
 fn list_subdirectories(dir_path: &str) -> Result<Vec<String>> {
     if is_cloud_path(dir_path) {
@@ -482,29 +525,47 @@ fn ingest_plots(
     base_path: &str,
     client: &ClickHouseClient,
 ) -> Result<usize> {
-    // Whole-genome plot types
-    let plot_types = vec![
-        ("exome_manhattan", "exome_manhattan.png"),
-        ("genome_manhattan", "genome_manhattan.png"),
-        ("gene_manhattan", "gene_manhattan.png"),
-    ];
-
     let mut phenotypes = StringBuilder::new();
     let mut ancestries = StringBuilder::new();
     let mut types = StringBuilder::new();
     let mut uris = StringBuilder::new();
     let mut count = 0;
 
-    // Add whole-genome plots
-    for (plot_type, filename) in plot_types {
+    // Dynamically discover PNG files from the plots/ directory
+    let plots_dir = format!("{}/plots", base_path);
+    if let Ok(png_files) = list_png_files(&plots_dir) {
+        for uri in png_files {
+            // Extract just the filename without extension for the plot_type
+            if let Some(filename) = uri.rsplit('/').next() {
+                let plot_type = filename.trim_end_matches(".png");
+                phenotypes.append_value(phenotype_id);
+                ancestries.append_value(ancestry);
+                types.append_value(plot_type);
+                uris.append_value(&uri);
+                count += 1;
+            }
+        }
+    }
+
+    // Fallback: Also check for legacy locations (direct in base_path) for backwards compatibility
+    let legacy_plot_types = vec![
+        ("exome_manhattan", "exome_manhattan.png"),
+        ("genome_manhattan", "genome_manhattan.png"),
+        ("gene_manhattan", "gene_manhattan.png"),
+    ];
+    for (plot_type, filename) in legacy_plot_types {
         let uri = format!("{}/{}", base_path, filename);
-        // Only include if file exists
+        // Only include if file exists and wasn't already found in plots/
         if file_exists(&uri).unwrap_or(false) {
-            phenotypes.append_value(phenotype_id);
-            ancestries.append_value(ancestry);
-            types.append_value(plot_type);
-            uris.append_value(&uri);
-            count += 1;
+            // Check if we already have this plot_type
+            // (simple check - if plots/ dir had files, skip legacy)
+            if count == 0 {
+                phenotypes.append_value(phenotype_id);
+                ancestries.append_value(ancestry);
+                types.append_value(plot_type);
+                uris.append_value(&uri);
+                count += 1;
+            }
         }
     }
 
