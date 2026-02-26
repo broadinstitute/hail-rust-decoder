@@ -125,6 +125,14 @@ pub struct JobSettings {
     /// Field name for p-value in source tables
     #[serde(default = "default_y_field")]
     pub y_field: String,
+
+    /// Run only the highly-parallel scan phase
+    #[serde(default)]
+    pub scan_only: bool,
+
+    /// Run only the memory-intensive aggregate phase
+    #[serde(default)]
+    pub aggregate_only: bool,
 }
 
 /// Settings for ClickHouse ingestion.

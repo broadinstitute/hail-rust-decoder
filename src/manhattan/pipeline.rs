@@ -56,6 +56,10 @@ pub struct PipelineConfig {
     pub width: u32,
     pub height: u32,
     pub y_field: String,
+
+    // Execution modes
+    pub scan_only: bool,
+    pub aggregate_only: bool,
 }
 
 impl Default for PipelineConfig {
@@ -78,6 +82,8 @@ impl Default for PipelineConfig {
             width: 3000,
             height: 800,
             y_field: "Pvalue".to_string(),
+            scan_only: false,
+            aggregate_only: false,
         }
     }
 }
@@ -98,12 +104,20 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
         None
     };
 
+    let run_scan = !config.aggregate_only;
+    let run_aggregate = !config.scan_only;
+
+    if config.scan_only || config.aggregate_only {
+        println!("Note: --scan-only and --aggregate-only modes skip certain local processing steps.");
+    }
+
     // 2. Process Gene Burden (if provided)
     let mut interest_regions = IntervalList::new();
     let mut sig_genes: Vec<SignificantGene> = Vec::new();
     let mut gene_plot_points: Vec<crate::manhattan::data::GenePlotPoint> = Vec::new();
 
-    if let Some(burden_path) = &config.gene_burden {
+    if run_scan && config.gene_burden.is_some() {
+        let burden_path = config.gene_burden.as_ref().unwrap();
         println!("Processing gene burden: {}", burden_path);
 
         // Extract phenotype from output path
@@ -184,7 +198,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     };
 
     // 2b. Render Gene Manhattan plot (now that we have the layout)
-    if !gene_plot_points.is_empty() {
+    if run_aggregate && !gene_plot_points.is_empty() {
         println!("Rendering gene Manhattan plot ({} genes)...", gene_plot_points.len());
         let gene_png = render_gene_manhattan(
             &gene_plot_points,
@@ -197,39 +211,41 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     }
 
     // 3. Scan Exomes (if provided) - NO annotations during main scan for speed
-    if let Some(res_path) = &config.exome {
-        println!("Scanning Exome variants: {}", res_path);
+    if run_scan {
+        if let Some(res_path) = &config.exome {
+            println!("Scanning Exome variants: {}", res_path);
 
-        scan_variant_table(
-            res_path,
-            None, // Skip annotations during main scan
-            VariantSource::Exome,
-            &chrom_layout,
-            &y_scale,
-            config,
-            &interest_regions,
-            &mut exome_buffer,
-            &mut sig_writer,
-            output_base.join("exome_manhattan.png").to_str().unwrap(),
-        )?;
-    }
+            scan_variant_table(
+                res_path,
+                None, // Skip annotations during main scan
+                VariantSource::Exome,
+                &chrom_layout,
+                &y_scale,
+                config,
+                &interest_regions,
+                &mut exome_buffer,
+                &mut sig_writer,
+                output_base.join("exome_manhattan.png").to_str().unwrap(),
+            )?;
+        }
 
-    // 4. Scan Genomes (if provided) - NO annotations during main scan for speed
-    if let Some(res_path) = &config.genome {
-        println!("Scanning Genome variants: {}", res_path);
+        // 4. Scan Genomes (if provided) - NO annotations during main scan for speed
+        if let Some(res_path) = &config.genome {
+            println!("Scanning Genome variants: {}", res_path);
 
-        scan_variant_table(
-            res_path,
-            None, // Skip annotations during main scan
-            VariantSource::Genome,
-            &chrom_layout,
-            &y_scale,
-            config,
-            &interest_regions,
-            &mut genome_buffer,
-            &mut sig_writer,
-            output_base.join("genome_manhattan.png").to_str().unwrap(),
-        )?;
+            scan_variant_table(
+                res_path,
+                None, // Skip annotations during main scan
+                VariantSource::Genome,
+                &chrom_layout,
+                &y_scale,
+                config,
+                &interest_regions,
+                &mut genome_buffer,
+                &mut sig_writer,
+                output_base.join("genome_manhattan.png").to_str().unwrap(),
+            )?;
+        }
     }
 
     // 4b. Enrich buffered variants with annotations (targeted lookups)
@@ -250,31 +266,32 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
     let sig_count = sig_writer.finish()?;
     println!("Wrote {} significant hits to significant.parquet", sig_count);
 
-    // 5. Compute Locus Regions
-    println!("Defining locus regions...");
+    if run_aggregate {
+        // 5. Compute Locus Regions
+        println!("Defining locus regions...");
 
-    // We need to re-read significant positions to define regions since we streamed them to parquet
-    // Ideally we would have tracked them in memory too, but let's read back from the file we just wrote
-    // or just rely on gene regions if variants are too many.
-    // For local pipeline, we can just use the buffered variants that are significant?
-    // No, buffered variants are only for specific regions.
+        // We need to re-read significant positions to define regions since we streamed them to parquet
+        // Ideally we would have tracked them in memory too, but let's read back from the file we just wrote
+        // or just rely on gene regions if variants are too many.
+        // For local pipeline, we can just use the buffered variants that are significant?
+        // No, buffered variants are only for specific regions.
 
-    // Let's re-read significant hits for region definition
-    // Note: For large datasets this might be slow, but it's consistent with distributed flow
-    use crate::manhattan::aggregate::extract_sig_positions;
-    let sig_path_str = sig_path.to_str().unwrap();
-    if let Ok(positions) = extract_sig_positions(sig_path_str) {
-        for pos in positions {
-            let start = (pos.position - config.locus_window).max(1);
-            let end = pos.position + config.locus_window;
-            interest_regions.add(pos.contig, start, end);
+        // Let's re-read significant hits for region definition
+        // Note: For large datasets this might be slow, but it's consistent with distributed flow
+        use crate::manhattan::aggregate::extract_sig_positions;
+        let sig_path_str = sig_path.to_str().unwrap();
+        if let Ok(positions) = extract_sig_positions(sig_path_str) {
+            for pos in positions {
+                let start = (pos.position - config.locus_window).max(1);
+                let end = pos.position + config.locus_window;
+                interest_regions.add(pos.contig, start, end);
+            }
         }
-    }
 
-    interest_regions.optimize();
-    println!("Total locus regions: {}", interest_regions.len());
+        interest_regions.optimize();
+        println!("Total locus regions: {}", interest_regions.len());
 
-    // 6. Generate Locus Outputs
+        // 6. Generate Locus Outputs
     let loci_dir = output_base.join("loci");
     if config.locus_plots {
         fs::create_dir_all(&loci_dir)?;
@@ -418,31 +435,32 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             }
         }
 
-    // Write loci parquet files
-    if !locus_definitions.is_empty() {
-        println!("Writing loci.parquet...");
-        let mut writer = LocusDefinitionWriter::new(output_base.join("loci.parquet").to_str().unwrap())?;
-        writer.write_batch(&locus_definitions)?;
-        writer.finish()?;
+        // Write loci parquet files
+        if !locus_definitions.is_empty() {
+            println!("Writing loci.parquet...");
+            let mut writer = LocusDefinitionWriter::new(output_base.join("loci.parquet").to_str().unwrap())?;
+            writer.write_batch(&locus_definitions)?;
+            writer.finish()?;
 
-        println!("Writing loci_variants.parquet...");
-        let mut writer = LocusVariantWriter::new(output_base.join("loci_variants.parquet").to_str().unwrap())?;
-        writer.write_batch(&locus_variants)?;
-        writer.finish()?;
+            println!("Writing loci_variants.parquet...");
+            let mut writer = LocusVariantWriter::new(output_base.join("loci_variants.parquet").to_str().unwrap())?;
+            writer.write_batch(&locus_variants)?;
+            writer.finish()?;
+        }
+
+        // Write summary
+        let summary = serde_json::json!({
+            "significant_genes": sig_genes.len(),
+            "significant_variants": sig_count,
+            "exome_variants_buffered": exome_buffer.len(),
+            "genome_variants_buffered": genome_buffer.len(),
+            "locus_regions": interest_regions.len(),
+        });
+        fs::write(
+            output_base.join("summary.json"),
+            serde_json::to_string_pretty(&summary)?,
+        )?;
     }
-
-    // Write summary
-    let summary = serde_json::json!({
-        "significant_genes": sig_genes.len(),
-        "significant_variants": sig_count,
-        "exome_variants_buffered": exome_buffer.len(),
-        "genome_variants_buffered": genome_buffer.len(),
-        "locus_regions": interest_regions.len(),
-    });
-    fs::write(
-        output_base.join("summary.json"),
-        serde_json::to_string_pretty(&summary)?,
-    )?;
 
     println!("Pipeline complete. Output: {:?}", output_base);
     Ok(())

@@ -2175,6 +2175,8 @@ fn run_manhattan(args: ManhattanArgs) -> Result<()> {
             width: args.width,
             height: args.height,
             y_field: args.y_field.clone(),
+            scan_only: args.scan_only,
+            aggregate_only: args.aggregate_only,
         };
 
         return run_integrated_pipeline(&config);
@@ -2655,20 +2657,21 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
 
     println!();
     println!("{}", "Ready for Submission".green().bold());
+    let mode_flag = if args.scan_only { " \\\n      --scan-only" } else if args.aggregate_only { " \\\n      --aggregate-only" } else { "" };
     if let Some(ref config_path) = args.config {
         println!(
             "  To submit this batch to a pool, run:\n    \
              hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
-             --config {}",
-            config_path
+             --config {}{}",
+            config_path, mode_flag
         );
     } else {
         println!(
             "  To submit this batch to a pool, run:\n    \
              hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
              --assets-json {} \\\n      \
-             --output-dir {}",
-            assets_json, output_dir
+             --output-dir {}{}",
+            assets_json, output_dir, mode_flag
         );
     }
 

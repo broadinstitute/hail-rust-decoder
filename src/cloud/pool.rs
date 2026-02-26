@@ -207,7 +207,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // Use provided batch_size or fall back to sensible defaults per job type
         // Larger batches let workers parallelize with rayon
         let batch_size = batch_size.or_else(|| match job_spec {
-            crate::distributed::message::JobSpec::Manhattan(_) => Some(40),
+            crate::distributed::message::JobSpec::Manhattan { .. } => Some(40),
             crate::distributed::message::JobSpec::ExportParquet { .. } => Some(100),
             _ => Some(50),
         });
@@ -1640,7 +1640,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         }
 
         // For Manhattan jobs, compute the layout and partition counts for all tables
-        if let crate::distributed::message::JobSpec::Manhattan(ref mut spec) = job_spec {
+        if let crate::distributed::message::JobSpec::Manhattan { spec: ref mut spec, .. } = job_spec {
             use crate::manhattan::layout::{ChromosomeLayout, YScale};
             use crate::manhattan::reference::get_contig_lengths;
 
@@ -1673,7 +1673,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         }
 
         // For ManhattanBatch jobs, compute layout and partition counts for all unique tables
-        if let crate::distributed::message::JobSpec::ManhattanBatch { specs: ref mut specs } = job_spec {
+        if let crate::distributed::message::JobSpec::ManhattanBatch { specs: ref mut specs, .. } = job_spec {
             use crate::manhattan::layout::{ChromosomeLayout, YScale};
             use crate::manhattan::reference::get_contig_lengths;
             use std::collections::HashMap;
@@ -2574,6 +2574,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut width: u32 = 3000;
         let mut height: u32 = 800;
         let mut y_field = "Pvalue".to_string();
+        let mut scan_only = false;
+        let mut aggregate_only = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -2706,6 +2708,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                         i += 1;
                     }
                 }
+                "--scan-only" => {
+                    scan_only = true;
+                    i += 1;
+                }
+                "--aggregate-only" => {
+                    aggregate_only = true;
+                    i += 1;
+                }
                 _ => {
                     i += 1;
                 }
@@ -2764,7 +2774,15 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             styling: crate::manhattan::config::ManhattanConfig::default(),
         };
 
-        Ok((input_path, JobSpec::Manhattan(spec), Vec::new(), Vec::new()))
+        let mode = if scan_only {
+            crate::distributed::message::ExecutionMode::ScanOnly
+        } else if aggregate_only {
+            crate::distributed::message::ExecutionMode::AggregateOnly
+        } else {
+            crate::distributed::message::ExecutionMode::Full
+        };
+
+        Ok((input_path, JobSpec::Manhattan { spec, mode }, Vec::new(), Vec::new()))
     }
 
     /// Parse a `manhattan-batch` command into a ManhattanBatch job.
@@ -2796,6 +2814,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         let mut width: Option<u32> = None;
         let mut height: Option<u32> = None;
         let mut y_field: Option<String> = None;
+        let mut scan_only = false;
+        let mut aggregate_only = false;
 
         let mut i = 0;
         while i < args.len() {
@@ -2954,6 +2974,14 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                         i += 1;
                     }
                 }
+                "--scan-only" => {
+                    scan_only = true;
+                    i += 1;
+                }
+                "--aggregate-only" => {
+                    aggregate_only = true;
+                    i += 1;
+                }
                 _ => {
                     i += 1;
                 }
@@ -3057,7 +3085,18 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "batch".to_string());
 
-        Ok((primary_input, JobSpec::ManhattanBatch { specs }, Vec::new(), Vec::new()))
+        let scan_only = scan_only || job_config.job.scan_only;
+        let aggregate_only = aggregate_only || job_config.job.aggregate_only;
+
+        let mode = if scan_only {
+            crate::distributed::message::ExecutionMode::ScanOnly
+        } else if aggregate_only {
+            crate::distributed::message::ExecutionMode::AggregateOnly
+        } else {
+            crate::distributed::message::ExecutionMode::Full
+        };
+
+        Ok((primary_input, JobSpec::ManhattanBatch { specs, mode }, Vec::new(), Vec::new()))
     }
 
     /// Parse a `loci` command into a LociSpec job.

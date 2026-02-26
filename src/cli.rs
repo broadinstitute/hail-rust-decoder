@@ -448,6 +448,14 @@ pub struct ManhattanArgs {
     #[arg(long, default_value = "1")]
     pub min_variants_per_locus: usize,
 
+    /// Run only the highly-parallel scan phase (outputs partial PNGs and sig.parquet)
+    #[arg(long, conflicts_with = "aggregate_only")]
+    pub scan_only: bool,
+
+    /// Run only the memory-intensive aggregate phase (composites PNGs, generates locus plots)
+    #[arg(long, conflicts_with = "scan_only")]
+    pub aggregate_only: bool,
+
     // -- Distributed Aggregation --
     /// Path to directory containing distributed scan shards (part-*.json files).
     /// When specified, aggregates shards and renders final PNG instead of scanning tables.
@@ -550,6 +558,14 @@ pub struct ManhattanBatchArgs {
     /// Minimum number of significant variants required to form a locus
     #[arg(long, default_value = "1")]
     pub min_variants_per_locus: usize,
+
+    /// Run only the highly-parallel scan phase
+    #[arg(long, conflicts_with = "aggregate_only")]
+    pub scan_only: bool,
+
+    /// Run only the memory-intensive aggregate phase
+    #[arg(long, conflicts_with = "scan_only")]
+    pub aggregate_only: bool,
 
     /// Image width in pixels
     #[arg(long, default_value = "3000")]

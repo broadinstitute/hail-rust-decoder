@@ -129,6 +129,8 @@ enum ActiveTask {
 /// State for managing a batch of Manhattan phenotypes.
 #[derive(Debug)]
 struct BatchState {
+    /// Execution mode for the batch
+    mode: crate::distributed::message::ExecutionMode,
     /// Tracking status for all phenotypes (for dashboard)
     phenotype_statuses: HashMap<String, PhenotypeStatus>,
     /// Start times for phenotypes (for duration calculation)
@@ -185,6 +187,8 @@ const AGGREGATE_BATCH_SIZE: usize = 10;
 /// State for tracking Manhattan pipeline phases.
 #[derive(Debug)]
 struct ManhattanPipelineState {
+    /// Execution mode
+    mode: crate::distributed::message::ExecutionMode,
     /// Current phase
     phase: ManhattanPhase,
     /// Original ManhattanSpec from job submission
@@ -545,7 +549,7 @@ pub async fn run_coordinator(
                 // For Manhattan jobs, run the composite step to merge partial PNGs
                 let manhattan_spec = {
                     let data = monitor_state.lock().unwrap();
-                    if let Some(JobSpec::Manhattan(ref spec)) = data.config.job_spec {
+                    if let Some(JobSpec::Manhattan { ref spec, .. }) = data.config.job_spec {
                         Some(spec.clone())
                     } else {
                         None
@@ -867,6 +871,7 @@ fn activate_next_phenotypes(batch: &mut BatchState) {
 
         // Initialize the pipeline state
         let pipeline_state = ManhattanPipelineState {
+            mode: batch.mode,
             phase: ManhattanPhase::Scan,
             original_spec: spec.clone(),
             layout: spec.layout.clone(),
@@ -1337,10 +1342,17 @@ fn get_manhattan_work(
                     }
                     return axum::Json(WorkResponse::Wait);
                 } else {
-                    // All scan work complete, transition to Aggregate phase
-                    println!("Manhattan scan phase complete, transitioning to Aggregate phase");
-                    manhattan.phase = ManhattanPhase::Aggregate;
-                    return get_manhattan_work(data, manhattan, worker_id);
+                    // All scan work complete
+                    if manhattan.mode == crate::distributed::message::ExecutionMode::ScanOnly {
+                        println!("Manhattan scan phase complete (ScanOnly mode) - job finished!");
+                        manhattan.phase = ManhattanPhase::Complete;
+                        return axum::Json(WorkResponse::Exit);
+                    } else {
+                        // Transition to Aggregate phase
+                        println!("Manhattan scan phase complete, transitioning to Aggregate phase");
+                        manhattan.phase = ManhattanPhase::Aggregate;
+                        return get_manhattan_work(data, manhattan, worker_id);
+                    }
                 };
 
             // Update worker status
@@ -1523,12 +1535,17 @@ fn complete_manhattan_work(
                 && exome_idle
                 && genome_idle
             {
-                println!(
-                    "Manhattan scan phase complete: {} exome, {} genome partitions done",
-                    manhattan.exome_completed.len(),
-                    manhattan.genome_completed.len()
-                );
-                manhattan.phase = ManhattanPhase::Aggregate;
+                if manhattan.mode == crate::distributed::message::ExecutionMode::ScanOnly {
+                    println!("Manhattan scan phase complete (ScanOnly mode) - job finished!");
+                    manhattan.phase = ManhattanPhase::Complete;
+                } else {
+                    println!(
+                        "Manhattan scan phase complete: {} exome, {} genome partitions done. Transitioning to Aggregate phase",
+                        manhattan.exome_completed.len(),
+                        manhattan.genome_completed.len()
+                    );
+                    manhattan.phase = ManhattanPhase::Aggregate;
+                }
             }
         }
 
@@ -1648,43 +1665,52 @@ fn complete_batch_work(
                 && exome_idle
                 && genome_idle
             {
-                println!(
-                    "Phenotype {} scan complete, moving to aggregate queue",
-                    phenotype_id
-                );
+                if batch.mode == crate::distributed::message::ExecutionMode::ScanOnly {
+                    println!("Phenotype {} scan complete (ScanOnly mode), marking as fully complete", phenotype_id);
+                    batch.completed_count += 1;
+                    if let Some(status) = batch.phenotype_statuses.get_mut(&phenotype_id) {
+                        status.stage = "completed".to_string();
+                    }
+                    batch.active_phenotypes.remove(&phenotype_id);
+                } else {
+                    println!(
+                        "Phenotype {} scan complete, moving to aggregate queue",
+                        phenotype_id
+                    );
 
-                // Build aggregate spec and move to ready_to_aggregate
-                let original = &state.original_spec;
-                let aggregate_spec = ManhattanAggregateSpec {
-                    output_path: original.output_path.clone(),
-                    exome_results: original.exome.clone(),
-                    genome_results: original.genome.clone(),
-                    gene_burden: original.gene_burden.clone(),
-                    exome_exp_p: original.exome_exp_p.clone(),
-                    genome_exp_p: original.genome_exp_p.clone(),
-                    exome_annotations: original.exome_annotations.clone(),
-                    genome_annotations: original.genome_annotations.clone(),
-                    genes: original.genes.clone(),
-                    threshold: original.threshold,
-                    gene_threshold: original.gene_threshold,
-                    locus_threshold: original.locus_threshold,
-                    locus_window: original.locus_window,
-                    locus_plots: original.locus_plots,
-                    min_variants_per_locus: original.min_variants_per_locus,
-                    width: original.width,
-                    height: original.height,
-                    layout: state.layout.clone().unwrap_or_default(),
-                    y_scale: state.y_scale.clone().unwrap_or_default(),
-                    cleanup: false,
-                    styling: original.styling.clone(),
-                };
+                    // Build aggregate spec and move to ready_to_aggregate
+                    let original = &state.original_spec;
+                    let aggregate_spec = ManhattanAggregateSpec {
+                        output_path: original.output_path.clone(),
+                        exome_results: original.exome.clone(),
+                        genome_results: original.genome.clone(),
+                        gene_burden: original.gene_burden.clone(),
+                        exome_exp_p: original.exome_exp_p.clone(),
+                        genome_exp_p: original.genome_exp_p.clone(),
+                        exome_annotations: original.exome_annotations.clone(),
+                        genome_annotations: original.genome_annotations.clone(),
+                        genes: original.genes.clone(),
+                        threshold: original.threshold,
+                        gene_threshold: original.gene_threshold,
+                        locus_threshold: original.locus_threshold,
+                        locus_window: original.locus_window,
+                        locus_plots: original.locus_plots,
+                        min_variants_per_locus: original.min_variants_per_locus,
+                        width: original.width,
+                        height: original.height,
+                        layout: state.layout.clone().unwrap_or_default(),
+                        y_scale: state.y_scale.clone().unwrap_or_default(),
+                        cleanup: false,
+                        styling: original.styling.clone(),
+                    };
 
-                // Store spec for potential retries
-                batch.aggregate_specs.insert(phenotype_id.clone(), aggregate_spec.clone());
-                batch.ready_to_aggregate.push((phenotype_id.clone(), aggregate_spec));
+                    // Store spec for potential retries
+                    batch.aggregate_specs.insert(phenotype_id.clone(), aggregate_spec.clone());
+                    batch.ready_to_aggregate.push((phenotype_id.clone(), aggregate_spec));
 
-                // Remove from active phenotypes
-                batch.active_phenotypes.remove(&phenotype_id);
+                    // Remove from active phenotypes
+                    batch.active_phenotypes.remove(&phenotype_id);
+                }
             } else {
                 // Log progress
                 let source_name = match source {
@@ -2213,7 +2239,7 @@ async fn submit_job(
     }
 
     // ManhattanBatch, Manhattan, and IngestManhattan jobs don't require input_path (they use per-spec paths)
-    let needs_input_path = !is_batch_job && !is_ingest_job && !matches!(&req.job_spec, JobSpec::Manhattan(_));
+    let needs_input_path = !is_batch_job && !is_ingest_job && !matches!(&req.job_spec, JobSpec::Manhattan { .. });
     if req.input_path.is_empty() && needs_input_path {
         return axum::Json(JobConfigResponse {
             acknowledged: false,
@@ -2260,16 +2286,17 @@ async fn submit_job(
     data.idle = false;
 
     // Handle ManhattanBatch jobs (batch scheduling mode)
-    if let JobSpec::ManhattanBatch { specs: ref specs } = req.job_spec {
+    if let JobSpec::ManhattanBatch { specs: ref specs, mode } = req.job_spec {
         let total_phenotypes = specs.len();
 
         // Clear standard partition tracking - batch mode uses its own
         data.pending_partitions.clear();
 
         println!(
-            "Initializing Manhattan batch: {} phenotypes (lazy loading, max {} active)",
+            "Initializing Manhattan batch: {} phenotypes (lazy loading, max {} active, mode={:?})",
             total_phenotypes,
-            BATCH_ACTIVE_LIMIT
+            BATCH_ACTIVE_LIMIT,
+            mode
         );
 
         // Initialize status map for all phenotypes
@@ -2280,7 +2307,7 @@ async fn submit_job(
                 id.clone(),
                 PhenotypeStatus {
                     id,
-                    stage: "queued".to_string(),
+                    stage: if mode == crate::distributed::message::ExecutionMode::AggregateOnly { "aggregating".to_string() } else { "queued".to_string() },
                     partitions_done: 0,
                     partitions_total: 0, // Updated when activated
                     result: None,
@@ -2291,11 +2318,12 @@ async fn submit_job(
             );
         }
 
-        data.batch_state = Some(BatchState {
+        let mut batch_state = BatchState {
+            mode,
             phenotype_statuses,
             phenotype_start_times: HashMap::new(),
             phenotype_cpu_secs: HashMap::new(),
-            pending_queue: specs.iter().cloned().collect(),
+            pending_queue: VecDeque::new(),
             active_phenotypes: HashMap::new(),
             ready_to_aggregate: Vec::new(),
             completed_count: 0,
@@ -2303,7 +2331,42 @@ async fn submit_job(
             total_phenotypes,
             aggregate_retry_counts: HashMap::new(),
             aggregate_specs: HashMap::new(),
-        });
+        };
+
+        if mode == crate::distributed::message::ExecutionMode::AggregateOnly {
+            for spec in specs {
+                let id = spec.output_path.clone();
+                let aggregate_spec = ManhattanAggregateSpec {
+                    output_path: spec.output_path.clone(),
+                    exome_results: spec.exome.clone(),
+                    genome_results: spec.genome.clone(),
+                    gene_burden: spec.gene_burden.clone(),
+                    exome_exp_p: spec.exome_exp_p.clone(),
+                    genome_exp_p: spec.genome_exp_p.clone(),
+                    exome_annotations: spec.exome_annotations.clone(),
+                    genome_annotations: spec.genome_annotations.clone(),
+                    genes: spec.genes.clone(),
+                    threshold: spec.threshold,
+                    gene_threshold: spec.gene_threshold,
+                    locus_threshold: spec.locus_threshold,
+                    locus_window: spec.locus_window,
+                    locus_plots: spec.locus_plots,
+                    min_variants_per_locus: spec.min_variants_per_locus,
+                    width: spec.width,
+                    height: spec.height,
+                    layout: spec.layout.clone().unwrap_or_default(),
+                    y_scale: spec.y_scale.clone().unwrap_or_default(),
+                    cleanup: false,
+                    styling: spec.styling.clone(),
+                };
+                batch_state.aggregate_specs.insert(id.clone(), aggregate_spec.clone());
+                batch_state.ready_to_aggregate.push((id, aggregate_spec));
+            }
+        } else {
+            batch_state.pending_queue = specs.iter().cloned().collect();
+        }
+
+        data.batch_state = Some(batch_state);
 
         let output_desc = specs.first()
             .map(|s| s.output_path.clone())
@@ -2405,7 +2468,7 @@ async fn submit_job(
     }
 
     // Initialize Manhattan pipeline state if this is a single Manhattan job
-    data.manhattan_state = if let JobSpec::Manhattan(ref spec) = req.job_spec {
+    data.manhattan_state = if let JobSpec::Manhattan { ref spec, mode } = req.job_spec {
         // For Manhattan jobs, we manage exome/genome partitions separately
         // Use partition counts from spec if available, otherwise fall back to total_partitions
         let exome_partitions = spec.exome_partitions.unwrap_or_else(|| {
@@ -2418,13 +2481,20 @@ async fn submit_job(
         // Clear the standard partition tracking since Manhattan uses its own
         data.pending_partitions.clear();
 
+        let initial_phase = if mode == crate::distributed::message::ExecutionMode::AggregateOnly {
+            ManhattanPhase::Aggregate
+        } else {
+            ManhattanPhase::Scan
+        };
+
         println!(
-            "Initializing Manhattan pipeline: {} exome partitions, {} genome partitions",
-            exome_partitions, genome_partitions
+            "Initializing Manhattan pipeline: {} exome partitions, {} genome partitions (mode={:?})",
+            exome_partitions, genome_partitions, mode
         );
 
         Some(ManhattanPipelineState {
-            phase: ManhattanPhase::Scan,
+            mode,
+            phase: initial_phase,
             original_spec: spec.clone(),
             layout: spec.layout.clone(),
             y_scale: spec.y_scale.clone(),

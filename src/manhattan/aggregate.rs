@@ -422,19 +422,20 @@ pub fn run_aggregation(spec: &ManhattanAggregateSpec) -> Result<(usize, serde_js
         },
         chrom_manhattans,
         significant_hits: ManifestSignificantHits {
-            // Consolidated output
-            exome: if spec.exome_results.is_some() {
+            // Only include entries when there are actual significant hits
+            // (merge_significant_hits returns 0 and creates no file when empty)
+            exome: if exome_sig_count > 0 {
                 Some(ManifestSigHits {
-                    path: format!("{}/significant.parquet", output_base),
+                    path: format!("{}/exome_significant.parquet", output_base),
                     count: exome_sig_count,
                     top_hit: exome_top_hit,
                 })
             } else {
                 None
             },
-            genome: if spec.genome_results.is_some() {
+            genome: if genome_sig_count > 0 {
                 Some(ManifestSigHits {
-                    path: format!("{}/significant.parquet", output_base),
+                    path: format!("{}/genome_significant.parquet", output_base),
                     count: genome_sig_count,
                     top_hit: genome_top_hit,
                 })

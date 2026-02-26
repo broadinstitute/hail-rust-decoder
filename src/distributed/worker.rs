@@ -541,14 +541,11 @@ fn dispatch_job(
             eprintln!("Validate job not yet implemented for distributed mode");
             Ok((0, None, cached_engine))
         }
-        JobSpec::Manhattan(spec) => {
-            let (rows, engine) = process_manhattan_scan(
-                cached_engine,
-                partitions,
-                spec,
-                telemetry,
-            )?;
-            Ok((rows, None, engine))
+        JobSpec::Manhattan { .. } => {
+            // Manhattan is a coordinator-level job spec for submission
+            Err(crate::HailError::InvalidFormat(
+                "Manhattan should not be dispatched to worker - it's for coordinator submission".to_string()
+            ))
         }
         JobSpec::ManhattanBatch { .. } => {
             // ManhattanBatch is a coordinator-level job spec for submission
@@ -1759,14 +1756,14 @@ fn verify_and_checkpoint(spec: &ManhattanAggregateSpec) -> Result<()> {
     use object_store::path::Path as ObjPath;
 
     // Build list of expected files
+    // Note: significant.parquet files are only created when there are significant hits,
+    // so we don't require them here. The manifest.json and PNG files are always created.
     let mut expected = vec!["manifest.json"];
     if spec.exome_results.is_some() {
         expected.push("exome_manhattan.png");
-        expected.push("exome_significant.parquet");
     }
     if spec.genome_results.is_some() {
         expected.push("genome_manhattan.png");
-        expected.push("genome_significant.parquet");
     }
 
     let url = url::Url::parse(&spec.output_path).map_err(|e| {

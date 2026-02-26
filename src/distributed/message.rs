@@ -20,6 +20,15 @@ pub enum InitStrategy {
     Append,
 }
 
+/// Execution mode for a pipeline job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExecutionMode {
+    #[default]
+    Full,
+    ScanOnly,
+    AggregateOnly,
+}
+
 /// Specification for a distributed job operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -44,9 +53,9 @@ pub enum JobSpec {
         fail_fast: bool,
     },
     /// Generate Manhattan plot (high-level submission - coordinator splits into phases)
-    Manhattan(ManhattanSpec),
+    Manhattan { spec: ManhattanSpec, mode: ExecutionMode },
     /// Submit a batch of Manhattan plots (coordinator queues them)
-    ManhattanBatch { specs: Vec<ManhattanSpec> },
+    ManhattanBatch { specs: Vec<ManhattanSpec>, mode: ExecutionMode },
     /// Phase 1: Worker scans partitions, outputs partial PNGs + sig.parquet
     ManhattanScan(ManhattanScanSpec),
     /// Phase 2: Single worker aggregates results, joins annotations, generates locus plots
@@ -447,7 +456,7 @@ impl JobSpec {
             JobSpec::ExportJson { .. } => "export json",
             JobSpec::Summary => "summary",
             JobSpec::Validate { .. } => "validate",
-            JobSpec::Manhattan(_) => "manhattan plot",
+            JobSpec::Manhattan { .. } => "manhattan plot",
             JobSpec::ManhattanBatch { .. } => "manhattan batch",
             JobSpec::ManhattanScan(_) => "manhattan scan",
             JobSpec::ManhattanAggregate(_) => "manhattan aggregate",
@@ -466,8 +475,8 @@ impl JobSpec {
             JobSpec::ExportJson { output_path, .. } => Some(output_path),
             JobSpec::Summary => None,
             JobSpec::Validate { .. } => None,
-            JobSpec::Manhattan(spec) => Some(&spec.output_path),
-            JobSpec::ManhattanBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
+            JobSpec::Manhattan { spec, .. } => Some(&spec.output_path),
+            JobSpec::ManhattanBatch { specs, .. } => specs.first().map(|s| s.output_path.as_str()),
             JobSpec::ManhattanScan(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregate(spec) => Some(&spec.output_path),
             JobSpec::ManhattanAggregateBatch { specs } => specs.first().map(|s| s.output_path.as_str()),
