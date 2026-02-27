@@ -60,6 +60,9 @@ pub mod validation;
 #[cfg(feature = "clickhouse")]
 pub mod ingest;
 
+#[cfg(feature = "genomic")]
+pub mod genomic;
+
 pub mod benchmark;
 
 pub use error::{HailError, Result};

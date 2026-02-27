@@ -16,6 +16,9 @@ http = ["object_store/http"]
 
 # Optional commands
 validation = ["dep:jsonschema"]
+
+# Genomic high-level API
+genomic = ["dep:lru"]
 clickhouse = ["reqwest/blocking"]  # enables blocking HTTP client for ClickHouse export
 bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
 benchmark = []  # sysinfo is now always included
@@ -123,6 +126,9 @@ dirs = "5.0"
 
 # TOML config file parsing
 toml = "0.8"
+
+# LRU Cache for the genomic client (genomic feature)
+lru = { version = "0.12", optional = true }
 
 [[bin]]
 name = "hail-server"
