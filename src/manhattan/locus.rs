@@ -23,6 +23,11 @@ pub struct RenderVariant {
     pub af: Option<f64>,
     pub source: VariantSource,
     pub is_significant: bool,
+    // Case/control breakdown fields
+    pub ac_cases: Option<f64>,
+    pub ac_controls: Option<f64>,
+    pub af_cases: Option<f64>,
+    pub af_controls: Option<f64>,
 }
 
 /// Configuration for the locus scatter plot.
@@ -255,6 +260,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             RenderVariant {
                 position: 120_000,
@@ -266,6 +275,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             RenderVariant {
                 position: 130_000,
@@ -277,6 +290,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Genome,
                 is_significant: false,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             // Genome Significant Hit
             RenderVariant {
@@ -289,6 +306,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Genome,
                 is_significant: true,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             // Exome Signal (should appear on top of genome)
             RenderVariant {
@@ -301,6 +322,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Exome,
                 is_significant: false,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             RenderVariant {
                 position: 150_000,
@@ -312,6 +337,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Exome,
                 is_significant: true,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
             RenderVariant {
                 position: 152_000,
@@ -323,6 +352,10 @@ mod tests {
                 af: None,
                 source: VariantSource::Exome,
                 is_significant: false,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             },
         ];
 

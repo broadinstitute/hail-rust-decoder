@@ -1545,6 +1545,11 @@ fn process_manhattan_scan_v2(
                             beta,
                             se,
                             af,
+                            // Case/control fields not available in distributed scan phase
+                            ac_cases: None,
+                            ac_controls: None,
+                            af_cases: None,
+                            af_controls: None,
                         });
                     }
                 }

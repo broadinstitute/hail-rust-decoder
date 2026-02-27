@@ -340,6 +340,10 @@ impl<W: Write + Send> LocusVariantWriter<W> {
         let mut beta_builder = Float64Builder::new();
         let mut se_builder = Float64Builder::new();
         let mut af_builder = Float64Builder::new();
+        let mut ac_cases_builder = Float64Builder::new();
+        let mut ac_controls_builder = Float64Builder::new();
+        let mut af_cases_builder = Float64Builder::new();
+        let mut af_controls_builder = Float64Builder::new();
 
         for row in &self.buffer {
             locus_id_builder.append_value(&row.locus_id);
@@ -357,6 +361,10 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             beta_builder.append_option(row.beta);
             se_builder.append_option(row.se);
             af_builder.append_option(row.af);
+            ac_cases_builder.append_option(row.ac_cases);
+            ac_controls_builder.append_option(row.ac_controls);
+            af_cases_builder.append_option(row.af_cases);
+            af_controls_builder.append_option(row.af_controls);
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -375,6 +383,10 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             Arc::new(beta_builder.finish()),
             Arc::new(se_builder.finish()),
             Arc::new(af_builder.finish()),
+            Arc::new(ac_cases_builder.finish()),
+            Arc::new(ac_controls_builder.finish()),
+            Arc::new(af_cases_builder.finish()),
+            Arc::new(af_controls_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -400,6 +412,10 @@ pub fn locus_variant_schema() -> Schema {
         Field::new("beta", DataType::Float64, true),  // nullable
         Field::new("se", DataType::Float64, true),    // nullable
         Field::new("af", DataType::Float64, true),    // nullable
+        Field::new("ac_cases", DataType::Float64, true),    // nullable
+        Field::new("ac_controls", DataType::Float64, true), // nullable
+        Field::new("af_cases", DataType::Float64, true),    // nullable
+        Field::new("af_controls", DataType::Float64, true), // nullable
     ])
 }
 
@@ -483,6 +499,10 @@ mod tests {
                 beta: Some(-0.5),
                 se: Some(0.1),
                 af: Some(0.02),
+                ac_cases: Some(10.0),
+                ac_controls: Some(5.0),
+                af_cases: Some(0.02),
+                af_controls: Some(0.005),
             })
             .unwrap();
 
@@ -503,6 +523,10 @@ mod tests {
                 beta: None,
                 se: None,
                 af: Some(0.15),
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             })
             .unwrap();
 

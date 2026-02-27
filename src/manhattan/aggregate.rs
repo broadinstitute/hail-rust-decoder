@@ -1527,6 +1527,10 @@ fn generate_single_locus_core(
             beta: v.beta,
             se: v.se,
             af: v.af,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         })
         .chain(genome_variants.iter().map(|v| LocusVariantRow {
             locus_id: region_id.clone(),
@@ -1548,6 +1552,10 @@ fn generate_single_locus_core(
             beta: v.beta,
             se: v.se,
             af: v.af,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         }))
         .collect();
 
@@ -1927,6 +1935,10 @@ fn read_locus_variants(
                     af: info.af,
                     source,
                     is_significant: info.pvalue < threshold,
+                    ac_cases: info.ac_cases,
+                    ac_controls: info.ac_controls,
+                    af_cases: info.af_cases,
+                    af_controls: info.af_controls,
                 });
             }
         }
@@ -1950,6 +1962,10 @@ struct ExtractedLocusInfo {
     beta: Option<f64>,
     se: Option<f64>,
     af: Option<f64>,
+    ac_cases: Option<f64>,
+    ac_controls: Option<f64>,
+    af_cases: Option<f64>,
+    af_controls: Option<f64>,
 }
 
 /// Extract position, p-value, alleles, and effect size fields from an encoded row.
@@ -2004,6 +2020,12 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<ExtractedLocus
     // Extract AF (allele frequency)
     let af = get_float(row, &["AF_Allele2", "AF", "af", "allele_frequency"]);
 
+    // Extract case/control fields
+    let ac_cases = get_float(row, &["AC_case", "ac_case", "ac_cases"]);
+    let ac_controls = get_float(row, &["AC_ctrl", "ac_ctrl", "ac_controls"]);
+    let af_cases = get_float(row, &["AF_case", "af_case", "af_cases"]);
+    let af_controls = get_float(row, &["AF_ctrl", "af_ctrl", "af_controls"]);
+
     Some(ExtractedLocusInfo {
         position,
         pvalue,
@@ -2012,6 +2034,10 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<ExtractedLocus
         beta,
         se,
         af,
+        ac_cases,
+        ac_controls,
+        af_cases,
+        af_controls,
     })
 }
 

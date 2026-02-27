@@ -373,6 +373,10 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             beta: v.beta,
                             se: v.se,
                             af: v.af,
+                            ac_cases: v.ac_cases,
+                            ac_controls: v.ac_controls,
+                            af_cases: v.af_cases,
+                            af_controls: v.af_controls,
                         })
                         .chain(genome_subset.iter().map(|v| LocusVariantRow {
                             locus_id: region_name.clone(),
@@ -390,6 +394,10 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             beta: v.beta,
                             se: v.se,
                             af: v.af,
+                            ac_cases: v.ac_cases,
+                            ac_controls: v.ac_controls,
+                            af_cases: v.af_cases,
+                            af_controls: v.af_controls,
                         }))
                         .collect();
 
@@ -703,6 +711,10 @@ fn process_joined_row(
             beta: v.beta,
             se: v.se,
             af: v.af,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 
@@ -722,6 +734,10 @@ fn process_joined_row(
             source,
             gene_symbol,
             consequence,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 }
@@ -782,6 +798,10 @@ fn process_single_row(
             beta: v.beta,
             se: v.se,
             af: v.af,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 
@@ -801,6 +821,10 @@ fn process_single_row(
             source,
             gene_symbol: None,
             consequence: None,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 }
@@ -890,6 +914,10 @@ struct ExtractedVariant {
     se: Option<f64>,
     af: Option<f64>,
     alleles: Vec<String>,
+    ac_cases: Option<f64>,
+    ac_controls: Option<f64>,
+    af_cases: Option<f64>,
+    af_controls: Option<f64>,
 }
 
 /// Extract variant fields from a row.
@@ -953,6 +981,12 @@ fn extract_variant_fields(
             .or_else(|| get_float("AF"))
             .or_else(|| get_float("af"));
 
+        // Extract case/control fields
+        let ac_cases = get_float("AC_case").or_else(|| get_float("ac_case"));
+        let ac_controls = get_float("AC_ctrl").or_else(|| get_float("ac_ctrl"));
+        let af_cases = get_float("AF_case").or_else(|| get_float("af_case"));
+        let af_controls = get_float("AF_ctrl").or_else(|| get_float("af_ctrl"));
+
         // Extract alleles
         let alleles = fields
             .iter()
@@ -978,6 +1012,10 @@ fn extract_variant_fields(
             se,
             af,
             alleles,
+            ac_cases,
+            ac_controls,
+            af_cases,
+            af_controls,
         })
     } else {
         None
@@ -1037,6 +1075,10 @@ fn render_locus_plot(
             af: v.af,
             source: VariantSource::Genome,
             is_significant: v.pvalue < threshold,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 
@@ -1051,6 +1093,10 @@ fn render_locus_plot(
             af: v.af,
             source: VariantSource::Exome,
             is_significant: v.pvalue < threshold,
+            ac_cases: v.ac_cases,
+            ac_controls: v.ac_controls,
+            af_cases: v.af_cases,
+            af_controls: v.af_controls,
         });
     }
 

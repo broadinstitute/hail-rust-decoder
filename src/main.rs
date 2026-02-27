@@ -2821,6 +2821,10 @@ fn run_locus(args: LocusArgs) -> Result<()> {
                         af: None,
                         source,
                         is_significant: pt.pvalue < threshold,
+                        ac_cases: None,
+                        ac_controls: None,
+                        af_cases: None,
+                        af_controls: None,
                     });
                 }
             }

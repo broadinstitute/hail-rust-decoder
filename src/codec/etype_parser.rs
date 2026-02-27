@@ -69,6 +69,28 @@ impl ETypeParser {
 
     fn read_identifier(&mut self) -> Result<String> {
         self.skip_whitespace();
+
+        // Handle backtick-quoted identifiers (e.g., `p.value.NA`, `Is.SPA`)
+        // Hail uses backticks to quote field names with special characters
+        if self.current_char() == Some('`') {
+            self.advance(); // skip opening backtick
+            let start = self.pos;
+
+            while let Some(ch) = self.current_char() {
+                if ch == '`' {
+                    let name = self.input[start..self.pos].to_string();
+                    self.advance(); // skip closing backtick
+                    return Ok(name);
+                }
+                self.advance();
+            }
+
+            return Err(HailError::ParseError(
+                "Unclosed backtick-quoted identifier".to_string(),
+            ));
+        }
+
+        // Standard identifier: alphanumeric and underscores
         let start = self.pos;
 
         while let Some(ch) = self.current_char() {
@@ -265,6 +287,45 @@ mod tests {
             } else {
                 panic!("Expected nested EBaseStruct");
             }
+        } else {
+            panic!("Expected EBaseStruct");
+        }
+    }
+
+    #[test]
+    fn test_parse_backtick_quoted_field_names() {
+        // Hail uses backticks for field names with special characters like dots
+        let result = ETypeParser::parse(
+            "EBaseStruct{normal_field:EInt32,`p.value.NA`:EFloat64,`Is.SPA`:EBoolean}"
+        ).unwrap();
+
+        if let EncodedType::EBaseStruct { required: _, fields } = result {
+            assert_eq!(fields.len(), 3);
+            assert_eq!(fields[0].name, "normal_field");
+            assert_eq!(fields[1].name, "p.value.NA");
+            assert_eq!(fields[2].name, "Is.SPA");
+            assert!(matches!(fields[0].encoded_type, EncodedType::EInt32 { required: false }));
+            assert!(matches!(fields[1].encoded_type, EncodedType::EFloat64 { required: false }));
+            assert!(matches!(fields[2].encoded_type, EncodedType::EBoolean { required: false }));
+        } else {
+            panic!("Expected EBaseStruct");
+        }
+    }
+
+    #[test]
+    fn test_parse_per_ancestry_variant_schema() {
+        // Real schema fragment from per-ancestry variant results tables
+        let result = ETypeParser::parse(
+            "EBaseStruct{Pvalue_log10:EFloat64,`p.value.NA`:EFloat64,`Is.SPA`:EBoolean,AF_case:EFloat64,AF_ctrl:EFloat64}"
+        ).unwrap();
+
+        if let EncodedType::EBaseStruct { required: _, fields } = result {
+            assert_eq!(fields.len(), 5);
+            assert_eq!(fields[0].name, "Pvalue_log10");
+            assert_eq!(fields[1].name, "p.value.NA");
+            assert_eq!(fields[2].name, "Is.SPA");
+            assert_eq!(fields[3].name, "AF_case");
+            assert_eq!(fields[4].name, "AF_ctrl");
         } else {
             panic!("Expected EBaseStruct");
         }

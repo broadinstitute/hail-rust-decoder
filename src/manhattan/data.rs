@@ -25,6 +25,11 @@ pub struct BufferedVariant {
     pub source: VariantSource,
     pub gene_symbol: Option<String>,
     pub consequence: Option<String>,
+    // Case/control breakdown fields
+    pub ac_cases: Option<f64>,
+    pub ac_controls: Option<f64>,
+    pub af_cases: Option<f64>,
+    pub af_controls: Option<f64>,
 }
 
 /// A genomic region of interest for locus plot generation.
@@ -338,6 +343,16 @@ pub struct SigHitRow {
     pub se: Option<f64>,
     /// Allele frequency
     pub af: Option<f64>,
+
+    // Case/control breakdown fields
+    /// Allele count in cases (from META: AC_case, or computed from AF_case * AN_cases)
+    pub ac_cases: Option<f64>,
+    /// Allele count in controls (from META: AC_ctrl, or computed from AF_ctrl * AN_controls)
+    pub ac_controls: Option<f64>,
+    /// Allele frequency in cases (from per-ancestry: AF_case, or computed from AC_case / AN_cases)
+    pub af_cases: Option<f64>,
+    /// Allele frequency in controls (from per-ancestry: AF_ctrl, or computed from AC_ctrl / AN_controls)
+    pub af_controls: Option<f64>,
 }
 
 /// A locus definition row for the loci.parquet file.
@@ -406,6 +421,16 @@ pub struct LocusVariantRow {
     pub se: Option<f64>,
     /// Allele frequency (from association)
     pub af: Option<f64>,
+
+    // Case/control breakdown fields
+    /// Allele count in cases (from META: AC_case, or computed from AF_case * AN_cases)
+    pub ac_cases: Option<f64>,
+    /// Allele count in controls (from META: AC_ctrl, or computed from AF_ctrl * AN_controls)
+    pub ac_controls: Option<f64>,
+    /// Allele frequency in cases (from per-ancestry: AF_case, or computed from AC_case / AN_cases)
+    pub af_cases: Option<f64>,
+    /// Allele frequency in controls (from per-ancestry: AF_ctrl, or computed from AC_ctrl / AN_controls)
+    pub af_controls: Option<f64>,
 }
 
 // =============================================================================

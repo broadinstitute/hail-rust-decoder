@@ -20,7 +20,13 @@ CREATE TABLE IF NOT EXISTS loci_variants (
     -- Effect size fields (nullable)
     beta                 Nullable(Float64),
     se                   Nullable(Float64),
-    af                   Nullable(Float64)
+    af                   Nullable(Float64),
+
+    -- Case/control breakdown fields (nullable)
+    ac_cases             Nullable(Float64),
+    ac_controls          Nullable(Float64),
+    af_cases             Nullable(Float64),
+    af_controls          Nullable(Float64)
 )
 ENGINE = MergeTree()
 PARTITION BY phenotype

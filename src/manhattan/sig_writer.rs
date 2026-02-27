@@ -145,6 +145,12 @@ impl<W: Write + Send> SigHitWriter<W> {
         let mut se_builder = Float64Builder::new();
         let mut af_builder = Float64Builder::new();
 
+        // Case/control breakdown
+        let mut ac_cases_builder = Float64Builder::new();
+        let mut ac_controls_builder = Float64Builder::new();
+        let mut af_cases_builder = Float64Builder::new();
+        let mut af_controls_builder = Float64Builder::new();
+
         for row in &self.buffer {
             // Identity fields
             phenotype_builder.append_value(&row.phenotype);
@@ -173,6 +179,24 @@ impl<W: Write + Send> SigHitWriter<W> {
                 Some(v) => af_builder.append_value(v),
                 None => af_builder.append_null(),
             }
+
+            // Case/control breakdown
+            match row.ac_cases {
+                Some(v) => ac_cases_builder.append_value(v),
+                None => ac_cases_builder.append_null(),
+            }
+            match row.ac_controls {
+                Some(v) => ac_controls_builder.append_value(v),
+                None => ac_controls_builder.append_null(),
+            }
+            match row.af_cases {
+                Some(v) => af_cases_builder.append_value(v),
+                None => af_cases_builder.append_null(),
+            }
+            match row.af_controls {
+                Some(v) => af_controls_builder.append_value(v),
+                None => af_controls_builder.append_null(),
+            }
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -191,6 +215,11 @@ impl<W: Write + Send> SigHitWriter<W> {
             Arc::new(beta_builder.finish()),
             Arc::new(se_builder.finish()),
             Arc::new(af_builder.finish()),
+            // Case/control breakdown
+            Arc::new(ac_cases_builder.finish()),
+            Arc::new(ac_controls_builder.finish()),
+            Arc::new(af_cases_builder.finish()),
+            Arc::new(af_controls_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -216,6 +245,11 @@ pub fn sig_hit_schema() -> Schema {
         Field::new("beta", DataType::Float64, true),
         Field::new("se", DataType::Float64, true),
         Field::new("af", DataType::Float64, true),
+        // Case/control breakdown
+        Field::new("ac_cases", DataType::Float64, true),
+        Field::new("ac_controls", DataType::Float64, true),
+        Field::new("af_cases", DataType::Float64, true),
+        Field::new("af_controls", DataType::Float64, true),
     ])
 }
 
@@ -245,6 +279,10 @@ mod tests {
                 beta: Some(0.5),
                 se: Some(0.1),
                 af: Some(0.01),
+                ac_cases: Some(10.0),
+                ac_controls: Some(5.0),
+                af_cases: Some(0.02),
+                af_controls: Some(0.005),
             })
             .unwrap();
 
@@ -262,6 +300,10 @@ mod tests {
                 beta: None,
                 se: None,
                 af: None,
+                ac_cases: None,
+                ac_controls: None,
+                af_cases: None,
+                af_controls: None,
             })
             .unwrap();
 

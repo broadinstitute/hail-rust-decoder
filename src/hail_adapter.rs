@@ -314,9 +314,26 @@ impl DataSource for HailTableSource {
     }
 
     fn globals(&self) -> Result<EncodedValue> {
-        // TODO: Implement globals reading from globals/part-0-...
-        // For now, return empty struct
-        Ok(EncodedValue::Struct(vec![]))
+        // Load globals from {table_path}/globals/
+        let globals_path = join_path(&self.table_path, "globals");
+        let globals_metadata_path = join_path(&globals_path, "metadata.json.gz");
+
+        // Load globals metadata
+        let globals_spec = RVDComponentSpec::from_path(&globals_metadata_path)?;
+
+        // Parse the globals type from the codec spec
+        let globals_type = ETypeParser::parse(&globals_spec.codec_spec.e_type)?;
+
+        // Get the partition file path (globals typically has only one partition)
+        if globals_spec.part_files.is_empty() {
+            return Ok(EncodedValue::Struct(vec![]));
+        }
+        let parts_path = join_path(&globals_path, "parts");
+        let part_path = join_path(&parts_path, &globals_spec.part_files[0]);
+
+        // Build buffer and decode
+        let mut buffer = BufferBuilder::from_path(&part_path)?.with_leb128().build();
+        globals_type.read(&mut buffer)
     }
 
     fn key_fields(&self) -> &[String] {
