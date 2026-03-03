@@ -7,10 +7,13 @@
 //! - export: Export data to other formats (Parquet, ClickHouse, BigQuery)
 
 mod cli;
+mod clickhouse;
+mod cluster;
 mod config;
+mod env;
 
 use clap::Parser;
-use cli::{Cli, Commands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LociArgs, LocusArgs, ManhattanArgs, ManhattanBatchArgs, PoolCommands, QueryArgs, ServiceCommands};
+use cli::{Cli, ClickHouseCommands, ClusterCommands, Commands, EnvCommands, ExportCommands, ExportParquetArgs, ExportJsonArgs, ExportVcfArgs, ExportHailArgs, HasCommonExportArgs, LociArgs, LocusArgs, ManhattanArgs, ManhattanBatchArgs, PoolCommands, QueryArgs, ServiceCommands};
 #[cfg(feature = "validation")]
 use cli::{SchemaSubcommands, ValidateArgs};
 #[cfg(feature = "clickhouse")]
@@ -58,6 +61,51 @@ fn main() -> Result<()> {
             SchemaSubcommands::Generate(args) => run_generate_schema(&args.table, args.output.as_deref())?,
         },
         Commands::Pool { command } => run_pool_command(command, &config)?,
+        Commands::Cluster { command } => match command {
+            ClusterCommands::List { status } => cluster::list_clusters(&config, status.as_ref())?,
+            ClusterCommands::Show { name } => cluster::show_cluster(&config, &name)?,
+            ClusterCommands::Verify { name } => cluster::verify_cluster(&config, &name)?,
+            ClusterCommands::Deploy { name, tag, backend_only } => {
+                cluster::deploy_cluster(&config, &name, &tag, backend_only)?
+            }
+        },
+        Commands::Clickhouse { command } => match command {
+            ClickHouseCommands::Create {
+                name,
+                profile,
+                machine_type,
+                disk_size_gb,
+                zone,
+            } => clickhouse::create_instance(
+                &config,
+                &name,
+                profile.as_deref(),
+                machine_type.as_deref(),
+                disk_size_gb,
+                zone.as_deref(),
+            )?,
+            ClickHouseCommands::List => clickhouse::list_instances(&config)?,
+            ClickHouseCommands::Show { name } => clickhouse::show_instance(&config, &name)?,
+            ClickHouseCommands::Destroy { name, yes } => {
+                clickhouse::destroy_instance(&config, &name, yes)?
+            }
+            ClickHouseCommands::Ip { name } => clickhouse::get_instance_ip(&config, &name)?,
+            ClickHouseCommands::Ssh { name, command } => {
+                clickhouse::ssh_instance(&config, &name, &command)?
+            }
+            ClickHouseCommands::Tunnel { name, port } => {
+                clickhouse::tunnel_instance(&config, &name, port)?
+            }
+        },
+        Commands::Env { command } => match command {
+            EnvCommands::Init {
+                name,
+                storage,
+                clickhouse,
+            } => env::init_env(&config, &name, storage.as_deref(), clickhouse.as_deref())?,
+            EnvCommands::Show => env::show_env(&config)?,
+            EnvCommands::Verify => env::verify_env(&config)?,
+        },
         Commands::Service { command } => run_service_command(command)?,
         #[cfg(feature = "clickhouse")]
         Commands::Ingest { command } => run_ingest_command(command)?,
@@ -1854,6 +1902,7 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
         PoolCommands::Submit {
             name,
             zone,
+            cluster,
             binary,
             auto_stop,
             redeploy_binary,
@@ -1861,8 +1910,94 @@ fn run_pool_command(command: PoolCommands, app_config: &config::Config) -> Resul
             autoscale,
             skip_build,
             batch_size,
-            command,
+            mut command,
         } => {
+            // Intercept: Apply cluster config overrides if requested
+            if let Some(cluster_name) = cluster {
+                let cluster_conf = app_config
+                    .get_cluster(Some(&cluster_name))
+                    .ok_or_else(|| {
+                        hail_decoder::HailError::InvalidFormat(format!(
+                            "Unknown cluster: {}",
+                            cluster_name
+                        ))
+                    })?
+                    .resolve_env_vars()
+                    .map_err(hail_decoder::HailError::Config)?;
+
+                // We only override if it's a manhattan-batch command with a --config flag
+                if command.len() >= 2 && command[0] == "manhattan-batch" {
+                    if let Some(config_idx) = command.iter().position(|a| a == "--config") {
+                        if let Some(config_path) = command.get(config_idx + 1).cloned() {
+                            // Load the local job config
+                            let mut job_config =
+                                hail_decoder::manhattan::config::ManhattanJobConfig::load(
+                                    std::path::Path::new(&config_path),
+                                )?;
+
+                            // Override specific fields with cluster details
+                            job_config.ingest.clickhouse_url = Some(cluster_conf.clickhouse_url.clone());
+
+                            // Generate timestamp (YYYYMMDD-HHMM format)
+                            let timestamp = {
+                                use std::time::{SystemTime, UNIX_EPOCH};
+                                let secs = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                // Convert to approximate date/time (simplified, not TZ-aware)
+                                let days = secs / 86400;
+                                let time_of_day = secs % 86400;
+                                let hours = time_of_day / 3600;
+                                let minutes = (time_of_day % 3600) / 60;
+                                // Approximate date calculation (from 1970-01-01)
+                                let mut year = 1970u64;
+                                let mut remaining_days = days;
+                                loop {
+                                    let days_in_year = if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 366 } else { 365 };
+                                    if remaining_days < days_in_year { break; }
+                                    remaining_days -= days_in_year;
+                                    year += 1;
+                                }
+                                let month_days = [31, 28 + if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) { 1 } else { 0 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+                                let mut month = 1u64;
+                                for days_in_month in month_days {
+                                    if remaining_days < days_in_month { break; }
+                                    remaining_days -= days_in_month;
+                                    month += 1;
+                                }
+                                let day = remaining_days + 1;
+                                format!("{:04}{:02}{:02}-{:02}{:02}", year, month, day, hours, minutes)
+                            };
+                            let new_output_dir = cluster_conf.output_dir(&timestamp);
+                            job_config.job.output_dir = Some(new_output_dir.clone());
+
+                            // Write modified config to temp file
+                            let temp_path =
+                                std::env::temp_dir().join(format!("job-config-{}.toml", timestamp));
+                            let content = toml::to_string_pretty(&job_config)
+                                .map_err(|e| hail_decoder::HailError::Config(e.to_string()))?;
+                            std::fs::write(&temp_path, content)?;
+
+                            // Replace config path in the command vector to point to the new temp file
+                            command[config_idx + 1] = temp_path.to_string_lossy().to_string();
+
+                            println!(
+                                "{} Using cluster '{}' ({})",
+                                "Cluster:".green().bold(),
+                                cluster_name.cyan(),
+                                cluster_conf.clickhouse_url
+                            );
+                            println!(
+                                "{} {}",
+                                "Output:".green().bold(),
+                                new_output_dir.bright_white()
+                            );
+                        }
+                    }
+                }
+            }
+
             // Convert ResolvedPoolConfig to ScalingConfig if available
             let scaling_config = app_config.get_pool(&name).map(|p| {
                 hail_decoder::cloud::ScalingConfig {
@@ -2825,6 +2960,7 @@ fn run_locus(args: LocusArgs) -> Result<()> {
                         ac_controls: None,
                         af_cases: None,
                         af_controls: None,
+                        association_ac: None,
                     });
                 }
             }

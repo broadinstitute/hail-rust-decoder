@@ -29,6 +29,14 @@ pub struct Config {
     /// Named pool profiles
     #[serde(default)]
     pub pools: HashMap<String, PoolProfile>,
+
+    /// ClickHouse instance profiles
+    #[serde(default)]
+    pub clickhouse: HashMap<String, ClickHouseProfile>,
+
+    /// Cluster configurations for multi-environment deployments (legacy)
+    #[serde(default)]
+    pub clusters: ClustersConfig,
 }
 
 /// Global default settings.
@@ -38,6 +46,10 @@ pub struct Defaults {
     pub project: Option<String>,
     /// GCP zone
     pub zone: Option<String>,
+    /// GCP region (e.g., "us-central1")
+    pub region: Option<String>,
+    /// Artifact Registry URL (e.g., "us-central1-docker.pkg.dev/project/repo")
+    pub registry: Option<String>,
     /// VPC network name
     pub network: Option<String>,
     /// Subnet name
@@ -96,6 +108,42 @@ pub struct PoolProfile {
     pub with_coordinator: Option<bool>,
     /// WireGuard configuration for coordinator
     pub wireguard: Option<WireGuardConfig>,
+}
+
+/// A named ClickHouse instance profile.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClickHouseProfile {
+    /// GCP machine type (default: "n2-standard-8")
+    pub machine_type: Option<String>,
+    /// Boot disk size in GB (default: 200)
+    pub disk_size_gb: Option<u32>,
+    /// Boot disk type (default: "pd-ssd")
+    pub disk_type: Option<String>,
+    /// GCP zone (overrides defaults)
+    pub zone: Option<String>,
+    /// VPC network name (overrides defaults)
+    pub network: Option<String>,
+    /// Subnet name (overrides defaults)
+    pub subnet: Option<String>,
+    /// Service account email (e.g., "my-sa@project.iam.gserviceaccount.com")
+    pub service_account: Option<String>,
+    /// Use spot/preemptible instance
+    pub spot: Option<bool>,
+}
+
+impl Default for ClickHouseProfile {
+    fn default() -> Self {
+        Self {
+            machine_type: None,
+            disk_size_gb: None,
+            disk_type: None,
+            zone: None,
+            network: None,
+            subnet: None,
+            service_account: None,
+            spot: None,
+        }
+    }
 }
 
 /// WireGuard VPN configuration for the coordinator node.
@@ -162,7 +210,7 @@ impl WireGuardConfig {
 /// - `env:VAR_NAME` -> reads from environment variable
 /// - `secret:name` -> passed through (resolved at VM boot)
 /// - other -> passed through as-is
-fn resolve_env_value(value: &str) -> Result<String, String> {
+pub fn resolve_env_value(value: &str) -> Result<String, String> {
     if let Some(var_name) = value.strip_prefix("env:") {
         std::env::var(var_name).map_err(|_| {
             format!(
@@ -193,6 +241,11 @@ impl Config {
     }
 
     /// Load configuration from a specific path, or search default paths if None.
+    ///
+    /// Resolution order:
+    /// 1. If explicit path provided, use it
+    /// 2. Walk up from current dir looking for `hail-decoder.toml` or `.hail-decoder/config.toml`
+    /// 3. Load user config from `~/.config/hail-decoder/config.toml` and merge (project takes precedence)
     pub fn load_from_path(path: Option<&str>) -> Self {
         // If explicit path provided, use it
         if let Some(p) = path {
@@ -202,24 +255,83 @@ impl Config {
             });
         }
 
-        // Search default paths
-        let search_paths = Self::config_search_paths();
-        for path in search_paths {
-            if path.exists() {
-                match Self::load_file(path.to_string_lossy().as_ref()) {
-                    Ok(config) => return config,
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to load config from {}: {}",
-                            path.display(),
-                            e
-                        );
-                    }
-                }
+        // 1. Try to find project config by walking up directories
+        let mut config = Self::find_project_config()
+            .and_then(|p| Self::load_file(p.to_str().unwrap()).ok())
+            .unwrap_or_default();
+
+        // 2. Try to load user config
+        let user_paths = [
+            dirs::home_dir().map(|h| h.join(".config").join("hail-decoder").join("config.toml")),
+            dirs::config_dir().map(|c| c.join("hail-decoder").join("config.toml")),
+        ];
+
+        let user_config = user_paths
+            .into_iter()
+            .flatten()
+            .find(|p| p.exists())
+            .and_then(|p| Self::load_file(p.to_str().unwrap()).ok());
+
+        // 3. Merge user config into project config (project takes precedence for shared keys)
+        if let Some(user) = user_config {
+            // Defaults: project overrides user
+            if config.defaults.project.is_none() {
+                config.defaults.project = user.defaults.project;
+            }
+            if config.defaults.zone.is_none() {
+                config.defaults.zone = user.defaults.zone;
+            }
+            if config.defaults.region.is_none() {
+                config.defaults.region = user.defaults.region;
+            }
+            if config.defaults.registry.is_none() {
+                config.defaults.registry = user.defaults.registry;
+            }
+            if config.defaults.network.is_none() {
+                config.defaults.network = user.defaults.network;
+            }
+            if config.defaults.subnet.is_none() {
+                config.defaults.subnet = user.defaults.subnet;
+            }
+            if config.defaults.ssh_user.is_none() {
+                config.defaults.ssh_user = user.defaults.ssh_user;
+            }
+
+            // Merge pools (project entries override user entries with same name)
+            for (k, v) in user.pools {
+                config.pools.entry(k).or_insert(v);
+            }
+
+            // Merge clusters (project entries override user entries with same name)
+            for (k, v) in user.clusters.clusters {
+                config.clusters.clusters.entry(k).or_insert(v);
+            }
+            if config.clusters.default.is_none() {
+                config.clusters.default = user.clusters.default;
             }
         }
 
-        Config::default()
+        config
+    }
+
+    /// Find project config by walking up from current directory.
+    fn find_project_config() -> Option<PathBuf> {
+        let mut dir = std::env::current_dir().ok()?;
+        loop {
+            let candidates = [
+                dir.join("hail-decoder.toml"),
+                dir.join(".hail-decoder").join("config.toml"),
+            ];
+            for candidate in candidates {
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
     }
 
     /// Get the list of paths to search for config files.
@@ -278,6 +390,65 @@ impl Config {
             }
         })
     }
+
+    /// Get a cluster configuration by name, or the default if name is None.
+    pub fn get_cluster(&self, name: Option<&str>) -> Option<&ClusterConfig> {
+        let cluster_name = name.or(self.clusters.default.as_deref())?;
+        self.clusters.clusters.get(cluster_name)
+    }
+
+    /// Get a ClickHouse profile by name, with defaults applied.
+    pub fn get_clickhouse(&self, name: &str) -> ResolvedClickHouseConfig {
+        let profile = self.clickhouse.get(name);
+        ResolvedClickHouseConfig {
+            name: name.to_string(),
+            machine_type: profile
+                .and_then(|p| p.machine_type.clone())
+                .unwrap_or_else(|| "n2-standard-8".to_string()),
+            disk_size_gb: profile.and_then(|p| p.disk_size_gb).unwrap_or(200),
+            disk_type: profile
+                .and_then(|p| p.disk_type.clone())
+                .unwrap_or_else(|| "pd-ssd".to_string()),
+            zone: profile
+                .and_then(|p| p.zone.clone())
+                .or_else(|| self.defaults.zone.clone())
+                .unwrap_or_else(|| "us-central1-a".to_string()),
+            network: profile
+                .and_then(|p| p.network.clone())
+                .or_else(|| self.defaults.network.clone()),
+            subnet: profile
+                .and_then(|p| p.subnet.clone())
+                .or_else(|| self.defaults.subnet.clone()),
+            project: self.defaults.project.clone(),
+            service_account: profile.and_then(|p| p.service_account.clone()),
+            spot: profile.and_then(|p| p.spot).unwrap_or(false),
+        }
+    }
+}
+
+/// A fully resolved ClickHouse instance configuration.
+#[derive(Debug, Clone)]
+pub struct ResolvedClickHouseConfig {
+    /// Instance name
+    pub name: String,
+    /// GCP machine type
+    pub machine_type: String,
+    /// Boot disk size in GB
+    pub disk_size_gb: u32,
+    /// Boot disk type
+    pub disk_type: String,
+    /// GCP zone
+    pub zone: String,
+    /// VPC network
+    pub network: Option<String>,
+    /// Subnet
+    pub subnet: Option<String>,
+    /// GCP project
+    pub project: Option<String>,
+    /// Service account email
+    pub service_account: Option<String>,
+    /// Use spot instance
+    pub spot: bool,
 }
 
 /// A fully resolved pool configuration with all defaults applied.
@@ -305,6 +476,156 @@ pub struct ResolvedPoolConfig {
     pub with_coordinator: bool,
     /// WireGuard configuration
     pub wireguard: Option<WireGuardConfig>,
+}
+
+/// Status of a cluster deployment.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterStatus {
+    /// Active production cluster
+    Active,
+    /// Standby cluster (ready but not primary)
+    #[default]
+    Standby,
+    /// Deprecated cluster (scheduled for removal)
+    Deprecated,
+}
+
+/// Configuration for a single cluster deployment target.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClusterConfig {
+    /// Human-readable description of this cluster
+    pub description: Option<String>,
+    /// Cluster lifecycle status
+    #[serde(default)]
+    pub status: ClusterStatus,
+    /// ClickHouse VM instance name (for SSH/management)
+    pub clickhouse_vm: Option<String>,
+    /// ClickHouse HTTP URL (e.g., "http://10.0.0.5:8123")
+    pub clickhouse_url: String,
+    /// Cloud Run backend service name
+    pub backend_service: Option<String>,
+    /// Cloud Run frontend service name
+    pub frontend_service: Option<String>,
+    /// GCS bucket for output data
+    pub output_bucket: String,
+    /// Path prefix within the output bucket
+    pub output_prefix: String,
+}
+
+impl ClusterConfig {
+    /// Generate a timestamped output directory path.
+    pub fn output_dir(&self, timestamp: &str) -> String {
+        let prefix = self.output_prefix.trim_matches('/');
+        let bucket = self.output_bucket.trim_end_matches('/');
+        format!("{}/{}/analyses/{}", bucket, prefix, timestamp)
+    }
+
+    /// Resolve environment variable references in the config.
+    pub fn resolve_env_vars(&self) -> Result<ClusterConfig, String> {
+        Ok(ClusterConfig {
+            clickhouse_url: resolve_env_value(&self.clickhouse_url)?,
+            ..self.clone()
+        })
+    }
+}
+
+/// Container for cluster configurations with an optional default.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ClustersConfig {
+    /// Name of the default cluster to use when --cluster is not specified
+    pub default: Option<String>,
+    /// Named cluster configurations
+    #[serde(flatten)]
+    pub clusters: HashMap<String, ClusterConfig>,
+}
+
+// =============================================================================
+// Environment Configuration (.hail-decoder-env)
+// =============================================================================
+
+/// Environment configuration loaded from `.hail-decoder-env` file.
+///
+/// This file ties together storage location and ClickHouse instance for a
+/// specific working environment. It's auto-discovered by walking up from
+/// the current directory.
+///
+/// # Example
+/// ```toml
+/// name = "20260303"
+/// storage = "gs://axaou-central/browserv2/20260303"
+/// clickhouse = "my-ch"  # instance name or URL
+/// ```
+#[derive(Debug, Deserialize, Clone)]
+pub struct HailEnv {
+    /// Environment name (e.g., "20260303", "dev", "prod")
+    pub name: String,
+    /// GCS storage path for outputs (e.g., "gs://bucket/prefix")
+    pub storage: String,
+    /// ClickHouse instance name or URL
+    /// - If it looks like a URL (starts with http), use directly
+    /// - Otherwise, resolve as instance name to get internal IP
+    pub clickhouse: String,
+}
+
+impl HailEnv {
+    /// Load .hail-decoder-env from current directory or walk up to find it.
+    pub fn load() -> Option<Self> {
+        Self::find_env_file().and_then(|path| Self::load_file(&path).ok())
+    }
+
+    /// Load .hail-decoder-env from a specific path.
+    pub fn load_file(path: &PathBuf) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read .hail-decoder-env: {}", e))?;
+        toml::from_str(&content).map_err(|e| format!("Failed to parse .hail-decoder-env: {}", e))
+    }
+
+    /// Find .hail-decoder-env by walking up from current directory.
+    fn find_env_file() -> Option<PathBuf> {
+        let mut dir = std::env::current_dir().ok()?;
+        loop {
+            let candidate = dir.join(".hail-decoder-env");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Check if clickhouse field is a URL or an instance name.
+    pub fn clickhouse_is_url(&self) -> bool {
+        self.clickhouse.starts_with("http://") || self.clickhouse.starts_with("https://")
+    }
+
+    /// Get the ClickHouse URL.
+    /// If clickhouse is already a URL, return it directly.
+    /// Otherwise, this returns None and caller should resolve instance name to IP.
+    pub fn clickhouse_url(&self) -> Option<&str> {
+        if self.clickhouse_is_url() {
+            Some(&self.clickhouse)
+        } else {
+            None
+        }
+    }
+
+    /// Get the ClickHouse instance name (if not a URL).
+    pub fn clickhouse_instance(&self) -> Option<&str> {
+        if self.clickhouse_is_url() {
+            None
+        } else {
+            Some(&self.clickhouse)
+        }
+    }
+
+    /// Generate output directory path with timestamp.
+    pub fn output_dir(&self, timestamp: &str) -> String {
+        let storage = self.storage.trim_end_matches('/');
+        format!("{}/analyses/{}", storage, timestamp)
+    }
 }
 
 #[cfg(test)]
