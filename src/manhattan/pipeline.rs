@@ -377,6 +377,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             ac_controls: v.ac_controls,
                             af_cases: v.af_cases,
                             af_controls: v.af_controls,
+                            association_ac: v.association_ac,
                         })
                         .chain(genome_subset.iter().map(|v| LocusVariantRow {
                             locus_id: region_name.clone(),
@@ -398,6 +399,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
                             ac_controls: v.ac_controls,
                             af_cases: v.af_cases,
                             af_controls: v.af_controls,
+                            association_ac: v.association_ac,
                         }))
                         .collect();
 
@@ -715,6 +717,7 @@ fn process_joined_row(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 
@@ -738,6 +741,7 @@ fn process_joined_row(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 }
@@ -802,6 +806,7 @@ fn process_single_row(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 
@@ -825,6 +830,7 @@ fn process_single_row(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 }
@@ -918,6 +924,7 @@ struct ExtractedVariant {
     ac_controls: Option<f64>,
     af_cases: Option<f64>,
     af_controls: Option<f64>,
+    association_ac: Option<f64>,
 }
 
 /// Extract variant fields from a row.
@@ -987,6 +994,18 @@ fn extract_variant_fields(
         let af_cases = get_float("AF_case").or_else(|| get_float("af_case"));
         let af_controls = get_float("AF_ctrl").or_else(|| get_float("af_ctrl"));
 
+        // Extract association allele count (AC_Allele2) - can be int or float
+        let association_ac = get_float("AC_Allele2").or_else(|| {
+            fields
+                .iter()
+                .find(|(n, _)| n == "AC_Allele2")
+                .and_then(|(_, v)| match v {
+                    EncodedValue::Int64(i) => Some(*i as f64),
+                    EncodedValue::Int32(i) => Some(*i as f64),
+                    _ => None,
+                })
+        });
+
         // Extract alleles
         let alleles = fields
             .iter()
@@ -1016,6 +1035,7 @@ fn extract_variant_fields(
             ac_controls,
             af_cases,
             af_controls,
+            association_ac,
         })
     } else {
         None
@@ -1079,6 +1099,7 @@ fn render_locus_plot(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 
@@ -1097,6 +1118,7 @@ fn render_locus_plot(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         });
     }
 

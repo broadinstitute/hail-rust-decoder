@@ -15,7 +15,14 @@ CREATE TABLE IF NOT EXISTS significant_variants (
     pvalue               Float64,
     beta                 Float64,
     se                   Float64,
-    af                   Float64
+    af                   Float64,
+
+    -- Case/control breakdown fields (nullable)
+    ac_cases             Nullable(Float64),
+    ac_controls          Nullable(Float64),
+    af_cases             Nullable(Float64),
+    af_controls          Nullable(Float64),
+    association_ac       Nullable(Float64)
 )
 ENGINE = MergeTree()
 PARTITION BY phenotype

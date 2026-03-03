@@ -150,6 +150,8 @@ impl<W: Write + Send> SigHitWriter<W> {
         let mut ac_controls_builder = Float64Builder::new();
         let mut af_cases_builder = Float64Builder::new();
         let mut af_controls_builder = Float64Builder::new();
+        // Trait-level association stats
+        let mut association_ac_builder = Float64Builder::new();
 
         for row in &self.buffer {
             // Identity fields
@@ -197,6 +199,12 @@ impl<W: Write + Send> SigHitWriter<W> {
                 Some(v) => af_controls_builder.append_value(v),
                 None => af_controls_builder.append_null(),
             }
+
+            // Trait-level association stats
+            match row.association_ac {
+                Some(v) => association_ac_builder.append_value(v),
+                None => association_ac_builder.append_null(),
+            }
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -220,6 +228,8 @@ impl<W: Write + Send> SigHitWriter<W> {
             Arc::new(ac_controls_builder.finish()),
             Arc::new(af_cases_builder.finish()),
             Arc::new(af_controls_builder.finish()),
+            // Trait-level association stats
+            Arc::new(association_ac_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -250,6 +260,8 @@ pub fn sig_hit_schema() -> Schema {
         Field::new("ac_controls", DataType::Float64, true),
         Field::new("af_cases", DataType::Float64, true),
         Field::new("af_controls", DataType::Float64, true),
+        // Trait-level association stats
+        Field::new("association_ac", DataType::Float64, true),
     ])
 }
 
@@ -283,6 +295,7 @@ mod tests {
                 ac_controls: Some(5.0),
                 af_cases: Some(0.02),
                 af_controls: Some(0.005),
+                association_ac: Some(15.0),
             })
             .unwrap();
 
@@ -304,6 +317,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             })
             .unwrap();
 

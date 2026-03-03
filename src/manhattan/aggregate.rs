@@ -1531,6 +1531,7 @@ fn generate_single_locus_core(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         })
         .chain(genome_variants.iter().map(|v| LocusVariantRow {
             locus_id: region_id.clone(),
@@ -1556,6 +1557,7 @@ fn generate_single_locus_core(
             ac_controls: v.ac_controls,
             af_cases: v.af_cases,
             af_controls: v.af_controls,
+            association_ac: v.association_ac,
         }))
         .collect();
 
@@ -1939,6 +1941,7 @@ fn read_locus_variants(
                     ac_controls: info.ac_controls,
                     af_cases: info.af_cases,
                     af_controls: info.af_controls,
+                    association_ac: info.association_ac,
                 });
             }
         }
@@ -1966,6 +1969,7 @@ struct ExtractedLocusInfo {
     ac_controls: Option<f64>,
     af_cases: Option<f64>,
     af_controls: Option<f64>,
+    association_ac: Option<f64>,
 }
 
 /// Extract position, p-value, alleles, and effect size fields from an encoded row.
@@ -2026,6 +2030,15 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<ExtractedLocus
     let af_cases = get_float(row, &["AF_case", "af_case", "af_cases"]);
     let af_controls = get_float(row, &["AF_ctrl", "af_ctrl", "af_controls"]);
 
+    // Extract association allele count (AC_Allele2) - can be int or float
+    let association_ac = get_float(row, &["AC_Allele2"]).or_else(|| {
+        get_field(row, &["AC_Allele2"]).and_then(|v| match v {
+            EncodedValue::Int64(i) => Some(*i as f64),
+            EncodedValue::Int32(i) => Some(*i as f64),
+            _ => None,
+        })
+    });
+
     Some(ExtractedLocusInfo {
         position,
         pvalue,
@@ -2038,6 +2051,7 @@ fn extract_locus_info(row: &crate::codec::EncodedValue) -> Option<ExtractedLocus
         ac_controls,
         af_cases,
         af_controls,
+        association_ac,
     })
 }
 

@@ -28,6 +28,8 @@ pub struct RenderVariant {
     pub ac_controls: Option<f64>,
     pub af_cases: Option<f64>,
     pub af_controls: Option<f64>,
+    // Trait-level association stats
+    pub association_ac: Option<f64>,
 }
 
 /// Configuration for the locus scatter plot.
@@ -264,6 +266,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             RenderVariant {
                 position: 120_000,
@@ -279,6 +282,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             RenderVariant {
                 position: 130_000,
@@ -294,6 +298,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             // Genome Significant Hit
             RenderVariant {
@@ -310,6 +315,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             // Exome Signal (should appear on top of genome)
             RenderVariant {
@@ -326,6 +332,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             RenderVariant {
                 position: 150_000,
@@ -341,6 +348,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
             RenderVariant {
                 position: 152_000,
@@ -356,6 +364,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             },
         ];
 

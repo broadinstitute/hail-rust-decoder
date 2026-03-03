@@ -344,6 +344,8 @@ impl<W: Write + Send> LocusVariantWriter<W> {
         let mut ac_controls_builder = Float64Builder::new();
         let mut af_cases_builder = Float64Builder::new();
         let mut af_controls_builder = Float64Builder::new();
+        // Trait-level association stats
+        let mut association_ac_builder = Float64Builder::new();
 
         for row in &self.buffer {
             locus_id_builder.append_value(&row.locus_id);
@@ -365,6 +367,7 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             ac_controls_builder.append_option(row.ac_controls);
             af_cases_builder.append_option(row.af_cases);
             af_controls_builder.append_option(row.af_controls);
+            association_ac_builder.append_option(row.association_ac);
         }
 
         let columns: Vec<ArrayRef> = vec![
@@ -387,6 +390,7 @@ impl<W: Write + Send> LocusVariantWriter<W> {
             Arc::new(ac_controls_builder.finish()),
             Arc::new(af_cases_builder.finish()),
             Arc::new(af_controls_builder.finish()),
+            Arc::new(association_ac_builder.finish()),
         ];
 
         let batch = RecordBatch::try_new(self.schema.clone(), columns)?;
@@ -416,6 +420,7 @@ pub fn locus_variant_schema() -> Schema {
         Field::new("ac_controls", DataType::Float64, true), // nullable
         Field::new("af_cases", DataType::Float64, true),    // nullable
         Field::new("af_controls", DataType::Float64, true), // nullable
+        Field::new("association_ac", DataType::Float64, true), // nullable
     ])
 }
 
@@ -503,6 +508,7 @@ mod tests {
                 ac_controls: Some(5.0),
                 af_cases: Some(0.02),
                 af_controls: Some(0.005),
+                association_ac: Some(15.0),
             })
             .unwrap();
 
@@ -527,6 +533,7 @@ mod tests {
                 ac_controls: None,
                 af_cases: None,
                 af_controls: None,
+                association_ac: None,
             })
             .unwrap();
 

@@ -89,6 +89,13 @@ pub struct VariantAssociation {
     pub ac: Option<i32>,
     pub n_cases: Option<i32>,
     pub n_controls: Option<i32>,
+    // Case/control breakdown fields
+    pub ac_cases: Option<f64>,
+    pub ac_controls: Option<f64>,
+    pub af_cases: Option<f64>,
+    pub af_controls: Option<f64>,
+    // Total allele count across all individuals (AC_Allele2)
+    pub association_ac: Option<f64>,
 }
 
 impl VariantAssociation {
@@ -105,6 +112,15 @@ impl VariantAssociation {
             return None;
         };
 
+        // Extract association_ac (AC_Allele2) - can be int or float
+        let association_ac = get_field(value, "AC_Allele2").and_then(|v| match v {
+            EncodedValue::Float64(f) => Some(*f),
+            EncodedValue::Float32(f) => Some(*f as f64),
+            EncodedValue::Int64(i) => Some(*i as f64),
+            EncodedValue::Int32(i) => Some(*i as f64),
+            _ => None,
+        });
+
         Some(Self {
             contig,
             position,
@@ -120,6 +136,12 @@ impl VariantAssociation {
             ac: get_field_any(value, &["ac", "AC", "AC_Allele2"]).and_then(as_i32),
             n_cases: get_field_any(value, &["n_cases", "N_cases"]).and_then(as_i32),
             n_controls: get_field_any(value, &["n_controls", "N_controls"]).and_then(as_i32),
+            // Case/control breakdown
+            ac_cases: get_field_any(value, &["AC_case", "ac_case"]).and_then(as_f64),
+            ac_controls: get_field_any(value, &["AC_ctrl", "ac_ctrl"]).and_then(as_f64),
+            af_cases: get_field_any(value, &["AF_case", "af_case"]).and_then(as_f64),
+            af_controls: get_field_any(value, &["AF_ctrl", "af_ctrl"]).and_then(as_f64),
+            association_ac,
         })
     }
 

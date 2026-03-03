@@ -30,6 +30,8 @@ pub struct BufferedVariant {
     pub ac_controls: Option<f64>,
     pub af_cases: Option<f64>,
     pub af_controls: Option<f64>,
+    // Trait-level association stats
+    pub association_ac: Option<f64>,
 }
 
 /// A genomic region of interest for locus plot generation.
@@ -353,6 +355,8 @@ pub struct SigHitRow {
     pub af_cases: Option<f64>,
     /// Allele frequency in controls (from per-ancestry: AF_ctrl, or computed from AC_ctrl / AN_controls)
     pub af_controls: Option<f64>,
+    /// Total allele count across all individuals (from AC_Allele2)
+    pub association_ac: Option<f64>,
 }
 
 /// A locus definition row for the loci.parquet file.
@@ -431,6 +435,8 @@ pub struct LocusVariantRow {
     pub af_cases: Option<f64>,
     /// Allele frequency in controls (from per-ancestry: AF_ctrl, or computed from AC_ctrl / AN_controls)
     pub af_controls: Option<f64>,
+    /// Total allele count across all individuals (from AC_Allele2)
+    pub association_ac: Option<f64>,
 }
 
 // =============================================================================
