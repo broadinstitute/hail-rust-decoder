@@ -101,16 +101,16 @@ impl MetricsDb {
                 snapshot.cpu_percent,
                 snapshot.memory_used_bytes.map(|v| v as i64),
                 snapshot.memory_total_bytes.map(|v| v as i64),
-                snapshot.rows_per_sec,
-                snapshot.total_rows as i64,
+                snapshot.items_per_sec,
+                snapshot.total_items as i64,
                 snapshot.active_partition.map(|v| v as i64),
                 snapshot.partitions_completed as i64,
                 snapshot.disk_used_bytes.map(|v| v as i64),
                 snapshot.disk_total_bytes.map(|v| v as i64),
                 snapshot.network_rx_bytes_sec,
                 snapshot.network_tx_bytes_sec,
-                snapshot.network_rx_total_bytes.map(|v| v as i64),
-                snapshot.network_tx_total_bytes.map(|v| v as i64),
+                None::<i64>, // network_rx_total_bytes (no longer in TelemetrySnapshot)
+                None::<i64>, // network_tx_total_bytes (no longer in TelemetrySnapshot)
             ],
         )?;
         Ok(())
@@ -139,11 +139,11 @@ impl MetricsDb {
                     cpu_percent: row.get(1)?,
                     memory_used_bytes: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                     memory_total_bytes: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-                    rows_per_sec: row.get(4)?,
-                    total_rows: row.get::<_, i64>(5)? as usize,
+                    items_per_sec: row.get(4)?,
+                    total_items: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
-                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec, log_tail)
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
                     cpu_per_core: None,
                     disk_read_bytes_sec: None,
                     disk_write_bytes_sec: None,
@@ -151,9 +151,6 @@ impl MetricsDb {
                     disk_total_bytes: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
                     network_rx_bytes_sec: row.get(10)?,
                     network_tx_bytes_sec: row.get(11)?,
-                    network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
-                    network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
-                    log_tail: None,
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -189,11 +186,11 @@ impl MetricsDb {
                     cpu_percent: row.get(1)?,
                     memory_used_bytes: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                     memory_total_bytes: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
-                    rows_per_sec: row.get(4)?,
-                    total_rows: row.get::<_, i64>(5)? as usize,
+                    items_per_sec: row.get(4)?,
+                    total_items: row.get::<_, i64>(5)? as usize,
                     active_partition: row.get::<_, Option<i64>>(6)?.map(|v| v as usize),
                     partitions_completed: row.get::<_, i64>(7)? as usize,
-                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec, log_tail)
+                    // Extended metrics (not persisted: cpu_per_core, disk_read/write_bytes_sec)
                     cpu_per_core: None,
                     disk_read_bytes_sec: None,
                     disk_write_bytes_sec: None,
@@ -201,9 +198,6 @@ impl MetricsDb {
                     disk_total_bytes: row.get::<_, Option<i64>>(9)?.map(|v| v as u64),
                     network_rx_bytes_sec: row.get(10)?,
                     network_tx_bytes_sec: row.get(11)?,
-                    network_rx_total_bytes: row.get::<_, Option<i64>>(12)?.map(|v| v as u64),
-                    network_tx_total_bytes: row.get::<_, Option<i64>>(13)?.map(|v| v as u64),
-                    log_tail: None,
                 })
             })?
             .collect::<SqliteResult<Vec<_>>>()?;
@@ -259,8 +253,8 @@ mod tests {
             cpu_percent: Some(50.0),
             memory_used_bytes: Some(1024),
             memory_total_bytes: Some(2048),
-            rows_per_sec: 1000.0,
-            total_rows: 5000,
+            items_per_sec: 1000.0,
+            total_items: 5000,
             active_partition: Some(5),
             partitions_completed: 10,
             // Extended metrics
@@ -271,9 +265,6 @@ mod tests {
             disk_total_bytes: Some(100_000_000_000),
             network_rx_bytes_sec: Some(1_000_000.0),
             network_tx_bytes_sec: Some(500_000.0),
-            network_rx_total_bytes: Some(10_000_000_000),
-            network_tx_total_bytes: Some(5_000_000_000),
-            log_tail: None,
         };
 
         db.insert_snapshot("worker-1", &snapshot).unwrap();

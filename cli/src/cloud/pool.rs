@@ -3457,7 +3457,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     .unwrap_or(0.0);
                 println!(
                     "    CPU: {:.1}%  Mem: {:.1} GB  Rows/s: {:.0}",
-                    cpu, mem_gb, latest.rows_per_sec
+                    cpu, mem_gb, latest.items_per_sec
                 );
             }
             println!();

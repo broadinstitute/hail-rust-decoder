@@ -6,6 +6,11 @@ use crate::manhattan::config::{ManhattanConfig, ResolvedStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub use genohype_pool::distributed::{
+    CompleteRequest, CompleteResponse, HeartbeatRequest, HeartbeatResponse,
+    TelemetrySnapshot, WorkRequest, WorkResponse,
+};
+
 /// Table initialization strategy for ingestion.
 ///
 /// Controls how tables are created/managed at the start of ingestion.
@@ -488,72 +493,6 @@ impl JobSpec {
     }
 }
 
-/// Request from a worker asking for work.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WorkRequest {
-    /// Unique identifier for this worker
-    pub worker_id: String,
-}
-
-/// Response from coordinator with work assignment.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WorkResponse {
-    /// Work is available - process these partitions
-    #[serde(rename = "task")]
-    Task {
-        /// Unique task identifier (for tracking in batch mode)
-        #[serde(default)]
-        task_id: String,
-        /// Partition indices to process
-        partitions: Vec<usize>,
-        /// Path to input Hail table
-        input_path: String,
-        /// Job specification (what to do with the data)
-        job_spec: JobSpec,
-        /// Total number of partitions in the table (for output file naming)
-        total_partitions: usize,
-        /// Filter conditions (where clauses)
-        #[serde(default)]
-        filters: Vec<String>,
-        /// Interval filters
-        #[serde(default)]
-        intervals: Vec<String>,
-    },
-    /// No work available but job is still in progress - wait and retry
-    #[serde(rename = "wait")]
-    Wait,
-    /// All work is complete - worker should exit
-    #[serde(rename = "exit")]
-    Exit,
-}
-
-/// Request from a worker reporting completion.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompleteRequest {
-    /// Worker that completed the work
-    pub worker_id: String,
-    /// Unique task identifier (matches WorkResponse)
-    #[serde(default)]
-    pub task_id: String,
-    /// Partitions that were completed (or failed)
-    pub partitions: Vec<usize>,
-    /// Number of rows processed
-    pub rows_processed: usize,
-    /// Optional result data for aggregation (e.g., stats, validation report)
-    #[serde(default)]
-    pub result_json: Option<serde_json::Value>,
-    /// Error message if the task failed (None = success)
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-/// Response to completion request.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompleteResponse {
-    /// Whether the completion was acknowledged
-    pub acknowledged: bool,
-}
 
 /// Status query response from coordinator.
 #[derive(Debug, Serialize, Deserialize)]
@@ -574,75 +513,6 @@ pub struct StatusResponse {
     pub is_complete: bool,
 }
 
-/// A point-in-time telemetry snapshot from a worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TelemetrySnapshot {
-    /// Unix timestamp in milliseconds
-    pub timestamp_ms: u64,
-    /// CPU usage percentage (0-100), None if sysinfo unavailable
-    pub cpu_percent: Option<f32>,
-    /// Memory used in bytes, None if sysinfo unavailable
-    pub memory_used_bytes: Option<u64>,
-    /// Memory total in bytes, None if sysinfo unavailable
-    pub memory_total_bytes: Option<u64>,
-    /// Rows processed per second (computed by worker)
-    pub rows_per_sec: f64,
-    /// Total rows processed so far by this worker
-    pub total_rows: usize,
-    /// Currently active partition, if any
-    pub active_partition: Option<usize>,
-    /// Partitions completed by this worker
-    pub partitions_completed: usize,
-
-    // Extended metrics for btop-style dashboard
-
-    /// Per-core CPU usage percentages (0-100 for each core)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cpu_per_core: Option<Vec<f32>>,
-    /// Disk read rate in bytes per second
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_read_bytes_sec: Option<f64>,
-    /// Disk write rate in bytes per second
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_write_bytes_sec: Option<f64>,
-    /// Disk space used in bytes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_used_bytes: Option<u64>,
-    /// Disk space total in bytes
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disk_total_bytes: Option<u64>,
-    /// Network receive rate in bytes per second
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_rx_bytes_sec: Option<f64>,
-    /// Network transmit rate in bytes per second
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_tx_bytes_sec: Option<f64>,
-    /// Cumulative network bytes received (for totals display)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_rx_total_bytes: Option<u64>,
-    /// Cumulative network bytes transmitted (for totals display)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_tx_total_bytes: Option<u64>,
-    /// Last 50 lines of the worker's log file
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_tail: Option<Vec<String>>,
-}
-
-/// Heartbeat request from worker to coordinator.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HeartbeatRequest {
-    /// Worker sending the heartbeat
-    pub worker_id: String,
-    /// Current telemetry snapshot
-    pub telemetry: TelemetrySnapshot,
-}
-
-/// Heartbeat response from coordinator.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HeartbeatResponse {
-    /// Whether the heartbeat was acknowledged
-    pub acknowledged: bool,
-}
 
 /// Dashboard summary for the overall job.
 #[derive(Debug, Serialize, Deserialize)]

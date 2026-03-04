@@ -126,11 +126,19 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                 task_id,
                 partitions,
                 input_path,
-                job_spec,
+                payload,
                 total_partitions: _,
                 filters,
                 intervals,
             } => {
+                let job_spec: JobSpec = match serde_json::from_value(payload) {
+                    Ok(spec) => spec,
+                    Err(e) => {
+                        eprintln!("Failed to deserialize job spec from payload: {}", e);
+                        continue;
+                    }
+                };
+
                 // Build description including batch info for aggregate batch jobs
                 let desc = if let JobSpec::ManhattanAggregateBatch { specs } = &job_spec {
                     format!("batch of {} aggregation tasks", specs.len())
@@ -190,7 +198,7 @@ pub async fn run_worker(config: WorkerConfig) -> Result<()> {
                             worker_id: config.worker_id.clone(),
                             task_id: task_id.clone(),
                             partitions: partitions.clone(),
-                            rows_processed: 0,
+                            items_processed: 0,
                             result_json: None,
                             error: Some(error_msg),
                         };
@@ -284,14 +292,14 @@ async fn report_completion(
     worker_id: &str,
     task_id: String,
     partitions: &[usize],
-    rows_processed: usize,
+    items_processed: usize,
     result_json: Option<serde_json::Value>,
 ) -> Result<()> {
     let request = CompleteRequest {
         worker_id: worker_id.to_string(),
         task_id,
         partitions: partitions.to_vec(),
-        rows_processed,
+        items_processed,
         result_json,
         error: None,
     };
@@ -431,29 +439,13 @@ fn spawn_telemetry_loop(
                 (Some(rx_sec), Some(tx_sec), Some(current_rx), Some(current_tx))
             };
 
-            // Read the last 50 lines of the worker log file
-            let log_tail = std::fs::read_to_string("/tmp/worker.log")
-                .ok()
-                .map(|s| {
-                    let lines: Vec<&str> = s.lines().collect();
-                    lines
-                        .into_iter()
-                        .rev()
-                        .take(50)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .map(String::from)
-                        .collect()
-                });
-
             let snapshot = TelemetrySnapshot {
                 timestamp_ms,
                 cpu_percent: cpu,
                 memory_used_bytes: mem_used,
                 memory_total_bytes: mem_total,
-                rows_per_sec,
-                total_rows,
+                items_per_sec: rows_per_sec,
+                total_items: total_rows,
                 active_partition: if active_part == NO_ACTIVE_PARTITION {
                     None
                 } else {
@@ -468,9 +460,6 @@ fn spawn_telemetry_loop(
                 disk_total_bytes: disk_total,
                 network_rx_bytes_sec: net_rx_sec,
                 network_tx_bytes_sec: net_tx_sec,
-                network_rx_total_bytes: net_rx_total,
-                network_tx_total_bytes: net_tx_total,
-                log_tail,
             };
 
             let req = HeartbeatRequest {

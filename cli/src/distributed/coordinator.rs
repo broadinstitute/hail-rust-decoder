@@ -944,7 +944,7 @@ fn get_ingestion_work(
             task_id,
             partitions: vec![0], // Dummy partition for compatibility
             input_path: String::new(), // Not used for ingestion tasks
-            job_spec,
+            payload: serde_json::to_value(&job_spec).unwrap_or_default(),
             total_partitions: ingestion.total_tasks,
             filters: Vec::new(),
             intervals: Vec::new(),
@@ -1027,7 +1027,7 @@ fn get_batch_work(
             task_id,
             partitions: vec![0], // Aggregate batch uses spec list, not partitions
             input_path: String::new(),
-            job_spec: JobSpec::ManhattanAggregateBatch { specs: aggregate_specs },
+            payload: serde_json::to_value(&JobSpec::ManhattanAggregateBatch { specs: aggregate_specs }).unwrap_or_default(),
             total_partitions: phenotype_ids.len(),
             filters: Vec::new(),
             intervals: Vec::new(),
@@ -1137,7 +1137,7 @@ fn get_batch_work(
             task_id,
             partitions,
             input_path: String::new(),
-            job_spec: JobSpec::ManhattanScan(scan_spec),
+            payload: serde_json::to_value(&JobSpec::ManhattanScan(scan_spec)).unwrap_or_default(),
             total_partitions: state.exome_total_partitions + state.genome_total_partitions,
             filters: Vec::new(),
             intervals: Vec::new(),
@@ -1262,7 +1262,7 @@ async fn get_work(
             task_id,
             partitions,
             input_path: data.config.input_path.clone(),
-            job_spec,
+            payload: serde_json::to_value(&job_spec).unwrap_or_default(),
             total_partitions: data.config.total_partitions,
             filters: data.config.filters.clone(),
             intervals: data.config.intervals.clone(),
@@ -1411,7 +1411,7 @@ fn get_manhattan_work(
                 task_id,
                 partitions,
                 input_path: String::new(), // Not used for ManhattanScan
-                job_spec: JobSpec::ManhattanScan(scan_spec),
+                payload: serde_json::to_value(&JobSpec::ManhattanScan(scan_spec)).unwrap_or_default(),
                 total_partitions: manhattan.exome_total_partitions + manhattan.genome_total_partitions,
                 filters: Vec::new(),
                 intervals: Vec::new(),
@@ -1474,7 +1474,7 @@ fn get_manhattan_work(
                 task_id,
                 partitions: vec![0], // Single aggregate task
                 input_path: String::new(),
-                job_spec: JobSpec::ManhattanAggregate(aggregate_spec),
+                payload: serde_json::to_value(&JobSpec::ManhattanAggregate(aggregate_spec)).unwrap_or_default(),
                 total_partitions: 1,
                 filters: Vec::new(),
                 intervals: Vec::new(),
@@ -1576,7 +1576,7 @@ fn complete_ingestion_work(ingestion: &mut IngestionState, req: &CompleteRequest
             "Ingestion complete: {}/{} ({} rows in {:.1}s) [{}/{}]",
             phenotype_id,
             ancestry,
-            req.rows_processed,
+            req.items_processed,
             duration.as_secs_f64(),
             ingestion.completed_count,
             ingestion.total_tasks
@@ -1992,7 +1992,7 @@ async fn complete_work(
         }
     }
 
-    data.total_rows += req.rows_processed;
+    data.total_rows += req.items_processed;
 
     // Store result_json if present (for Summary/Validate jobs)
     if let Some(result) = req.result_json {
@@ -2002,7 +2002,7 @@ async fn complete_work(
     // Update per-worker stats
     touch_worker(&mut data, &req.worker_id);
     if let Some(w) = data.worker_registry.get_mut(&req.worker_id) {
-        w.total_rows += req.rows_processed;
+        w.total_rows += req.items_processed;
         w.partitions_completed += req.partitions.len();
     }
 
@@ -2013,7 +2013,7 @@ async fn complete_work(
             event_type: "completed".to_string(),
             worker_id: Some(req.worker_id.clone()),
             phenotype_id: None,
-            details: format!("Completed partitions {:?} ({} rows)", req.partitions, req.rows_processed),
+            details: format!("Completed partitions {:?} ({} rows)", req.partitions, req.items_processed),
         });
     }
 
@@ -2125,10 +2125,6 @@ async fn handle_heartbeat(
         w.metrics_history.push_back(req.telemetry.clone());
         if w.metrics_history.len() > MAX_METRICS_HISTORY {
             w.metrics_history.pop_front();
-        }
-        // Update latest log tail
-        if let Some(ref tail) = req.telemetry.log_tail {
-            w.latest_log_tail = Some(tail.clone());
         }
     }
 
@@ -2677,7 +2673,7 @@ async fn get_dashboard_summary(
         .values()
         .filter(|w| w.status == WorkerStatus::Active)
         .filter_map(|w| w.metrics_history.back())
-        .map(|s| s.rows_per_sec)
+        .map(|s| s.items_per_sec)
         .sum();
 
     // ETA based on partition completion rate
