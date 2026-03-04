@@ -1,0 +1,68 @@
+[package]
+name = "genohype-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core data engine for Hail table format decoding and Parquet conversion"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["gcp", "validation"]
+gcp = ["object_store/gcp"]
+aws = ["object_store/aws"]
+http = ["object_store/http"]
+validation = ["dep:jsonschema"]
+
+[dependencies]
+# Compression
+zstd = "0.13"
+flate2 = "1.0"
+
+# Arrow and Parquet
+arrow = "53.3"
+parquet = "53.3"
+
+# Cloud storage (features enabled above)
+object_store = { version = "0.11", default-features = false }
+url = "2.5"
+bytes = "1.9"
+futures = "0.3"
+once_cell = "1.19"
+
+# Parsing
+nom = "7.1"
+
+# Async runtime (needed for object_store cloud backends)
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Parallelism
+rayon = "1.10"
+crossbeam-channel = "0.5"
+
+# Memory mapping for local file optimization
+memmap2 = "0.9"
+
+# Random sampling
+rand = "0.8"
+
+# VCF Support
+noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core", "csi"] }
+
+# Logging
+tracing = "0.1"
+
+# UUID generation (for temp files)
+uuid = { version = "1.0", features = ["v4"] }
+
+# Progress bars (used by parquet converter, VCF reader, validation)
+indicatif = "0.17"
+
+# JSON Schema validation (validation feature)
+jsonschema = { version = "0.27", default-features = false, optional = true }

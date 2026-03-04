@@ -1,0 +1,130 @@
+[package]
+name = "genohype-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "CLI for Hail table format decoding and conversion"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[features]
+default = ["genohype-core/default"]
+
+# Cloud storage backends (forwarded to core and enabled locally)
+gcp = ["genohype-core/gcp", "object_store/gcp"]
+aws = ["genohype-core/aws", "object_store/aws"]
+http = ["genohype-core/http", "object_store/http"]
+
+# Optional features
+validation = ["genohype-core/validation"]
+
+# Genomic high-level API
+genomic = ["dep:lru"]
+clickhouse = ["reqwest/blocking"]  # enables blocking HTTP client for ClickHouse export
+bigquery = ["gcp", "dep:google-cloud-bigquery", "dep:google-cloud-storage", "dep:google-cloud-auth"]
+benchmark = []  # sysinfo is now always included
+
+# HTTP server binary (axum is always included for distributed coordinator)
+server = ["dep:axum-extra", "dep:tower-http", "dep:async-stream", "dep:tokio-stream"]
+
+# All features
+full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", "benchmark"]
+
+[dependencies]
+# Core library
+genohype-core = { path = "../core" }
+
+# Re-export/use core dependencies needed by CLI
+tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"
+bytes = "1.9"
+rayon = "1.10"
+uuid = { version = "1.0", features = ["v4"] }
+crossbeam-channel = "0.5"
+
+# Arrow and Parquet (needed directly by CLI for some operations)
+arrow = "53.3"
+parquet = "53.3"
+
+# Cloud storage (needed directly by CLI modules)
+object_store = { version = "0.11", default-features = false }
+url = "2.5"
+
+# Compression (needed by CLI modules)
+flate2 = "1.0"
+zstd = "0.13"
+
+# Random (needed by CLI modules)
+rand = "0.8"
+
+# Memory mapping
+memmap2 = "0.9"
+
+# VCF Support (needed by CLI export modules)
+noodles = { version = "0.91", features = ["vcf", "tabix", "bgzf", "core", "csi"] }
+
+# Misc
+once_cell = "1.19"
+
+# Progress bars
+indicatif = "0.17"
+
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+owo-colors = "4"
+
+# 2D rendering (Manhattan plots)
+tiny-skia = "0.11"
+
+# HTTP Client for distributed worker and ClickHouse export
+# Use rustls for TLS to avoid OpenSSL cross-compilation issues
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
+# Google Cloud for BigQuery export (bigquery feature)
+google-cloud-bigquery = { version = "0.13", optional = true }
+google-cloud-storage = { version = "0.22", optional = true }
+google-cloud-auth = { version = "0.19", optional = true }
+
+# HTTP Server for distributed coordinator (and optional hail-server)
+axum = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Additional HTTP server features (server feature)
+axum-extra = { version = "0.9", features = ["query"], optional = true }
+tower-http = { version = "0.5", features = ["cors", "fs"], optional = true }
+async-stream = { version = "0.3", optional = true }
+tokio-stream = { version = "0.1", optional = true }
+
+# System metrics (always included for worker telemetry)
+sysinfo = "0.32"
+
+# SQLite for metrics persistence (coordinator dashboard)
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# XDG directory support
+dirs = "5.0"
+
+# TOML config file parsing
+toml = "0.8"
+
+# LRU Cache for the genomic client (genomic feature)
+lru = { version = "0.12", optional = true }
+
+[[bin]]
+name = "hail-decoder"
+path = "src/main.rs"
+
+[[bin]]
+name = "hail-server"
+path = "src/bin/hail-server.rs"
+required-features = ["server"]
+
+[dev-dependencies]
+tempfile = "3.8"
+criterion = "0.5"
