@@ -195,7 +195,7 @@ pub fn run_integrated_pipeline(config: &PipelineConfig) -> Result<()> {
             .collect();
 
         let layout = ChromosomeLayout::new(&contigs, config.width, 4);
-        let scale = YScale::new(config.height, 300.0);
+        let scale = YScale::new(config.height, 350.0); // Support p-values down to ~1e-350
         (layout, scale)
     } else {
         return Err(crate::HailError::InvalidFormat(
@@ -1847,7 +1847,7 @@ fn read_png_file_bytes(path: &str) -> Result<Vec<u8>> {
 fn draw_threshold_line_on_pixmap(pixmap: &mut tiny_skia::Pixmap, width: u32, threshold: f64) {
     use tiny_skia::{Color, Paint, PathBuilder, Stroke, Transform};
 
-    let y_scale = YScale::new(pixmap.height(), 300.0);
+    let y_scale = YScale::new(pixmap.height(), 350.0); // Support p-values down to ~1e-350
     let y = y_scale.threshold_y(threshold);
 
     let mut paint = Paint::default();
