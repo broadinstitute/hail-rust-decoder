@@ -1,0 +1,21 @@
+[package]
+name = "genohype-pool"
+version = "0.1.0"
+edition = "2021"
+description = "Generic distributed worker pool library"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+
+# HTTP server (coordinator)
+axum = "0.7"
+tokio = { version = "1.35", features = ["rt-multi-thread", "net", "time"] }
+
+# HTTP client (worker)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
+# UUID for task/worker IDs
+uuid = { version = "1.0", features = ["v4"] }

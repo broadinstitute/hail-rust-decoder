@@ -42,7 +42,7 @@ impl Default for WorkerConfig {
 }
 
 /// Shared state between the main worker loop and the telemetry background task.
-struct TelemetryState {
+pub struct TelemetryState {
     /// Total rows processed so far
     total_rows: AtomicUsize,
     /// Currently active partition (usize::MAX = none)
@@ -487,7 +487,7 @@ fn spawn_telemetry_loop(
 /// Dispatch job based on JobSpec to the appropriate processor.
 ///
 /// Returns (rows_processed, result_json, cached_engine).
-fn dispatch_job(
+pub fn dispatch_job(
     cached_engine: Option<(String, QueryEngine)>,
     partitions: &[usize],
     input_path: &str,

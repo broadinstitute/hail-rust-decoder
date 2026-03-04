@@ -1,0 +1,228 @@
+//! Generic message types for Coordinator/Worker communication.
+//!
+//! These messages define the network protocol between coordinators and workers.
+//! They use `serde_json::Value` for job specifications to remain decoupled from
+//! domain-specific types.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Request from a worker asking for work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkRequest {
+    /// Unique identifier for this worker
+    pub worker_id: String,
+}
+
+/// Response from coordinator with work assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WorkResponse {
+    /// Work is available - process these partitions
+    #[serde(rename = "task")]
+    Task {
+        /// Unique task identifier (for tracking in batch mode)
+        #[serde(default)]
+        task_id: String,
+        /// Partition indices to process
+        partitions: Vec<usize>,
+        /// Path to input data
+        input_path: String,
+        /// Job specification (domain-specific, serialized as JSON)
+        payload: Value,
+        /// Total number of partitions (for output file naming)
+        total_partitions: usize,
+        /// Filter conditions
+        #[serde(default)]
+        filters: Vec<String>,
+        /// Interval filters
+        #[serde(default)]
+        intervals: Vec<String>,
+    },
+    /// No work available but job is still in progress - wait and retry
+    #[serde(rename = "wait")]
+    Wait,
+    /// All work is complete - worker should exit
+    #[serde(rename = "exit")]
+    Exit,
+}
+
+/// Request from a worker reporting completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteRequest {
+    /// Worker that completed the work
+    pub worker_id: String,
+    /// Unique task identifier (matches WorkResponse)
+    #[serde(default)]
+    pub task_id: String,
+    /// Partitions that were completed (or failed)
+    pub partitions: Vec<usize>,
+    /// Number of items processed
+    pub items_processed: usize,
+    /// Optional result data for aggregation
+    #[serde(default)]
+    pub result_json: Option<Value>,
+    /// Error message if the task failed (None = success)
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Response to completion request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompleteResponse {
+    /// Whether the completion was acknowledged
+    pub acknowledged: bool,
+}
+
+/// Status query response from coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusResponse {
+    /// Number of partitions pending
+    pub pending: usize,
+    /// Number of partitions currently being processed
+    pub processing: usize,
+    /// Number of partitions completed
+    pub completed: usize,
+    /// Total partitions in the job
+    pub total: usize,
+    /// Total items processed so far
+    pub total_items: usize,
+    /// Number of partitions that permanently failed
+    pub failed: usize,
+    /// Whether the job is complete
+    pub is_complete: bool,
+}
+
+/// A point-in-time telemetry snapshot from a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetrySnapshot {
+    /// Unix timestamp in milliseconds
+    pub timestamp_ms: u64,
+    /// CPU usage percentage (0-100)
+    pub cpu_percent: Option<f32>,
+    /// Memory used in bytes
+    pub memory_used_bytes: Option<u64>,
+    /// Memory total in bytes
+    pub memory_total_bytes: Option<u64>,
+    /// Items processed per second
+    pub items_per_sec: f64,
+    /// Total items processed so far by this worker
+    pub total_items: usize,
+    /// Currently active partition, if any
+    pub active_partition: Option<usize>,
+    /// Partitions completed by this worker
+    pub partitions_completed: usize,
+
+    // Extended metrics for dashboard
+
+    /// Per-core CPU usage percentages
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_per_core: Option<Vec<f32>>,
+    /// Disk read rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_read_bytes_sec: Option<f64>,
+    /// Disk write rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_write_bytes_sec: Option<f64>,
+    /// Disk space used in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_used_bytes: Option<u64>,
+    /// Disk space total in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
+    /// Network receive rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_rx_bytes_sec: Option<f64>,
+    /// Network transmit rate in bytes per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_tx_bytes_sec: Option<f64>,
+}
+
+/// Heartbeat request from worker to coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    /// Worker sending the heartbeat
+    pub worker_id: String,
+    /// Current telemetry snapshot
+    pub telemetry: TelemetrySnapshot,
+}
+
+/// Heartbeat response from coordinator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    /// Whether the heartbeat was acknowledged
+    pub acknowledged: bool,
+}
+
+/// Dashboard summary for the overall job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardSummary {
+    /// Job progress percentage (0-100)
+    pub progress_percent: f64,
+    /// Total partitions in the job
+    pub total_partitions: usize,
+    /// Partitions completed
+    pub completed_partitions: usize,
+    /// Partitions currently processing
+    pub processing_partitions: usize,
+    /// Partitions pending
+    pub pending_partitions: usize,
+    /// Partitions permanently failed
+    pub failed_partitions: usize,
+    /// Total items processed across all workers
+    pub total_items: usize,
+    /// Aggregate items per second across all workers
+    pub cluster_items_per_sec: f64,
+    /// Job elapsed time in seconds
+    pub elapsed_secs: f64,
+    /// Estimated time remaining in seconds, if calculable
+    pub eta_secs: Option<f64>,
+    /// Whether the job is complete
+    pub is_complete: bool,
+    /// Input path being processed
+    pub input_path: String,
+    /// Job specification (serialized as JSON)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_spec: Option<Value>,
+    /// Whether the coordinator is idle
+    #[serde(default)]
+    pub idle: bool,
+}
+
+/// Worker information for dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardWorker {
+    /// Worker ID
+    pub worker_id: String,
+    /// Worker status
+    pub status: String,
+    /// Current telemetry
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetrySnapshot>,
+    /// Time since last heartbeat in seconds
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_secs: Option<f64>,
+}
+
+/// Dashboard metrics response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardMetrics {
+    /// Job summary
+    pub summary: DashboardSummary,
+    /// Worker information
+    pub workers: Vec<DashboardWorker>,
+    /// Bottleneck information
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottleneck: Option<DashboardBottleneck>,
+}
+
+/// Bottleneck analysis for dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardBottleneck {
+    /// Bottleneck type
+    pub bottleneck_type: String,
+    /// Bottleneck description
+    pub description: String,
+    /// Severity (0-100)
+    pub severity: f64,
+}

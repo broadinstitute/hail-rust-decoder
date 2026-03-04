@@ -42,4 +42,5 @@
 pub mod coordinator;
 pub mod message;
 pub mod metrics_db;
+pub mod pool_wrappers;
 pub mod worker;

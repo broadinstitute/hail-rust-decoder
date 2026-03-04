@@ -34,6 +34,9 @@ full = ["gcp", "aws", "http", "validation", "clickhouse", "bigquery", "server", 
 # Core library
 genohype-core = { path = "../core" }
 
+# Pool library (distributed worker infrastructure)
+genohype-pool = { path = "../pool" }
+
 # Re-export/use core dependencies needed by CLI
 tokio = { version = "1.35", features = ["rt-multi-thread", "sync", "macros"] }
 serde = { version = "1.0", features = ["derive"] }
