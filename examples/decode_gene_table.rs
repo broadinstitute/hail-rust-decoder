@@ -3,8 +3,8 @@
 ///! This example demonstrates successful decoding of a real-world Hail gene table
 ///! with complex nested structures, nullable fields, and arrays.
 
-use hail_decoder::buffer::{BufferBuilder, InputBuffer};
-use hail_decoder::codec::{EncodedValue, ETypeParser};
+use genohype_core::buffer::{BufferBuilder, InputBuffer};
+use genohype_core::codec::{EncodedValue, ETypeParser};
 use std::fs::File;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

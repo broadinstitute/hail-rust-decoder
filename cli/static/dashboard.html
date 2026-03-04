@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hail Decoder - Distributed Job Dashboard</title>
+<title>Genohype - Distributed Job Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
   :root {
@@ -564,13 +564,13 @@
     <div class="idle-subtitle">
       Coordinator is running in idle mode.<br>
       Submit a job with:<br><br>
-      <code>hail-decoder pool submit POOL --distributed -- export parquet INPUT OUTPUT</code>
+      <code>genohype pool submit POOL --distributed -- export parquet INPUT OUTPUT</code>
     </div>
   </div>
 
   <div class="header">
     <div class="header-left">
-      <h1>HAIL DECODER</h1>
+      <h1>GENOHYPE</h1>
       <span class="meta-text" id="job-status-text">Connecting...</span>
     </div>
     <div class="header-right">
@@ -971,11 +971,11 @@ function renderWorkerCard(w, metricsData) {
           </div>
           <div class="worker-stat">
             <div class="worker-stat-label">R/s</div>
-            <div class="worker-stat-value">${formatNumber(latest.rows_per_sec || 0)}</div>
+            <div class="worker-stat-value">${formatNumber(latest.items_per_sec || 0)}</div>
           </div>
           <div class="worker-stat">
             <div class="worker-stat-label">Rows</div>
-            <div class="worker-stat-value">${formatNumber(w.total_rows)}</div>
+            <div class="worker-stat-value">${formatNumber(w.total_items)}</div>
           </div>
           <div class="worker-stat">
             <div class="worker-stat-label">Done</div>
@@ -1065,8 +1065,8 @@ async function update() {
     document.getElementById('eta-text').textContent = summary.eta_secs ? formatDuration(summary.eta_secs) : '--';
 
     // Stats
-    document.getElementById('total-rows').textContent = formatNumber(summary.total_rows);
-    document.getElementById('rows-per-sec').textContent = formatNumber(Math.round(summary.cluster_rows_per_sec));
+    document.getElementById('total-rows').textContent = formatNumber(summary.total_items);
+    document.getElementById('rows-per-sec').textContent = formatNumber(Math.round(summary.cluster_items_per_sec));
     document.getElementById('total-partitions').textContent = summary.total_partitions;
 
     const activeCount = workers.filter(w => w.status === 'active').length;
@@ -1264,7 +1264,7 @@ async function update() {
       const wd = chartData[wm.worker_id];
       const latest = wm.snapshots.length > 0 ? wm.snapshots[wm.snapshots.length - 1] : null;
       if (latest) {
-        wd.throughput.push(latest.rows_per_sec || 0);
+        wd.throughput.push(latest.items_per_sec || 0);
         wd.cpu.push(latest.cpu_percent != null ? latest.cpu_percent : 0);
         // Memory usage as percentage
         const memPct = (latest.memory_used_bytes && latest.memory_total_bytes)
@@ -1274,7 +1274,7 @@ async function update() {
         // Network I/O (RX + TX) in MB/s
         const netMBps = ((latest.network_rx_bytes_sec || 0) + (latest.network_tx_bytes_sec || 0)) / 1e6;
         wd.network.push(netMBps);
-        totalThroughput += (latest.rows_per_sec || 0);
+        totalThroughput += (latest.items_per_sec || 0);
       } else {
         wd.throughput.push(0);
         wd.cpu.push(0);

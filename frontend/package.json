@@ -1,7 +1,7 @@
 {
   "name": "manhattan-viewer",
   "version": "0.1.0",
-  "description": "Interactive Manhattan plot viewer for hail-decoder output",
+  "description": "Interactive Manhattan plot viewer for genohype output",
   "type": "module",
   "scripts": {
     "dev": "vite",

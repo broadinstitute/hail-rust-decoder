@@ -154,7 +154,7 @@ impl GcpClient {
             }
 
             // Check if the ready marker file exists
-            let mut cmd = self.get_ssh_command(instance, zone, "test -f /tmp/hail-decoder-ready");
+            let mut cmd = self.get_ssh_command(instance, zone, "test -f /tmp/genohype-ready");
             let status = cmd.status();
 
             if let Ok(s) = status {
@@ -193,7 +193,7 @@ impl CloudProvider for GcpClient {
             let coord_script = coordinator_script.clone().unwrap_or_else(|| worker_script.clone());
             instance_configs.push((
                 format!("{}-coordinator", config.name),
-                format!("hail-decoder-coordinator,pool-{},role-coordinator", config.name),
+                format!("genohype-coordinator,pool-{},role-coordinator", config.name),
                 coord_script,
             ));
         }
@@ -202,7 +202,7 @@ impl CloudProvider for GcpClient {
         for i in 0..config.worker_count {
             instance_configs.push((
                 format!("{}-worker-{}", config.name, i),
-                format!("hail-decoder-worker,pool-{},role-worker", config.name),
+                format!("genohype-worker,pool-{},role-worker", config.name),
                 worker_script.clone(),
             ));
         }

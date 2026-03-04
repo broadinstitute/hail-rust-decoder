@@ -18,8 +18,8 @@ worker:
 	@ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null || true; \
 	cargo zigbuild --target x86_64-unknown-linux-gnu --release --features $(WORKER_FEATURES)
 	@mkdir -p target/release
-	@cp target/x86_64-unknown-linux-gnu/release/hail-decoder target/release/hail-decoder-worker
-	@echo "Installed: target/release/hail-decoder-worker"
+	@cp target/x86_64-unknown-linux-gnu/release/genohype target/release/genohype-worker
+	@echo "Installed: target/release/genohype-worker"
 
 # Build both with specific features
 full:
@@ -27,8 +27,8 @@ full:
 	@ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null || true; \
 	cargo zigbuild --target x86_64-unknown-linux-gnu --release --features full
 	@mkdir -p target/release
-	@cp target/x86_64-unknown-linux-gnu/release/hail-decoder target/release/hail-decoder-worker
-	@echo "Installed: target/release/hail-decoder-worker"
+	@cp target/x86_64-unknown-linux-gnu/release/genohype target/release/genohype-worker
+	@echo "Installed: target/release/genohype-worker"
 
 clean:
 	cargo clean

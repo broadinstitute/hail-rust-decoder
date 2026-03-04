@@ -1,7 +1,7 @@
 //! VM startup script generation for worker nodes.
 //!
 //! This module generates the bash script that runs on VM boot to install
-//! dependencies required by the hail-decoder binary.
+//! dependencies required by the genohype binary.
 
 use super::WireGuardConfig;
 
@@ -17,7 +17,7 @@ pub fn generate_startup_script() -> String {
 set -e
 
 # Log startup
-echo "=== hail-decoder worker VM startup ==="
+echo "=== genohype worker VM startup ==="
 echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Install dependencies required for the Rust binary
@@ -28,7 +28,7 @@ apt-get install -y -qq libssl-dev ca-certificates
 mkdir -p /usr/local/bin
 
 # Create a marker file to indicate VM is ready
-touch /tmp/hail-decoder-ready
+touch /tmp/genohype-ready
 
 echo "=== Worker VM initialized ==="
 "#
@@ -52,7 +52,7 @@ pub fn generate_coordinator_startup_script(wireguard: &WireGuardConfig) -> Strin
 set -e
 
 # Log startup
-echo "=== hail-decoder coordinator VM startup ==="
+echo "=== genohype coordinator VM startup ==="
 echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # Helper function to resolve secret references
@@ -114,7 +114,7 @@ fi
 mkdir -p /usr/local/bin
 
 # Create a marker file to indicate VM is ready
-touch /tmp/hail-decoder-ready
+touch /tmp/genohype-ready
 
 echo "=== Coordinator VM initialized ==="
 "#,
@@ -151,7 +151,7 @@ mod tests {
         assert!(script.contains("libssl-dev"));
         assert!(script.contains("ca-certificates"));
         assert!(script.contains("/usr/local/bin"));
-        assert!(script.contains("hail-decoder-ready"));
+        assert!(script.contains("genohype-ready"));
     }
 
     #[test]
@@ -190,6 +190,6 @@ mod tests {
 
         // Check it still has worker essentials
         assert!(script.contains("libssl-dev"));
-        assert!(script.contains("hail-decoder-ready"));
+        assert!(script.contains("genohype-ready"));
     }
 }

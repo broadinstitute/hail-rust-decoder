@@ -1,4 +1,4 @@
-//! Environment configuration management (.hail-decoder-env).
+//! Environment configuration management (.genohype-env).
 //!
 //! Provides commands for initializing, showing, and verifying environment
 //! configurations that tie together storage locations and ClickHouse instances.
@@ -10,19 +10,19 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Initialize a new .hail-decoder-env file.
+/// Initialize a new .genohype-env file.
 pub fn init_env(
     _config: &Config,
     name: &str,
     storage: Option<&str>,
     clickhouse: Option<&str>,
 ) -> Result<()> {
-    let env_path = PathBuf::from(".hail-decoder-env");
+    let env_path = PathBuf::from(".genohype-env");
 
     if env_path.exists() {
         return Err(genohype_core::HailError::Io(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            ".hail-decoder-env already exists in current directory",
+            ".genohype-env already exists in current directory",
         )));
     }
 
@@ -36,7 +36,7 @@ pub fn init_env(
         .unwrap_or_else(|| "YOUR_CLICKHOUSE_INSTANCE".to_string());
 
     let content = format!(
-        r#"# Environment configuration for hail-decoder
+        r#"# Environment configuration for genohype
 # This file ties together storage location and ClickHouse instance.
 
 name = "{}"
@@ -48,7 +48,7 @@ clickhouse = "{}"
 
     std::fs::write(&env_path, &content)?;
 
-    println!("{} Created .hail-decoder-env", "OK".green());
+    println!("{} Created .genohype-env", "OK".green());
     println!("\n{}", content);
     println!(
         "{} Edit the file to set your storage path and ClickHouse instance.",
@@ -106,9 +106,9 @@ pub fn show_env(config: &Config) -> Result<()> {
             );
         }
         None => {
-            println!("{} No .hail-decoder-env found", "Warning:".yellow());
+            println!("{} No .genohype-env found", "Warning:".yellow());
             println!("\nCreate one with:");
-            println!("  hail-decoder env init <name> --storage gs://bucket/prefix --clickhouse <instance>");
+            println!("  genohype env init <name> --storage gs://bucket/prefix --clickhouse <instance>");
         }
     }
 
@@ -120,7 +120,7 @@ pub fn verify_env(config: &Config) -> Result<()> {
     let env = HailEnv::load().ok_or_else(|| {
         genohype_core::HailError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "No .hail-decoder-env found. Run 'hail-decoder env init' first.",
+            "No .genohype-env found. Run 'genohype env init' first.",
         ))
     })?;
 

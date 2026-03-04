@@ -120,11 +120,11 @@ toml = "0.8"
 lru = { version = "0.12", optional = true }
 
 [[bin]]
-name = "hail-decoder"
+name = "genohype"
 path = "src/main.rs"
 
 [[bin]]
-name = "hail-server"
+name = "genohype-server"
 path = "src/bin/hail-server.rs"
 required-features = ["server"]
 

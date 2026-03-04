@@ -1,7 +1,7 @@
 //! Cloud infrastructure abstraction for distributed processing.
 //!
 //! This module provides traits and implementations for managing cloud VMs
-//! for distributed hail-decoder workloads.
+//! for distributed genohype workloads.
 
 pub mod gcp;
 pub mod pool;
@@ -100,7 +100,7 @@ pub struct InstanceSetup {
     pub machine_type: String,
     /// GCP zone (e.g., "us-central1-a")
     pub zone: String,
-    /// Network tags (e.g., ["hail-decoder-worker,pool-mypool,role-worker"])
+    /// Network tags (e.g., ["genohype-worker,pool-mypool,role-worker"])
     pub tags: Vec<String>,
     /// Startup script to run on boot
     pub startup_script: String,

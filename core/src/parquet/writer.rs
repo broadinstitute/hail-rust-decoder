@@ -56,8 +56,8 @@ impl ParquetWriter<File> {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::codec::EncodedType;
-    /// use hail_decoder::parquet::ParquetWriter;
+    /// use genohype_core::codec::EncodedType;
+    /// use genohype_core::parquet::ParquetWriter;
     ///
     /// let schema = EncodedType::EBaseStruct {
     ///     required: true,
@@ -93,9 +93,9 @@ impl<W: Write + Send> ParquetWriter<W> {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::codec::EncodedType;
-    /// use hail_decoder::parquet::ParquetWriter;
-    /// use hail_decoder::io::CloudWriter;
+    /// use genohype_core::codec::EncodedType;
+    /// use genohype_core::parquet::ParquetWriter;
+    /// use genohype_core::io::CloudWriter;
     ///
     /// let schema = EncodedType::EBaseStruct {
     ///     required: true,

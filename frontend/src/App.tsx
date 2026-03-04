@@ -123,10 +123,10 @@ function App() {
         <p>
           Powered by{' '}
           <a
-            href="https://github.com/your-org/hail-decoder"
+            href="https://github.com/your-org/genohype"
             style={styles.link}
           >
-            hail-decoder
+            genohype
           </a>
         </p>
       </footer>

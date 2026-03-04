@@ -2809,14 +2809,14 @@ fn run_manhattan_batch(args: ManhattanBatchArgs) -> Result<()> {
     if let Some(ref config_path) = args.config {
         println!(
             "  To submit this batch to a pool, run:\n    \
-             hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
+             genohype pool submit <pool> -- manhattan-batch \\\n      \
              --config {}{}",
             config_path, mode_flag
         );
     } else {
         println!(
             "  To submit this batch to a pool, run:\n    \
-             hail-decoder pool submit <pool> -- manhattan-batch \\\n      \
+             genohype pool submit <pool> -- manhattan-batch \\\n      \
              --assets-json {} \\\n      \
              --output-dir {}{}",
             assets_json, output_dir, mode_flag

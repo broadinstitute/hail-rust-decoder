@@ -1,6 +1,6 @@
-use hail_decoder::codec::EncodedValue;
-use hail_decoder::index::IndexReader;
-use hail_decoder::metadata::RVDComponentSpec;
+use genohype_core::codec::EncodedValue;
+use genohype_core::index::IndexReader;
+use genohype_core::metadata::RVDComponentSpec;
 
 #[test]
 fn test_index_reader_initialization() {

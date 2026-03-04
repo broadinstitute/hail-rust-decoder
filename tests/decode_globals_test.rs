@@ -1,8 +1,8 @@
 ///! Test decoding the globals data from the test dataset
 
-use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
-use hail_decoder::codec::{Decoder, HailDecoder, Value};
-use hail_decoder::schema::HailType;
+use genohype_core::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use genohype_core::codec::{Decoder, HailDecoder, Value};
+use genohype_core::schema::HailType;
 use std::fs::File;
 
 #[test]

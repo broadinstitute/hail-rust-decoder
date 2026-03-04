@@ -1,6 +1,6 @@
 ///! Detailed test to trace exactly where interval decoding fails
 
-use hail_decoder::buffer::{BufferBuilder, InputBuffer};
+use genohype_core::buffer::{BufferBuilder, InputBuffer};
 use std::fs::File;
 
 #[test]

@@ -7,8 +7,8 @@
 ///! 4. Array decoding
 
 use flate2::read::GzDecoder;
-use hail_decoder::buffer::{BufferBuilder, InputBuffer};
-use hail_decoder::codec::{EncodedType, EncodedValue, ETypeParser};
+use genohype_core::buffer::{BufferBuilder, InputBuffer};
+use genohype_core::codec::{EncodedType, EncodedValue, ETypeParser};
 use serde_json::Value;
 use std::fs::File;
 

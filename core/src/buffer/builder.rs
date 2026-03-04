@@ -22,7 +22,7 @@ use std::path::Path;
 ///
 /// # Example
 /// ```no_run
-/// use hail_decoder::buffer::BufferBuilder;
+/// use genohype_core::buffer::BufferBuilder;
 ///
 /// let mut buffer = BufferBuilder::from_file("data.bin")
 ///     .expect("Failed to open file")
@@ -57,7 +57,7 @@ impl BufferBuilder<crate::io::BoxedReader> {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::buffer::BufferBuilder;
+    /// use genohype_core::buffer::BufferBuilder;
     ///
     /// // Local file
     /// let buffer = BufferBuilder::from_path("data/table.ht/rows/parts/part-0")

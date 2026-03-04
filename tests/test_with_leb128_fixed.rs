@@ -2,7 +2,7 @@
 ///!
 ///! This test uses the actual LEB128Buffer (now fixed to override integer reads)
 
-use hail_decoder::buffer::{BlockingBuffer, InputBuffer, LEB128Buffer, StreamBlockBuffer, ZstdBuffer};
+use genohype_core::buffer::{BlockingBuffer, InputBuffer, LEB128Buffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]

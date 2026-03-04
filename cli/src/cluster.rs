@@ -24,7 +24,7 @@ pub fn list_clusters(config: &Config, status_filter: Option<&String>) -> Result<
         println!("  No clusters configured.");
         println!(
             "\n  Add clusters to your {} or project config file.",
-            "~/.config/hail-decoder/config.toml".cyan()
+            "~/.config/genohype/config.toml".cyan()
         );
         return Ok(());
     }

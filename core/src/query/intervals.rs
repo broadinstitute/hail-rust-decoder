@@ -59,7 +59,7 @@ impl IntervalList {
     ///
     /// # Example
     /// ```
-    /// use hail_decoder::query::IntervalList;
+    /// use genohype_core::query::IntervalList;
     /// let intervals = IntervalList::from_strings(&["chr1:100-200".to_string()]).unwrap();
     /// assert!(intervals.contains("chr1", 150));
     /// ```

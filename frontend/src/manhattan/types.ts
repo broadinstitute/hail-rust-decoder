@@ -1,6 +1,6 @@
 /**
  * TypeScript interfaces matching the Rust ManhattanSidecar struct from src/plot/data.rs.
- * These types define the contract between the hail-decoder backend and the viewer frontend.
+ * These types define the contract between the genohype backend and the viewer frontend.
  */
 
 /**

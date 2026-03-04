@@ -6,7 +6,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use hail_decoder::partitioning::PartitionAllocator;
+//! use genohype_core::partitioning::PartitionAllocator;
 //!
 //! // Worker 0 of 4 total workers, processing 100 total shards
 //! let allocator = PartitionAllocator::new(0, 4);

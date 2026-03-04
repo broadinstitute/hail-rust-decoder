@@ -1,52 +1,52 @@
 #!/bin/bash
-# hail-decoder Demo Script
+# genohype Demo Script
 # Run commands one at a time in a tmux split
 
 # Build release binary
-cargo build --release --bin hail-decoder
+cargo build --release --bin genohype
 
 # ============================================
 # INFO - Show table metadata (fast, no scan)
 # ============================================
 
 # View metadata for analysis table
-hail-decoder info data/analysis-meta.ht
+genohype info data/analysis-meta.ht
 
 # View metadata for variant table with locus field
-hail-decoder info data/variants.ht
+genohype info data/variants.ht
 
 # ============================================
 # SUMMARY - Full scan with statistics (slower)
 # ============================================
 
 # Get row count and field statistics
-hail-decoder summary data/analysis-meta.ht
+genohype summary data/analysis-meta.ht
 
 # ============================================
 # QUERY - Stream rows with filtering
 # ============================================
 
 # Basic query with limit
-hail-decoder query data/analysis-meta.ht --limit 3
+genohype query data/analysis-meta.ht --limit 3
 
 # Filter by field value
-hail-decoder query data/analysis-meta.ht --where ancestry=EUR --limit 3
+genohype query data/analysis-meta.ht --where ancestry=EUR --limit 3
 
 # Multiple filters combined
-hail-decoder query data/analysis-meta.ht --where ancestry=EUR --where trait_type=binary --limit 3
+genohype query data/analysis-meta.ht --where ancestry=EUR --where trait_type=binary --limit 3
 
 # Query with JSON output
-hail-decoder query data/analysis-meta.ht --where ancestry=AFR --limit 2 --json
+genohype query data/analysis-meta.ht --where ancestry=AFR --limit 2 --json
 
 # ============================================
 # GCS - Query from Google Cloud Storage
 # ============================================
 
 # Query public gnomAD table (requires GCS auth)
-hail-decoder info "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht"
+genohype info "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht"
 
 # Query with nested field filters
-hail-decoder query "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht" \
+genohype query "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht" \
   --where "locus.contig=chr1" \
   --where "locus.position>=55039447" \
   --where "locus.position<=55064852" \
@@ -57,13 +57,13 @@ hail-decoder query "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.ex
 # ============================================
 
 # Single interval
-hail-decoder query data/variants.ht --interval "chr10:121500000-121600000" --limit 5
+genohype query data/variants.ht --interval "chr10:121500000-121600000" --limit 5
 
 # Filter by ancestry within interval
-hail-decoder query data/variants.ht --interval "chr10:121500000-121600000" --where ancestry_group=eur --limit 3
+genohype query data/variants.ht --interval "chr10:121500000-121600000" --where ancestry_group=eur --limit 3
 
 # Multiple intervals
-hail-decoder query data/variants.ht \
+genohype query data/variants.ht \
   --interval "chr10:121500000-121600000" \
   --interval "chr20:35400000-35500000" \
   --limit 5
@@ -73,7 +73,7 @@ hail-decoder query data/variants.ht \
 # ============================================
 
 # Export to Parquet with filters
-hail-decoder export parquet \
+genohype export parquet \
   data/analysis-meta.ht \
   /tmp/analysis-eur.parquet \
   --where ancestry=EUR
@@ -82,7 +82,7 @@ hail-decoder export parquet \
 duckdb -c "SELECT phenoname, ancestry, n_cases, n_controls FROM '/tmp/analysis-eur.parquet' LIMIT 5"
 
 # Export subset to new Hail table
-hail-decoder export hail \
+genohype export hail \
   data/variants.ht \
   /tmp/variants-chr10.ht \
   --interval "chr10:121500000-121600000"
@@ -91,7 +91,7 @@ hail-decoder export hail \
 uv run --with hail python -c "import hail as hl; hl.init(quiet=True); ht = hl.read_table('/tmp/variants-chr10.ht'); ht.describe()"
 
 # Export filtered VCF with bgzip compression
-hail-decoder export vcf \
+genohype export vcf \
   "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" \
   /tmp/filtered.vcf.gz \
   --interval "chrX:31097677-31098000" \
@@ -105,39 +105,39 @@ gzcat /tmp/filtered.vcf.gz | head -30
 # ============================================
 
 # Generate JSON schema from table
-hail-decoder schema generate data/analysis-meta.ht
+genohype schema generate data/analysis-meta.ht
 
 # Save schema to file
-hail-decoder schema generate data/analysis-meta.ht /tmp/analysis-schema.json
+genohype schema generate data/analysis-meta.ht /tmp/analysis-schema.json
 
 # Validate table against schema
-hail-decoder schema validate data/analysis-meta.ht /tmp/analysis-schema.json
+genohype schema validate data/analysis-meta.ht /tmp/analysis-schema.json
 
 # Validation failure (wrong schema for table)
-hail-decoder schema validate data/variants.ht /tmp/analysis-schema.json --limit 3
+genohype schema validate data/variants.ht /tmp/analysis-schema.json --limit 3
 
 # Validate cloud table with random sampling
-hail-decoder schema generate "gs://axaou-central/ms/axaou/v8/515c3dc3/genome_variant_annotations_hds/ht/prep_table.ht" /tmp/cloud-schema.json
+genohype schema generate "gs://axaou-central/ms/axaou/v8/515c3dc3/genome_variant_annotations_hds/ht/prep_table.ht" /tmp/cloud-schema.json
 
-hail-decoder schema validate "gs://axaou-central/ms/axaou/v8/515c3dc3/genome_variant_annotations_hds/ht/prep_table.ht" /tmp/cloud-schema.json --sample 100
+genohype schema validate "gs://axaou-central/ms/axaou/v8/515c3dc3/genome_variant_annotations_hds/ht/prep_table.ht" /tmp/cloud-schema.json --sample 100
 
 # VCF info (works on VCF files too)
-hail-decoder info "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz"
+genohype info "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz"
 
 # Validate VCF
-hail-decoder schema generate "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" /tmp/vcf-schema.json
+genohype schema generate "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" /tmp/vcf-schema.json
 
-hail-decoder schema validate "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" /tmp/vcf-schema.json --sample 10000
+genohype schema validate "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" /tmp/vcf-schema.json --sample 10000
 
 # Query VCF with interval using tabix index (~2kb region in DMD gene)
-hail-decoder query "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" --interval "chrX:31097677-31100000" 
+genohype query "./data/gnomad.exomes.v4.1.sites.chrX.vcf.bgz" --interval "chrX:31097677-31100000" 
 
 # ============================================
 # CLICKHOUSE - Export to ClickHouse database
 # ============================================
 
 # Export variants using intervals file (requires --features clickhouse)
-hail-decoder export clickhouse \
+genohype export clickhouse \
   data/variants.ht \
   "http://default:test@localhost:8123" \
   demo_variants \
@@ -154,7 +154,7 @@ curl -s "http://default:test@localhost:8123" --data "SELECT ancestry_group, coun
 # ============================================
 
 # Export with interval filter to BigQuery
-hail-decoder export bigquery \
+genohype export bigquery \
   data/variants.ht \
   aou-neale-gwas-browser:hail_test.demo_variants \
   --bucket axaou-central-tmp \

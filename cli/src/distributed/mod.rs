@@ -25,7 +25,7 @@
 //!
 //! Start a coordinator:
 //! ```bash
-//! hail-decoder service start-coordinator \
+//! genohype service start-coordinator \
 //!     --port 3000 \
 //!     --input gs://bucket/table.ht \
 //!     --output gs://bucket/output/ \
@@ -34,7 +34,7 @@
 //!
 //! Start workers (on each VM):
 //! ```bash
-//! hail-decoder service start-worker \
+//! genohype service start-worker \
 //!     --url http://10.0.0.5:3000 \
 //!     --worker-id worker-0
 //! ```

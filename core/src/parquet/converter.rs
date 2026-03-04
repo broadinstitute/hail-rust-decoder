@@ -7,7 +7,7 @@
 //! The sharded export functions support writing directly to cloud storage (GCS, S3):
 //!
 //! ```no_run
-//! use hail_decoder::parquet::hail_to_parquet_sharded;
+//! use genohype_core::parquet::hail_to_parquet_sharded;
 //!
 //! // Write to GCS
 //! hail_to_parquet_sharded("gs://bucket/input.ht", "gs://bucket/output/", true, None)?;
@@ -46,7 +46,7 @@ use std::thread;
 /// # Example
 ///
 /// ```rust,no_run
-/// use hail_decoder::parquet::hail_to_parquet;
+/// use genohype_core::parquet::hail_to_parquet;
 ///
 /// let rows_written = hail_to_parquet("input.ht", "output.parquet")?;
 /// println!("Wrote {} rows", rows_written);
@@ -316,10 +316,10 @@ pub fn hail_to_parquet_sharded_with_metrics(
 ///
 /// ```bash
 /// # Worker 0 of 4 processes shards 0, 4, 8, ...
-/// hail-decoder export parquet input.ht output/ --worker-id 0 --total-workers 4
+/// genohype export parquet input.ht output/ --worker-id 0 --total-workers 4
 ///
 /// # Worker 1 of 4 processes shards 1, 5, 9, ...
-/// hail-decoder export parquet input.ht output/ --worker-id 1 --total-workers 4
+/// genohype export parquet input.ht output/ --worker-id 1 --total-workers 4
 /// ```
 pub fn hail_to_parquet_sharded_full(
     input_path: &str,

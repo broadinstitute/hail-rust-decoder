@@ -11,7 +11,7 @@
 //! **For most use cases**, use the [`BufferBuilder`] to construct the correct stack:
 //!
 //! ```no_run
-//! use hail_decoder::buffer::BufferBuilder;
+//! use genohype_core::buffer::BufferBuilder;
 //!
 //! // Standard configuration (with LEB128 encoding)
 //! let mut buffer = BufferBuilder::from_file("data.bin")

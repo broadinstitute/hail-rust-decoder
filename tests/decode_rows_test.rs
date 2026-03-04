@@ -2,7 +2,7 @@
 ///!
 ///! The test data contains 3 genes. Let's decode the first one to understand the format.
 
-use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use genohype_core::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]

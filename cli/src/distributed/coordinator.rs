@@ -559,7 +559,7 @@ pub async fn run_coordinator(
                 if let Some(spec) = manhattan_spec {
                     if spec.skip_composite {
                         println!("Skipping composite step (--no-composite). Run manually with:");
-                        println!("  hail-decoder manhattan --from-shards {}", spec.output_path);
+                        println!("  genohype manhattan --from-shards {}", spec.output_path);
                     } else {
                     println!("Running post-job composite for Manhattan plot...");
 
@@ -2086,7 +2086,7 @@ async fn get_status(
         processing,
         completed,
         total,
-        total_rows: data.total_rows,
+        total_items: data.total_rows,
         failed,
         is_complete,
     })
@@ -2667,8 +2667,8 @@ async fn get_dashboard_summary(
         0.0
     };
 
-    // Compute cluster-wide rows/sec from worker telemetry
-    let cluster_rows_per_sec: f64 = data
+    // Compute cluster-wide items/sec from worker telemetry
+    let cluster_items_per_sec: f64 = data
         .worker_registry
         .values()
         .filter(|w| w.status == WorkerStatus::Active)
@@ -2713,8 +2713,8 @@ async fn get_dashboard_summary(
         processing_partitions: processing,
         pending_partitions: pending,
         failed_partitions: failed,
-        total_rows: data.total_rows,
-        cluster_rows_per_sec,
+        total_items: data.total_rows,
+        cluster_items_per_sec,
         elapsed_secs: elapsed,
         eta_secs,
         is_complete,
@@ -2859,7 +2859,7 @@ async fn get_dashboard_workers(
             status: w.status.as_str().to_string(),
             last_seen_secs: now.duration_since(w.last_seen).as_secs_f64(),
             latest: w.metrics_history.back().cloned(),
-            total_rows: w.total_rows,
+            total_items: w.total_rows,
             partitions_completed: w.partitions_completed,
             current_task: w.current_task.clone(),
         })
@@ -2974,16 +2974,16 @@ async fn serve_phenotypes_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../static/phenotypes.html"))
 }
 
-/// Handler for GET /api/binary - serve the hail-decoder binary.
+/// Handler for GET /api/binary - serve the genohype binary.
 ///
-/// This endpoint allows workers to download the hail-decoder binary directly
+/// This endpoint allows workers to download the genohype binary directly
 /// from the coordinator over the fast GCP internal network, instead of each
 /// worker receiving it via slow SCP from the client machine.
 ///
 /// We serve from the fixed install path rather than current_exe() because:
 /// - current_exe() returns /proc/self/exe which becomes stale when binary is replaced
 /// - The fixed path always points to the latest uploaded binary
-const BINARY_INSTALL_PATH: &str = "/usr/local/bin/hail-decoder";
+const BINARY_INSTALL_PATH: &str = "/usr/local/bin/genohype";
 
 async fn serve_binary() -> impl axum::response::IntoResponse {
     use axum::http::{header, StatusCode};
@@ -3020,7 +3020,7 @@ async fn serve_binary() -> impl axum::response::IntoResponse {
                 .header(header::CONTENT_LENGTH, file_size)
                 .header(
                     header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"hail-decoder\"",
+                    "attachment; filename=\"genohype\"",
                 )
                 .body(Body::from(buffer))
                 .unwrap()

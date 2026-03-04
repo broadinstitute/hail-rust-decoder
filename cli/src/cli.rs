@@ -4,13 +4,13 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "hail-decoder",
+    name = "genohype",
     version,
     about = "Hail Table Decoder and Converter",
     long_about = None
 )]
 pub struct Cli {
-    /// Path to configuration file (default: ~/.config/hail-decoder/config.toml)
+    /// Path to configuration file (default: ~/.config/genohype/config.toml)
     #[arg(long, global = true)]
     pub config: Option<String>,
 
@@ -78,7 +78,7 @@ pub enum Commands {
         command: ClickHouseCommands,
     },
 
-    /// Manage environment configuration (.hail-decoder-env)
+    /// Manage environment configuration (.genohype-env)
     Env {
         #[command(subcommand)]
         command: EnvCommands,
@@ -832,7 +832,7 @@ pub enum ClickHouseCommands {
 /// Subcommands for managing environment configuration.
 #[derive(Subcommand)]
 pub enum EnvCommands {
-    /// Initialize a new .hail-decoder-env file
+    /// Initialize a new .genohype-env file
     Init {
         /// Environment name (e.g., "20260303", "dev")
         name: String,
@@ -919,7 +919,7 @@ pub enum PoolCommands {
         #[arg(long)]
         cluster: Option<String>,
 
-        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/hail-decoder)
+        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/genohype)
         #[arg(long)]
         binary: Option<String>,
 
@@ -1013,7 +1013,7 @@ pub enum PoolCommands {
         #[arg(long, default_value = "us-central1-a")]
         zone: String,
 
-        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/hail-decoder)
+        /// Path to the Linux-compiled binary (defaults to target/x86_64-unknown-linux-gnu/release/genohype)
         #[arg(long)]
         binary: Option<String>,
 

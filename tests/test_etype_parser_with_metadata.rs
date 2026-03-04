@@ -1,6 +1,6 @@
 ///! Test EType parser with real metadata from the gene models table
 
-use hail_decoder::codec::ETypeParser;
+use genohype_core::codec::ETypeParser;
 
 #[test]
 fn test_parse_row_etype_from_metadata() {

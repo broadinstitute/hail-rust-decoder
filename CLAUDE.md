@@ -57,7 +57,7 @@ rustup target add x86_64-unknown-linux-gnu
 
 # Build Linux binary
 cargo linux --release
-# Output: target/x86_64-unknown-linux-gnu/release/hail-decoder
+# Output: target/x86_64-unknown-linux-gnu/release/genohype
 ```
 
 ## Commands
@@ -87,14 +87,14 @@ Run parallel exports across multiple GCP VMs:
 cargo linux --release
 
 # 2. Create a pool of spot VMs
-hail-decoder pool create my-pool --workers 4 --spot
+genohype pool create my-pool --workers 4 --spot
 
 # 3. Submit a distributed job
-hail-decoder pool submit my-pool -- \
+genohype pool submit my-pool -- \
     export parquet gs://bucket/input.ht gs://bucket/output/ --shard-count 100
 
 # 4. Clean up
-hail-decoder pool destroy my-pool
+genohype pool destroy my-pool
 ```
 
 Requires `gcloud` CLI configured with appropriate project/credentials.

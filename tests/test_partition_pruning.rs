@@ -1,5 +1,5 @@
-use hail_decoder::metadata::RVDComponentSpec;
-use hail_decoder::query::{filter_partitions, KeyRange, KeyValue};
+use genohype_core::metadata::RVDComponentSpec;
+use genohype_core::query::{filter_partitions, KeyRange, KeyValue};
 
 #[test]
 fn test_partition_pruning_gene_models() {

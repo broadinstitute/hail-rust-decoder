@@ -48,7 +48,7 @@ const UPLOAD_CHANNEL_CAPACITY: usize = 4;
 /// # Usage
 ///
 /// ```no_run
-/// use hail_decoder::io::CloudWriter;
+/// use genohype_core::io::CloudWriter;
 ///
 /// let writer = CloudWriter::new("gs://bucket/path/output.parquet")?;
 /// // Write data...
@@ -196,7 +196,7 @@ impl Write for CloudWriter {
 /// ## Usage
 ///
 /// ```no_run
-/// use hail_decoder::io::StreamingCloudWriter;
+/// use genohype_core::io::StreamingCloudWriter;
 ///
 /// let mut writer = StreamingCloudWriter::new("gs://bucket/large-file.parquet")?;
 /// // Write data in chunks - uploads happen in background

@@ -33,19 +33,19 @@ Filter queries or exports to these test genes:
 
 ```bash
 # Query with JSON intervals
-hail-decoder query table.ht --intervals-file examples/intervals/test_genes.json
+genohype query table.ht --intervals-file examples/intervals/test_genes.json
 
 # Query with BED intervals
-hail-decoder query table.ht --intervals-file examples/intervals/test_genes.bed
+genohype query table.ht --intervals-file examples/intervals/test_genes.bed
 
 # Query with text intervals
-hail-decoder query table.ht --intervals-file examples/intervals/test_genes.txt
+genohype query table.ht --intervals-file examples/intervals/test_genes.txt
 
 # Export filtered to Parquet
-hail-decoder export parquet table.ht output.parquet --intervals-file examples/intervals/test_genes.bed
+genohype export parquet table.ht output.parquet --intervals-file examples/intervals/test_genes.bed
 
 # Combine with CLI intervals
-hail-decoder query table.ht --intervals-file examples/intervals/test_genes.txt --interval "chr3:100-200"
+genohype query table.ht --intervals-file examples/intervals/test_genes.txt --interval "chr3:100-200"
 ```
 
 ## Format Details

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 pub use genohype_pool::distributed::{
     CompleteRequest, CompleteResponse, HeartbeatRequest, HeartbeatResponse,
-    TelemetrySnapshot, WorkRequest, WorkResponse,
+    StatusResponse, TelemetrySnapshot, WorkRequest, WorkResponse,
 };
 
 /// Table initialization strategy for ingestion.
@@ -494,24 +494,6 @@ impl JobSpec {
 }
 
 
-/// Status query response from coordinator.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StatusResponse {
-    /// Number of partitions pending
-    pub pending: usize,
-    /// Number of partitions currently being processed
-    pub processing: usize,
-    /// Number of partitions completed
-    pub completed: usize,
-    /// Total partitions in the job
-    pub total: usize,
-    /// Total rows processed so far
-    pub total_rows: usize,
-    /// Number of partitions that permanently failed (max retries exceeded)
-    pub failed: usize,
-    /// Whether the job is complete
-    pub is_complete: bool,
-}
 
 
 /// Dashboard summary for the overall job.
@@ -529,10 +511,10 @@ pub struct DashboardSummary {
     pub pending_partitions: usize,
     /// Partitions permanently failed
     pub failed_partitions: usize,
-    /// Total rows processed across all workers
-    pub total_rows: usize,
-    /// Aggregate rows per second across all workers
-    pub cluster_rows_per_sec: f64,
+    /// Total items processed across all workers
+    pub total_items: usize,
+    /// Aggregate items per second across all workers
+    pub cluster_items_per_sec: f64,
     /// Job elapsed time in seconds
     pub elapsed_secs: f64,
     /// Estimated time remaining in seconds, if calculable
@@ -647,8 +629,8 @@ pub struct DashboardWorker {
     pub last_seen_secs: f64,
     /// Latest telemetry snapshot
     pub latest: Option<TelemetrySnapshot>,
-    /// Total rows reported by this worker
-    pub total_rows: usize,
+    /// Total items reported by this worker
+    pub total_items: usize,
     /// Total partitions completed by this worker
     pub partitions_completed: usize,
     /// Currently assigned task, if any

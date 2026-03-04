@@ -45,7 +45,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::QueryEngine;
+    /// use genohype_core::query::QueryEngine;
     ///
     /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
     /// ```
@@ -64,7 +64,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::QueryEngine;
+    /// use genohype_core::query::QueryEngine;
     ///
     /// // Local file
     /// let engine = QueryEngine::open_path("data/my_table.ht").unwrap();
@@ -173,8 +173,8 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::{QueryEngine, KeyValue};
-    /// use hail_decoder::codec::EncodedValue;
+    /// use genohype_core::query::{QueryEngine, KeyValue};
+    /// use genohype_core::codec::EncodedValue;
     ///
     /// let mut engine = QueryEngine::open("data/my_table.ht").unwrap();
     ///
@@ -200,7 +200,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::{QueryEngine, KeyRange, KeyValue};
+    /// use genohype_core::query::{QueryEngine, KeyRange, KeyValue};
     ///
     /// let mut engine = QueryEngine::open("data/my_table.ht").unwrap();
     ///
@@ -273,7 +273,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::{QueryEngine, KeyRange, KeyValue};
+    /// use genohype_core::query::{QueryEngine, KeyRange, KeyValue};
     ///
     /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
     ///
@@ -314,7 +314,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::{QueryEngine, KeyRange, IntervalList};
+    /// use genohype_core::query::{QueryEngine, KeyRange, IntervalList};
     /// use std::sync::Arc;
     ///
     /// let engine = QueryEngine::open("data/my_table.ht").unwrap();
@@ -347,7 +347,7 @@ impl QueryEngine {
     ///
     /// # Example
     /// ```no_run
-    /// use hail_decoder::query::QueryEngine;
+    /// use genohype_core::query::QueryEngine;
     ///
     /// let engine = QueryEngine::open_path("data/variants.vcf.gz").unwrap();
     ///

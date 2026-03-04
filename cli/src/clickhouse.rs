@@ -149,7 +149,7 @@ echo "ClickHouse installation complete"
         "\n{} ClickHouse will be available in ~2-3 minutes.",
         "Note:".cyan()
     );
-    println!("  Check status: hail-decoder clickhouse show {}", name);
+    println!("  Check status: genohype clickhouse show {}", name);
 
     Ok(())
 }

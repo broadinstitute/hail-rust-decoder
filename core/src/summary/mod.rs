@@ -10,8 +10,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use hail_decoder::summary::{format_schema, StatsAccumulator};
-//! use hail_decoder::query::QueryEngine;
+//! use genohype_core::summary::{format_schema, StatsAccumulator};
+//! use genohype_core::query::QueryEngine;
 //!
 //! // Format a schema for display
 //! let formatted = format_schema("struct{locus:Locus(GRCh38),alleles:Array[str]}");

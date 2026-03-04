@@ -1,4 +1,4 @@
-//! Configuration file support for hail-decoder.
+//! Configuration file support for genohype.
 //!
 //! Loads configuration from TOML files, supporting:
 //! - Global defaults (project, zone, network)
@@ -7,9 +7,9 @@
 //!
 //! Configuration is loaded from (in order of precedence):
 //! 1. Path specified via `--config` CLI flag
-//! 2. `$XDG_CONFIG_HOME/hail-decoder/config.toml`
-//! 3. `~/.config/hail-decoder/config.toml`
-//! 4. `./hail-decoder.toml` (current directory)
+//! 2. `$XDG_CONFIG_HOME/genohype/config.toml`
+//! 3. `~/.config/genohype/config.toml`
+//! 4. `./genohype.toml` (current directory)
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -174,7 +174,7 @@ impl Default for ClickHouseProfile {
 /// Then source your USB secrets before running:
 /// ```bash
 /// source /Volumes/USB_NAME/bootstrap/secrets.sh
-/// hail-decoder pool create dev --with-coordinator
+/// genohype pool create dev --with-coordinator
 /// ```
 #[derive(Debug, Deserialize, Clone)]
 pub struct WireGuardConfig {
@@ -231,9 +231,9 @@ impl Config {
     /// Load configuration from the default search paths.
     ///
     /// Searches in order:
-    /// 1. `$XDG_CONFIG_HOME/hail-decoder/config.toml`
-    /// 2. `~/.config/hail-decoder/config.toml`
-    /// 3. `./hail-decoder.toml`
+    /// 1. `$XDG_CONFIG_HOME/genohype/config.toml`
+    /// 2. `~/.config/genohype/config.toml`
+    /// 3. `./genohype.toml`
     ///
     /// Returns default config if no file is found.
     pub fn load() -> Self {
@@ -244,8 +244,8 @@ impl Config {
     ///
     /// Resolution order:
     /// 1. If explicit path provided, use it
-    /// 2. Walk up from current dir looking for `hail-decoder.toml` or `.hail-decoder/config.toml`
-    /// 3. Load user config from `~/.config/hail-decoder/config.toml` and merge (project takes precedence)
+    /// 2. Walk up from current dir looking for `genohype.toml` or `.genohype/config.toml`
+    /// 3. Load user config from `~/.config/genohype/config.toml` and merge (project takes precedence)
     pub fn load_from_path(path: Option<&str>) -> Self {
         // If explicit path provided, use it
         if let Some(p) = path {
@@ -262,8 +262,8 @@ impl Config {
 
         // 2. Try to load user config
         let user_paths = [
-            dirs::home_dir().map(|h| h.join(".config").join("hail-decoder").join("config.toml")),
-            dirs::config_dir().map(|c| c.join("hail-decoder").join("config.toml")),
+            dirs::home_dir().map(|h| h.join(".config").join("genohype").join("config.toml")),
+            dirs::config_dir().map(|c| c.join("genohype").join("config.toml")),
         ];
 
         let user_config = user_paths
@@ -319,8 +319,8 @@ impl Config {
         let mut dir = std::env::current_dir().ok()?;
         loop {
             let candidates = [
-                dir.join("hail-decoder.toml"),
-                dir.join(".hail-decoder").join("config.toml"),
+                dir.join("genohype.toml"),
+                dir.join(".genohype").join("config.toml"),
             ];
             for candidate in candidates {
                 if candidate.exists() {
@@ -338,18 +338,18 @@ impl Config {
     fn config_search_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // ~/.config/hail-decoder/config.toml (Linux/macOS convention)
+        // ~/.config/genohype/config.toml (Linux/macOS convention)
         if let Some(home) = dirs::home_dir() {
-            paths.push(home.join(".config").join("hail-decoder").join("config.toml"));
+            paths.push(home.join(".config").join("genohype").join("config.toml"));
         }
 
         // XDG config home (~/Library/Application Support on macOS)
         if let Some(config_dir) = dirs::config_dir() {
-            paths.push(config_dir.join("hail-decoder").join("config.toml"));
+            paths.push(config_dir.join("genohype").join("config.toml"));
         }
 
         // Current directory
-        paths.push(PathBuf::from("hail-decoder.toml"));
+        paths.push(PathBuf::from("genohype.toml"));
 
         paths
     }
@@ -541,10 +541,10 @@ pub struct ClustersConfig {
 }
 
 // =============================================================================
-// Environment Configuration (.hail-decoder-env)
+// Environment Configuration (.genohype-env)
 // =============================================================================
 
-/// Environment configuration loaded from `.hail-decoder-env` file.
+/// Environment configuration loaded from `.genohype-env` file.
 ///
 /// This file ties together storage location and ClickHouse instance for a
 /// specific working environment. It's auto-discovered by walking up from
@@ -569,23 +569,23 @@ pub struct HailEnv {
 }
 
 impl HailEnv {
-    /// Load .hail-decoder-env from current directory or walk up to find it.
+    /// Load .genohype-env from current directory or walk up to find it.
     pub fn load() -> Option<Self> {
         Self::find_env_file().and_then(|path| Self::load_file(&path).ok())
     }
 
-    /// Load .hail-decoder-env from a specific path.
+    /// Load .genohype-env from a specific path.
     pub fn load_file(path: &PathBuf) -> Result<Self, String> {
         let content =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read .hail-decoder-env: {}", e))?;
-        toml::from_str(&content).map_err(|e| format!("Failed to parse .hail-decoder-env: {}", e))
+            std::fs::read_to_string(path).map_err(|e| format!("Failed to read .genohype-env: {}", e))?;
+        toml::from_str(&content).map_err(|e| format!("Failed to parse .genohype-env: {}", e))
     }
 
-    /// Find .hail-decoder-env by walking up from current directory.
+    /// Find .genohype-env by walking up from current directory.
     fn find_env_file() -> Option<PathBuf> {
         let mut dir = std::env::current_dir().ok()?;
         loop {
-            let candidate = dir.join(".hail-decoder-env");
+            let candidate = dir.join(".genohype-env");
             if candidate.exists() {
                 return Some(candidate);
             }

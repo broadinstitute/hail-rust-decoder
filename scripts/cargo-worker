@@ -2,8 +2,8 @@
 # cargo-worker: Build Linux worker binary and install to target/release
 #
 # This script can be invoked as `cargo worker` when in PATH.
-# It cross-compiles hail-decoder for Linux and copies it to target/release/hail-decoder-worker
-# so that `hail-decoder pool submit` can find it automatically.
+# It cross-compiles genohype for Linux and copies it to target/release/genohype-worker
+# so that `genohype pool submit` can find it automatically.
 #
 # Usage:
 #   cargo worker                        # Build with default features
@@ -30,6 +30,6 @@ ulimit -n 16384 2>/dev/null || ulimit -n 8192 2>/dev/null || true
 cargo zigbuild --target x86_64-unknown-linux-gnu --release "$@"
 
 mkdir -p target/release
-cp target/x86_64-unknown-linux-gnu/release/hail-decoder target/release/hail-decoder-worker
+cp target/x86_64-unknown-linux-gnu/release/genohype target/release/genohype-worker
 
-echo "Installed: target/release/hail-decoder-worker"
+echo "Installed: target/release/genohype-worker"

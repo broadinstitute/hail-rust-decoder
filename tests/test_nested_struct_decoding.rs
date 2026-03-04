@@ -3,9 +3,9 @@
 ///! This test isolates the `interval` field decoding to verify that nested structs
 ///! correctly read their own bitmaps.
 
-use hail_decoder::buffer::InputBuffer;
-use hail_decoder::codec::{EncodedField, EncodedType, EncodedValue};
-use hail_decoder::Result;
+use genohype_core::buffer::InputBuffer;
+use genohype_core::codec::{EncodedField, EncodedType, EncodedValue};
+use genohype_core::Result;
 use std::io::{Cursor, Read};
 
 /// Simple buffer wrapper for testing that implements InputBuffer

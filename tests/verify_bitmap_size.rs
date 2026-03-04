@@ -6,7 +6,7 @@
 ///! 3. Try interpreting with 5-byte bitmap (old schema hypothesis)
 ///! 4. See which interpretation makes sense
 
-use hail_decoder::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
+use genohype_core::buffer::{BlockingBuffer, InputBuffer, StreamBlockBuffer, ZstdBuffer};
 use std::fs::File;
 
 #[test]

@@ -1,5 +1,5 @@
-use hail_decoder::buffer::{BufferBuilder, InputBuffer};
-use hail_decoder::codec::{EncodedValue, ETypeParser};
+use genohype_core::buffer::{BufferBuilder, InputBuffer};
+use genohype_core::codec::{EncodedValue, ETypeParser};
 use std::fs;
 
 #[test]

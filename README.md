@@ -27,16 +27,16 @@ cargo build --release --features full
 
 ```bash
 # View table metadata
-hail-decoder info path/to/table.ht
+genohype info path/to/table.ht
 
 # Query with filters
-hail-decoder query path/to/table.ht --where ancestry=EUR --limit 10
+genohype query path/to/table.ht --where ancestry=EUR --limit 10
 
 # Export to Parquet
-hail-decoder export parquet path/to/table.ht output.parquet
+genohype export parquet path/to/table.ht output.parquet
 
 # Query cloud tables directly
-hail-decoder info "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht"
+genohype info "gs://gcp-public-data--gnomad/release/4.1/ht/exomes/gnomad.exomes.v4.1.sites.ht"
 ```
 
 ## Commands
@@ -47,13 +47,13 @@ Show table metadata without scanning data (fast).
 
 ```bash
 # Hail table
-hail-decoder info data/variants.ht
+genohype info data/variants.ht
 
 # VCF file
-hail-decoder info data/variants.vcf.bgz
+genohype info data/variants.vcf.bgz
 
 # Cloud table
-hail-decoder info "gs://bucket/path/to/table.ht"
+genohype info "gs://bucket/path/to/table.ht"
 ```
 
 ### summary
@@ -61,7 +61,7 @@ hail-decoder info "gs://bucket/path/to/table.ht"
 Full scan to calculate row counts and field statistics.
 
 ```bash
-hail-decoder summary data/analysis-meta.ht
+genohype summary data/analysis-meta.ht
 ```
 
 ### query
@@ -70,31 +70,31 @@ Stream rows with optional filtering.
 
 ```bash
 # Basic query with limit
-hail-decoder query data/table.ht --limit 10
+genohype query data/table.ht --limit 10
 
 # Filter by field value
-hail-decoder query data/table.ht --where ancestry=EUR --limit 10
+genohype query data/table.ht --where ancestry=EUR --limit 10
 
 # Multiple filters
-hail-decoder query data/table.ht --where ancestry=EUR --where trait_type=binary --limit 10
+genohype query data/table.ht --where ancestry=EUR --where trait_type=binary --limit 10
 
 # Nested field filters
-hail-decoder query data/table.ht --where "locus.contig=chr1" --where "locus.position>=55039447"
+genohype query data/table.ht --where "locus.contig=chr1" --where "locus.position>=55039447"
 
 # JSON output
-hail-decoder query data/table.ht --limit 5 --json
+genohype query data/table.ht --limit 5 --json
 
 # Genomic interval filtering
-hail-decoder query data/table.ht --interval "chr10:121500000-121600000" --limit 10
+genohype query data/table.ht --interval "chr10:121500000-121600000" --limit 10
 
 # Multiple intervals
-hail-decoder query data/table.ht \
+genohype query data/table.ht \
   --interval "chr10:121500000-121600000" \
   --interval "chr20:35400000-35500000" \
   --limit 10
 
 # Intervals from file (BED, JSON, or text format)
-hail-decoder query data/table.ht --intervals-file regions.bed --limit 10
+genohype query data/table.ht --intervals-file regions.bed --limit 10
 ```
 
 ### export parquet
@@ -103,13 +103,13 @@ Convert to Parquet format with optional filtering.
 
 ```bash
 # Basic export
-hail-decoder export parquet data/table.ht output.parquet
+genohype export parquet data/table.ht output.parquet
 
 # With filters
-hail-decoder export parquet data/table.ht output.parquet --where ancestry=EUR
+genohype export parquet data/table.ht output.parquet --where ancestry=EUR
 
 # With interval filter
-hail-decoder export parquet data/table.ht output.parquet --interval "chr10:121500000-121600000"
+genohype export parquet data/table.ht output.parquet --interval "chr10:121500000-121600000"
 
 # Query with DuckDB
 duckdb -c "SELECT * FROM 'output.parquet' LIMIT 5"
@@ -120,7 +120,7 @@ duckdb -c "SELECT * FROM 'output.parquet' LIMIT 5"
 Export to Hail table format (useful for subsetting).
 
 ```bash
-hail-decoder export hail data/table.ht /tmp/subset.ht --interval "chr10:121500000-121600000"
+genohype export hail data/table.ht /tmp/subset.ht --interval "chr10:121500000-121600000"
 ```
 
 ### export vcf
@@ -129,7 +129,7 @@ Export to VCF format.
 
 ```bash
 # Export with bgzip compression
-hail-decoder export vcf data/variants.vcf.bgz output.vcf.gz --interval "chrX:31097677-31098000" --bgzip
+genohype export vcf data/variants.vcf.bgz output.vcf.gz --interval "chrX:31097677-31098000" --bgzip
 ```
 
 ### export clickhouse
@@ -137,7 +137,7 @@ hail-decoder export vcf data/variants.vcf.bgz output.vcf.gz --interval "chrX:310
 Export to ClickHouse database (requires `--features clickhouse`).
 
 ```bash
-hail-decoder export clickhouse \
+genohype export clickhouse \
   data/variants.ht \
   "http://user:pass@localhost:8123" \
   target_table \
@@ -152,7 +152,7 @@ curl -s "http://user:pass@localhost:8123" --data "SELECT * FROM target_table LIM
 Export to BigQuery (requires `--features bigquery`).
 
 ```bash
-hail-decoder export bigquery \
+genohype export bigquery \
   data/variants.ht \
   project:dataset.table \
   --bucket staging-bucket \
@@ -168,10 +168,10 @@ Generate JSON schema from table.
 
 ```bash
 # Print to stdout
-hail-decoder schema generate data/table.ht
+genohype schema generate data/table.ht
 
 # Save to file
-hail-decoder schema generate data/table.ht schema.json
+genohype schema generate data/table.ht schema.json
 ```
 
 ### schema validate
@@ -180,13 +180,13 @@ Validate table data against JSON schema.
 
 ```bash
 # Validate first N rows
-hail-decoder schema validate data/table.ht schema.json --limit 100
+genohype schema validate data/table.ht schema.json --limit 100
 
 # Validate random sample (faster for large tables)
-hail-decoder schema validate data/table.ht schema.json --sample 1000
+genohype schema validate data/table.ht schema.json --sample 1000
 
 # Stop on first error
-hail-decoder schema validate data/table.ht schema.json --fail-fast
+genohype schema validate data/table.ht schema.json --fail-fast
 ```
 
 ## Feature Flags
@@ -215,20 +215,20 @@ cargo build --release --features full
 
 ## VCF Support
 
-hail-decoder can read and query VCF files directly, with support for tabix indexing.
+genohype can read and query VCF files directly, with support for tabix indexing.
 
 ```bash
 # View VCF metadata
-hail-decoder info data/variants.vcf.bgz
+genohype info data/variants.vcf.bgz
 
 # Query with interval (uses tabix index if available)
-hail-decoder query data/variants.vcf.bgz --interval "chrX:31097677-31100000" --limit 10
+genohype query data/variants.vcf.bgz --interval "chrX:31097677-31100000" --limit 10
 
 # Generate schema from VCF
-hail-decoder schema generate data/variants.vcf.bgz
+genohype schema generate data/variants.vcf.bgz
 
 # Validate VCF with sampling
-hail-decoder schema validate data/variants.vcf.bgz schema.json --sample 10000
+genohype schema validate data/variants.vcf.bgz schema.json --sample 10000
 ```
 
 ## Interval File Formats

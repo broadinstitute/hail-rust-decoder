@@ -2,7 +2,7 @@
 //!
 //! This module provides the `PoolManager` which orchestrates:
 //! - Creating worker VMs
-//! - Deploying the hail-decoder binary
+//! - Deploying the genohype binary
 //! - Submitting distributed jobs
 //! - Streaming logs and aggregating metrics
 //! - Cleaning up resources
@@ -129,7 +129,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         );
 
         let coord_cmd = format!(
-            "nohup /usr/local/bin/hail-decoder service start-coordinator \
+            "nohup /usr/local/bin/genohype service start-coordinator \
              --port 3000 \
              > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid"
         );
@@ -161,7 +161,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             coord_ip
         );
         println!(
-            "  Submit jobs with: hail-decoder pool submit {} -- <command>",
+            "  Submit jobs with: genohype pool submit {} -- <command>",
             pool_name
         );
 
@@ -339,7 +339,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 let mut cmd = self.provider.get_ssh_command(
                     &inst.name,
                     zone,
-                    "test -f /tmp/hail-decoder-ready && echo ready",
+                    "test -f /tmp/genohype-ready && echo ready",
                 );
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::null());
@@ -586,7 +586,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                                 status.failed
                             );
                         }
-                        println!("  Rows:        {}", status.total_rows);
+                        println!("  Rows:        {}", status.total_items);
                         return Ok(());
                     }
                 }
@@ -734,7 +734,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
                 let instance_name = format!("{}-worker-{}", name, next_idx);
                 let tags = format!(
-                    "hail-decoder-worker,pool-{},role-worker",
+                    "genohype-worker,pool-{},role-worker",
                     name
                 );
 
@@ -884,7 +884,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             let mut cmd = self.provider.get_ssh_command(
                 instance_name,
                 zone,
-                "test -f /tmp/hail-decoder-ready && echo ready",
+                "test -f /tmp/genohype-ready && echo ready",
             );
             cmd.stdout(std::process::Stdio::piped());
             cmd.stderr(std::process::Stdio::null());
@@ -970,7 +970,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 std::io::ErrorKind::NotFound,
                 format!(
                     "No coordinator found for pool '{}'. This command requires a coordinator.\n\
-                     Create pool with: hail-decoder pool create {} --with-coordinator",
+                     Create pool with: genohype pool create {} --with-coordinator",
                     name, name
                 ),
             ))
@@ -1000,7 +1000,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 "{}",
                 "Stopping coordinator service for update...".dimmed()
             );
-            let stop_cmd = "pkill -f 'hail-decoder service start-coordinator' || true";
+            let stop_cmd = "pkill -f 'genohype service start-coordinator' || true";
             let _ = self
                 .provider
                 .get_ssh_command(&coordinator.name, zone, stop_cmd)
@@ -1024,7 +1024,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             "Starting coordinator service with new binary...".dimmed()
         );
         let coord_cmd =
-            "nohup /usr/local/bin/hail-decoder service start-coordinator \
+            "nohup /usr/local/bin/genohype service start-coordinator \
              --port 3000 \
              > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
         let status = self
@@ -1210,7 +1210,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             return Err(HailError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "No running instances found for pool '{}'. Create with: hail-decoder pool create {}",
+                    "No running instances found for pool '{}'. Create with: genohype pool create {}",
                     name, name
                 ),
             )));
@@ -1233,7 +1233,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "No workers available for pool '{}'. Either:\n\
-                     - Scale up workers: hail-decoder pool scale {} --workers N\n\
+                     - Scale up workers: genohype pool scale {} --workers N\n\
                      - Use --autoscale to automatically scale workers for the job",
                     name, name
                 ),
@@ -1292,7 +1292,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
                 // Stop any existing coordinator first (to avoid "Address already in use")
                 println!("{}", "Stopping existing coordinator...".dimmed());
-                let stop_cmd = "pkill -f 'hail-decoder service start-coordinator' || true";
+                let stop_cmd = "pkill -f 'genohype service start-coordinator' || true";
                 let _ = self
                     .provider
                     .get_ssh_command(&coord.name, zone, stop_cmd)
@@ -1313,7 +1313,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                     "Starting coordinator service to serve binary...".dimmed()
                 );
                 let coord_cmd =
-                    "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                    "nohup /usr/local/bin/genohype service start-coordinator \
                      --port 3000 \
                      > /tmp/coordinator.log 2>&1 & echo $! > /tmp/coordinator.pid";
                 let status = self
@@ -1428,7 +1428,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
                 let tx = tx.clone();
 
                 // Build SSH command
-                let remote_cmd = format!("/usr/local/bin/hail-decoder {}", args);
+                let remote_cmd = format!("/usr/local/bin/genohype {}", args);
                 let mut cmd = self.provider.get_ssh_command(&inst_name, &inst_zone, &remote_cmd);
                 cmd.stdout(std::process::Stdio::piped());
                 cmd.stderr(std::process::Stdio::piped());
@@ -1889,7 +1889,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
 
             // Start coordinator service and save PID
             let coord_cmd = format!(
-                "nohup /usr/local/bin/hail-decoder service start-coordinator \
+                "nohup /usr/local/bin/genohype service start-coordinator \
                  --port 3000 \
                  --input '{}' \
                  --output '{}' \
@@ -1989,7 +1989,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             .par_iter()
             .map(|worker| {
                 let worker_cmd = format!(
-                    "nohup /usr/local/bin/hail-decoder service start-worker \
+                    "nohup /usr/local/bin/genohype service start-worker \
                      --url http://{}:3000 \
                      --worker-id {} \
                      > /tmp/worker.log 2>&1 &",
@@ -2126,11 +2126,11 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         instances.par_iter().try_for_each(|inst| {
             // Upload to /tmp first (user writable)
             self.provider
-                .upload_file(binary, "/tmp/hail-decoder", &inst.name, zone)?;
+                .upload_file(binary, "/tmp/genohype", &inst.name, zone)?;
 
             // Make executable and move to /usr/local/bin (needs sudo)
             let setup_cmd =
-                "chmod +x /tmp/hail-decoder && sudo mv /tmp/hail-decoder /usr/local/bin/hail-decoder";
+                "chmod +x /tmp/genohype && sudo mv /tmp/genohype /usr/local/bin/genohype";
             let status = self
                 .provider
                 .get_ssh_command(&inst.name, zone, setup_cmd)
@@ -2163,12 +2163,12 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             // Download binary from coordinator, install it, and restart worker process
             // The worker process must be restarted to pick up the new binary!
             let curl_cmd = format!(
-                "curl -sL --retry 3 --retry-delay 2 http://{}:3000/api/binary -o /tmp/hail-decoder && \
-                 chmod +x /tmp/hail-decoder && \
-                 sudo mv /tmp/hail-decoder /usr/local/bin/hail-decoder && \
-                 pkill -f 'hail-decoder service start-worker' || true && \
+                "curl -sL --retry 3 --retry-delay 2 http://{}:3000/api/binary -o /tmp/genohype && \
+                 chmod +x /tmp/genohype && \
+                 sudo mv /tmp/genohype /usr/local/bin/genohype && \
+                 pkill -f 'genohype service start-worker' || true && \
                  sleep 1 && \
-                 nohup /usr/local/bin/hail-decoder service start-worker --url http://{}:3000 --worker-id {} > /tmp/worker.log 2>&1 &",
+                 nohup /usr/local/bin/genohype service start-worker --url http://{}:3000 --worker-id {} > /tmp/worker.log 2>&1 &",
                 coordinator_ip, coordinator_ip, worker.name
             );
 
@@ -2296,7 +2296,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             }
 
             // Verify the binary was created
-            let binary_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/hail-decoder");
+            let binary_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/genohype");
             if !binary_path.exists() {
                 return Err(HailError::Io(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -2313,7 +2313,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
             println!("{}", "Building release binary...".dimmed());
 
             let mut cmd = std::process::Command::new("cargo");
-            cmd.args(["build", "--release", "--bin", "hail-decoder"]);
+            cmd.args(["build", "--release", "--bin", "genohype"]);
 
             if !features.is_empty() {
                 cmd.arg("--features");
@@ -2339,8 +2339,8 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
     fn has_bundled_binary(&self) -> bool {
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                // Check for hail-decoder-worker (standard release name)
-                if exe_dir.join("hail-decoder-worker").exists() {
+                // Check for genohype-worker (standard release name)
+                if exe_dir.join("genohype-worker").exists() {
                     return true;
                 }
             }
@@ -2364,7 +2364,7 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         // 1. Try bundled binary (Release mode) - Check next to executable
         if let Ok(exe_path) = std::env::current_exe() {
             if let Some(exe_dir) = exe_path.parent() {
-                let bundled_path = exe_dir.join("hail-decoder-worker");
+                let bundled_path = exe_dir.join("genohype-worker");
                 if bundled_path.exists() {
                     return Ok(bundled_path);
                 }
@@ -2372,13 +2372,13 @@ impl<P: CloudProvider + Sync> PoolManager<P> {
         }
 
         // 2. Try default cross-compile path (Dev mode)
-        let default_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/hail-decoder");
+        let default_path = PathBuf::from("target/x86_64-unknown-linux-gnu/release/genohype");
         if default_path.exists() {
             return Ok(default_path);
         }
 
         // 3. Try release path (if running on Linux)
-        let release_path = PathBuf::from("target/release/hail-decoder");
+        let release_path = PathBuf::from("target/release/genohype");
         if release_path.exists() {
             return Ok(release_path);
         }

@@ -3,8 +3,8 @@
 //! This test traces through the row decoding process to identify
 //! where the byte alignment goes wrong.
 
-use hail_decoder::buffer::{BufferBuilder, InputBuffer};
-use hail_decoder::codec::ETypeParser;
+use genohype_core::buffer::{BufferBuilder, InputBuffer};
+use genohype_core::codec::ETypeParser;
 use std::fs;
 
 #[test]

@@ -1,7 +1,7 @@
 //! Integration tests for the QueryEngine
 
-use hail_decoder::codec::EncodedValue;
-use hail_decoder::query::{KeyRange, KeyValue, QueryEngine};
+use genohype_core::codec::EncodedValue;
+use genohype_core::query::{KeyRange, KeyValue, QueryEngine};
 
 #[test]
 fn test_query_engine_open_table() {
