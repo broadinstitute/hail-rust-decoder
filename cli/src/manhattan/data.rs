@@ -110,15 +110,34 @@ pub struct SidecarImage {
     pub height: u32,
 }
 
+/// Maximum -log10(p) for display (caps underflowed p-values)
+const MAX_NEG_LOG10_P: f64 = 350.0;
+
 /// Extract a `PlotPoint` from a table row.
 ///
 /// Expects the row to have a `locus` struct with `contig` (string) and
 /// `position` (i32), plus a float field named `y_field` for the p-value.
+///
+/// Prefers using `Pvalue_log10` from source data if available (preserves precision
+/// for extremely small p-values that underflow to 0 in f64). Falls back to
+/// computing from raw p-value.
 pub fn extract_plot_data(row: &EncodedValue, y_field: &str) -> Option<PlotPoint> {
     let locus = get_nested_field(row, &["locus"])?;
     let contig = get_nested_field(locus, &["contig"])?.as_string()?;
     let position = get_nested_field(locus, &["position"])?.as_i32()?;
 
+    // Try to get pre-computed Pvalue_log10 from source (preserves precision)
+    let pvalue_log10_field = format!("{}_log10", y_field);
+    let source_neg_log10_p = get_nested_field(row, &[&pvalue_log10_field])
+        .or_else(|| get_nested_field(row, &["Pvalue_log10"]))
+        .and_then(|v| match v {
+            EncodedValue::Float64(f) => Some(*f),
+            EncodedValue::Float32(f) => Some(*f as f64),
+            _ => None,
+        })
+        .filter(|v| v.is_finite());
+
+    // Get raw p-value
     let p_val_obj = get_nested_field(row, &[y_field])?;
     let pvalue = match p_val_obj {
         EncodedValue::Float64(v) => *v,
@@ -126,16 +145,27 @@ pub fn extract_plot_data(row: &EncodedValue, y_field: &str) -> Option<PlotPoint>
         _ => return None,
     };
 
-    // Filter invalid p-values
-    if pvalue <= 0.0 || pvalue > 1.0 || !pvalue.is_finite() {
-        return None;
-    }
+    // Compute neg_log10_p: prefer source field, fallback to computing
+    let neg_log10_p = match source_neg_log10_p {
+        Some(v) => v,
+        None => {
+            if pvalue <= 0.0 {
+                // P-value underflowed to 0 - cap at max displayable value
+                MAX_NEG_LOG10_P
+            } else if pvalue > 1.0 || !pvalue.is_finite() {
+                // Truly invalid p-value
+                return None;
+            } else {
+                -pvalue.log10()
+            }
+        }
+    };
 
     Some(PlotPoint {
         contig,
         position,
         pvalue,
-        neg_log10_p: -pvalue.log10(),
+        neg_log10_p,
     })
 }
 

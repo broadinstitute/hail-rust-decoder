@@ -685,12 +685,12 @@ fn process_joined_row(
 
     // Render point to WG
     render_variant(
-        &v.contig, v.position, v.pvalue, layout, y_scale, renderer,
+        &v.contig, v.position, v.neg_log10_p, layout, y_scale, renderer,
     );
 
     // Render point to per-chromosome plot
     render_variant_per_chrom(
-        &v.contig, v.position, v.pvalue, layout, y_scale,
+        &v.contig, v.position, v.neg_log10_p, layout, y_scale,
         contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
@@ -774,12 +774,12 @@ fn process_single_row(
 
     // Render point to WG
     render_variant(
-        &v.contig, v.position, v.pvalue, layout, y_scale, renderer,
+        &v.contig, v.position, v.neg_log10_p, layout, y_scale, renderer,
     );
 
     // Render point to per-chromosome plot
     render_variant_per_chrom(
-        &v.contig, v.position, v.pvalue, layout, y_scale,
+        &v.contig, v.position, v.neg_log10_p, layout, y_scale,
         contig_lengths, chrom_renderers, chrom_layouts, width, height,
     );
 
@@ -839,7 +839,7 @@ fn process_single_row(
 fn render_variant(
     contig: &str,
     position: i32,
-    pvalue: f64,
+    neg_log10_p: f64,
     layout: &ChromosomeLayout,
     y_scale: &YScale,
     renderer: &mut ManhattanRenderer,
@@ -852,8 +852,7 @@ fn render_variant(
     };
 
     if let Some(x) = layout.get_x(contig_name, position) {
-        let neg_log_p = -pvalue.log10();
-        let y = y_scale.get_y(neg_log_p);
+        let y = y_scale.get_y(neg_log10_p);
         let color = layout.get_color(contig_name);
         renderer.render_point(x, y, color, 0.6);
     }
@@ -864,7 +863,7 @@ fn render_variant(
 fn render_variant_per_chrom(
     contig: &str,
     position: i32,
-    pvalue: f64,
+    neg_log10_p: f64,
     wg_layout: &ChromosomeLayout,
     y_scale: &YScale,
     contig_lengths: &HashMap<String, u32>,
@@ -901,8 +900,7 @@ fn render_variant_per_chrom(
             .or_insert_with(|| ManhattanRenderer::new(width, height));
 
         if let Some(x) = chrom_layout.get_x(contig_for_layout, position) {
-            let neg_log_p = -pvalue.log10();
-            let y = y_scale.get_y(neg_log_p);
+            let y = y_scale.get_y(neg_log10_p);
             // Use same color scheme as WG plot
             let color = wg_layout.get_color(contig_for_layout);
             chrom_renderer.render_point(x, y, color, 0.6);
@@ -910,12 +908,16 @@ fn render_variant_per_chrom(
     }
 }
 
+/// Maximum -log10(p) for display (caps underflowed p-values)
+const MAX_NEG_LOG10_P: f64 = 350.0;
+
 /// Extracted variant fields from a Hail table row.
 #[derive(Debug, Clone)]
 struct ExtractedVariant {
     contig: String,
     position: i32,
     pvalue: f64,
+    neg_log10_p: f64,
     beta: Option<f64>,
     se: Option<f64>,
     af: Option<f64>,
@@ -972,10 +974,27 @@ fn extract_variant_fields(
                 _ => None,
             })?;
 
-        // Skip invalid p-values
-        if pvalue <= 0.0 || pvalue > 1.0 || !pvalue.is_finite() {
-            return None;
-        }
+        // Try to get pre-computed Pvalue_log10 from source (preserves precision)
+        let pvalue_log10_field = format!("{}_log10", y_field);
+        let source_neg_log10_p = get_float(&pvalue_log10_field)
+            .or_else(|| get_float("Pvalue_log10"))
+            .filter(|v| v.is_finite());
+
+        // Compute neg_log10_p: prefer source field, fallback to computing
+        let neg_log10_p = match source_neg_log10_p {
+            Some(v) => v,
+            None => {
+                if pvalue <= 0.0 {
+                    // P-value underflowed to 0 - cap at max displayable value
+                    MAX_NEG_LOG10_P
+                } else if pvalue > 1.0 || !pvalue.is_finite() {
+                    // Truly invalid p-value
+                    return None;
+                } else {
+                    -pvalue.log10()
+                }
+            }
+        };
 
         // Extract beta (optional) - try BETA first, then beta
         let beta = get_float("BETA").or_else(|| get_float("beta"));
@@ -1027,6 +1046,7 @@ fn extract_variant_fields(
             contig,
             position,
             pvalue,
+            neg_log10_p,
             beta,
             se,
             af,
