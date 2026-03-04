@@ -32,3 +32,7 @@ pub mod benchmark;
 
 // Re-export core types for convenience
 pub use genohype_core::{HailError, Result};
+
+// Re-export core modules for backwards compatibility with hail-decoder consumers
+pub use genohype_core::codec;
+pub use genohype_core::query;
